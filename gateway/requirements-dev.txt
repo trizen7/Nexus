@@ -1,0 +1,5 @@
+-r requirements.txt
+pytest==8.3.5
+pytest-asyncio==0.25.3
+aiohttp-cors==0.8.1
+PyYAML==6.0.2

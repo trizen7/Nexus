@@ -1,0 +1,27 @@
+name: 功能建议
+description: 提议一个清晰、可维护的改进
+title: "[Feature] "
+labels: [enhancement]
+body:
+  - type: textarea
+    attributes:
+      label: 使用场景
+      description: 请先说明用户遇到的真实问题，而不是只描述实现方案
+    validations:
+      required: true
+  - type: textarea
+    attributes:
+      label: 建议方案
+    validations:
+      required: true
+  - type: textarea
+    attributes:
+      label: 其他方案与代价
+  - type: checkboxes
+    attributes:
+      label: 范围确认
+      options:
+        - label: 此建议不会要求把 Hermes 主密钥放入 App
+          required: true
+        - label: 此建议不会增加客户或普通用户不必要的技术负担
+          required: true

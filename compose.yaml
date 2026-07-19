@@ -1,0 +1,29 @@
+services:
+  nexus-gateway:
+    build:
+      context: ./gateway
+      dockerfile: Dockerfile
+    image: nexus-mobile-gateway:0.0.1
+    container_name: nexus-gateway
+    restart: unless-stopped
+    environment:
+      NEXUS_GATEWAY_HOST: 0.0.0.0
+      NEXUS_GATEWAY_PORT: 8787
+      NEXUS_CONFIG_FILE: /data/config.json
+      NEXUS_CREDENTIALS_FILE: /data/account.json
+      NEXUS_MEDIA_DIR: /data/media
+    ports:
+      - "8787:8787"
+    volumes:
+      - ./data:/data
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8787/health', timeout=3).read()"]
+      interval: 30s
+      timeout: 5s
+      start_period: 10s
+      retries: 3
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"

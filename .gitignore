@@ -1,0 +1,42 @@
+# OS / editors
+.DS_Store
+Thumbs.db
+.idea/
+.vscode/
+*.iml
+
+# Secrets and local configuration
+.env
+.env.*
+!.env.example
+local.properties
+*.jks
+*.keystore
+*.pem
+*.key
+
+# Android
+android/.gradle/
+android/**/build/
+*.apk
+*.aab
+!android/gradle/wrapper/gradle-wrapper.jar
+
+# Python
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Runtime and user data
+data/
+gateway/data/
+gateway/logs/
+*.log
+
+# Temporary files
+*.tmp
+*.part
