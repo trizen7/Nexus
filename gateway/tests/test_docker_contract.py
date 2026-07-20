@@ -30,6 +30,9 @@ def test_compose_persists_data_and_does_not_embed_secrets():
     assert service["environment"]["NEXUS_CONFIG_FILE"] == "/data/config.json"
     assert service["environment"]["NEXUS_MEDIA_DIR"] == "/data/media"
     assert service["environment"]["NEXUS_CREDENTIALS_FILE"] == "/data/account.json"
+    assert service["environment"]["NEXUS_BOOTSTRAP_TOKEN_FILE"] == "/data/bootstrap.token"
+    assert "NEXUS_MAX_TOTAL_STORAGE_BYTES" in service["environment"]
+    assert "NEXUS_MIN_FREE_DISK_BYTES" in service["environment"]
     assert "NEXUS_PASSWORD" not in service["environment"]
     assert "HERMES_API_TOKEN" not in service["environment"]
     assert service["logging"]["options"] == {"max-size": "10m", "max-file": "3"}

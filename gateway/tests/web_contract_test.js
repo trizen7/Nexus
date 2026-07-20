@@ -34,6 +34,7 @@ if (!markdown.includes('<table>') || !markdown.includes('<th>名称</th>') || !m
 if (typeof context.initializePage !== 'function') throw Error('Setup status bootstrap missing');
 if (typeof context.submitSetup !== 'function') throw Error('Setup submission missing');
 if (!source.includes("fetch('/api/setup/status')") || !source.includes("fetch('/api/setup'")) throw Error('Setup API contract missing');
+if (!source.includes("bootstrap_token:$('setupBootstrapToken').value")) throw Error('Bootstrap token setup contract missing');
 if (typeof context.copyMessage !== 'function') throw Error('Message copy action missing');
 if (typeof context.handleComposerKeydown !== 'function') throw Error('Composer keyboard handler missing');
 if (!/\.conversation-rows\{[^}]*flex:1[^}]*min-height:0[^}]*overflow(?:-y)?:auto/s.test(css)) throw Error('Conversation list is not an internal scroll region');

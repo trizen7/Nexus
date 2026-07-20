@@ -1,6 +1,7 @@
 import asyncio
 import io
 import json
+import shutil
 from pathlib import Path
 
 import pytest
@@ -8,7 +9,13 @@ import pytest_asyncio
 from aiohttp import FormData, web
 from aiohttp.test_utils import TestClient, TestServer
 
-from nexus_gateway.app import MEDIA_STORE_KEY, MediaStore, RunTracker, create_app
+from nexus_gateway.app import (
+    CREDENTIALS_PATH_KEY,
+    MEDIA_STORE_KEY,
+    MediaStore,
+    RunTracker,
+    create_app,
+)
 
 
 @pytest_asyncio.fixture
@@ -163,6 +170,76 @@ async def test_uninitialized_gateway_starts_in_setup_mode(tmp_path: Path):
 
 
 @pytest.mark.asyncio
+async def test_setup_requires_one_time_bootstrap_token(tmp_path: Path, upstream_client: TestClient):
+    token_path = tmp_path / "bootstrap.token"
+    app = create_app(
+        username=None,
+        password=None,
+        session_secret=None,
+        upstream_url=None,
+        upstream_token=None,
+        storage_dir=tmp_path / "media",
+        credentials_path=tmp_path / "account.json",
+        config_path=tmp_path / "config.json",
+        bootstrap_token_path=token_path,
+        transcribe_audio=lambda _path: {"success": False, "transcript": ""},
+    )
+    token = token_path.read_text(encoding="utf-8").strip()
+    assert len(token) >= 32
+
+    async with TestClient(TestServer(app)) as client:
+        payload = {
+            "username": "admin",
+            "password": "strong-password",
+            "hermes_api_url": str(upstream_client.make_url("/")).rstrip("/"),
+            "hermes_api_token": "upstream-secret",
+        }
+        denied = await client.post("/api/setup", json=payload)
+        assert denied.status == 403
+        assert (await denied.json())["error"]["code"] == "invalid_bootstrap_token"
+
+        payload["bootstrap_token"] = token
+        created = await client.post("/api/setup", json=payload)
+        assert created.status == 201
+        assert not token_path.exists()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("broken_file", ["config.json", "account.json"])
+async def test_existing_broken_state_fails_closed_instead_of_reopening_setup(tmp_path: Path, broken_file: str):
+    config_path = tmp_path / "config.json"
+    account_path = tmp_path / "account.json"
+    config_path.write_text("{broken" if broken_file == "config.json" else json.dumps({
+        "hermes_api_url": "http://example.test",
+        "hermes_api_token": "secret",
+        "session_secret": "s" * 32,
+    }), encoding="utf-8")
+    account_path.write_text("{broken" if broken_file == "account.json" else json.dumps({
+        "username": "admin",
+        "password": "legacy-password",
+        "revision": 1,
+    }), encoding="utf-8")
+    app = create_app(
+        username=None,
+        password=None,
+        session_secret=None,
+        upstream_url=None,
+        upstream_token=None,
+        storage_dir=tmp_path / "media",
+        credentials_path=account_path,
+        config_path=config_path,
+        bootstrap_token_path=tmp_path / "bootstrap.token",
+        transcribe_audio=lambda _path: {"success": False, "transcript": ""},
+    )
+    async with TestClient(TestServer(app)) as client:
+        status = await client.get("/api/setup/status")
+        assert await status.json() == {"initialized": False, "setup_available": False}
+        setup_response = await client.post("/api/setup", json={})
+        assert setup_response.status == 503
+        assert (await setup_response.json())["error"]["code"] == "configuration_error"
+
+
+@pytest.mark.asyncio
 async def test_setup_creates_admin_and_hermes_configuration(tmp_path: Path, upstream_client: TestClient):
     config_path = tmp_path / "config.json"
     account_path = tmp_path / "account.json"
@@ -178,6 +255,7 @@ async def test_setup_creates_admin_and_hermes_configuration(tmp_path: Path, upst
         transcribe_audio=lambda _path: {"success": False, "transcript": ""},
     )
     async with TestClient(TestServer(app)) as client:
+        bootstrap_token = (tmp_path / "bootstrap.token").read_text(encoding="utf-8").strip()
         response = await client.post(
             "/api/setup",
             json={
@@ -185,6 +263,7 @@ async def test_setup_creates_admin_and_hermes_configuration(tmp_path: Path, upst
                 "password": "strong-password",
                 "hermes_api_url": str(upstream_client.make_url("/")).rstrip("/"),
                 "hermes_api_token": "upstream-secret",
+                "bootstrap_token": bootstrap_token,
             },
         )
         assert response.status == 201
@@ -333,6 +412,157 @@ async def test_login_supports_unicode_credentials(tmp_path: Path, upstream_clien
         )
         assert response.status == 200
         assert (await response.json())["access_token"]
+
+
+@pytest.mark.asyncio
+async def test_legacy_plaintext_account_is_migrated_to_scrypt_after_login(tmp_path: Path, upstream_client: TestClient):
+    account_path = tmp_path / "account.json"
+    config_path = tmp_path / "config.json"
+    account_path.write_text(json.dumps({
+        "username": "legacy-admin",
+        "password": "legacy-password",
+        "revision": 2,
+    }), encoding="utf-8")
+    config_path.write_text(json.dumps({
+        "hermes_api_url": str(upstream_client.make_url("/")).rstrip("/"),
+        "hermes_api_token": "upstream-secret",
+        "session_secret": "s" * 32,
+    }), encoding="utf-8")
+    app = create_app(
+        username=None,
+        password=None,
+        session_secret=None,
+        upstream_url=None,
+        upstream_token=None,
+        storage_dir=tmp_path / "media",
+        credentials_path=account_path,
+        config_path=config_path,
+        transcribe_audio=lambda _path: {"success": True, "transcript": "test"},
+    )
+    async with TestClient(TestServer(app)) as client:
+        response = await client.post("/api/auth/login", json={
+            "username": "legacy-admin", "password": "legacy-password",
+        })
+        assert response.status == 200
+
+    saved = json.loads(account_path.read_text(encoding="utf-8"))
+    assert "password" not in saved
+    assert saved["password_scheme"] == "scrypt"
+    assert saved["password_salt"]
+    assert saved["password_hash"]
+
+
+@pytest.mark.asyncio
+async def test_changed_password_is_stored_as_scrypt_not_plaintext(gateway_client: TestClient):
+    token = await login(gateway_client)
+    changed = await gateway_client.put(
+        "/api/admin/account",
+        json={"current_password": "test-password", "username": "nexus", "password": "new-password-123"},
+        headers={"Authorization": f"Bearer {token}"},
+    )
+    assert changed.status == 200
+    account_path = gateway_client.server.app[CREDENTIALS_PATH_KEY]
+    saved = json.loads(account_path.read_text(encoding="utf-8"))
+    assert "password" not in saved
+    assert saved["password_scheme"] == "scrypt"
+
+
+@pytest.mark.asyncio
+async def test_login_rate_limits_repeated_failures_from_same_ip(tmp_path: Path, upstream_client: TestClient):
+    app = create_app(
+        username="nexus",
+        password="test-password",
+        session_secret="test-session-secret",
+        upstream_url=str(upstream_client.make_url("/")).rstrip("/"),
+        upstream_token="upstream-secret",
+        storage_dir=tmp_path / "media",
+        credentials_path=tmp_path / "auth.json",
+        config_path=tmp_path / "config.json",
+        transcribe_audio=lambda _path: {"success": True, "transcript": "test"},
+        login_rate_limit=3,
+        login_rate_window_seconds=60,
+    )
+    async with TestClient(TestServer(app)) as client:
+        for _ in range(3):
+            response = await client.post(
+                "/api/auth/login",
+                json={"username": "nexus", "password": "wrong-password"},
+            )
+            assert response.status == 401
+        throttled = await client.post(
+            "/api/auth/login",
+            json={"username": "nexus", "password": "wrong-password"},
+        )
+        assert throttled.status == 429
+        body = await throttled.json()
+        assert body["error"]["code"] == "login_throttled"
+        assert "retry_after" in body["error"]
+        assert body["error"]["retry_after"] > 0
+
+
+@pytest.mark.asyncio
+async def test_login_rate_limit_allows_success_before_threshold(tmp_path: Path, upstream_client: TestClient):
+    app = create_app(
+        username="nexus",
+        password="test-password",
+        session_secret="test-session-secret",
+        upstream_url=str(upstream_client.make_url("/")).rstrip("/"),
+        upstream_token="upstream-secret",
+        storage_dir=tmp_path / "media",
+        credentials_path=tmp_path / "auth.json",
+        config_path=tmp_path / "config.json",
+        transcribe_audio=lambda _path: {"success": True, "transcript": "test"},
+        login_rate_limit=5,
+        login_rate_window_seconds=60,
+    )
+    async with TestClient(TestServer(app)) as client:
+        for _ in range(4):
+            response = await client.post(
+                "/api/auth/login",
+                json={"username": "nexus", "password": "wrong"},
+            )
+            assert response.status == 401
+        ok = await client.post(
+            "/api/auth/login",
+            json={"username": "nexus", "password": "test-password"},
+        )
+        assert ok.status == 200
+
+
+@pytest.mark.asyncio
+async def test_login_rate_limit_resets_after_window(tmp_path: Path, upstream_client: TestClient):
+    window = 0.5
+    app = create_app(
+        username="nexus",
+        password="test-password",
+        session_secret="test-session-secret",
+        upstream_url=str(upstream_client.make_url("/")).rstrip("/"),
+        upstream_token="upstream-secret",
+        storage_dir=tmp_path / "media",
+        credentials_path=tmp_path / "auth.json",
+        config_path=tmp_path / "config.json",
+        transcribe_audio=lambda _path: {"success": True, "transcript": "test"},
+        login_rate_limit=2,
+        login_rate_window_seconds=window,
+    )
+    async with TestClient(TestServer(app)) as client:
+        for _ in range(2):
+            response = await client.post(
+                "/api/auth/login",
+                json={"username": "nexus", "password": "wrong"},
+            )
+            assert response.status == 401
+        blocked = await client.post(
+            "/api/auth/login",
+            json={"username": "nexus", "password": "wrong"},
+        )
+        assert blocked.status == 429
+        await asyncio.sleep(window + 0.1)
+        retry = await client.post(
+            "/api/auth/login",
+            json={"username": "nexus", "password": "wrong"},
+        )
+        assert retry.status == 401
 
 
 @pytest.mark.asyncio
@@ -578,8 +808,7 @@ async def test_upload_and_download_use_same_gateway_port(gateway_client: TestCli
     assert item["category"] == "files"
     assert item["date"]
     assert item["download_url"] == f"/api/files/{item['id']}"
-    assert Path(item["server_path"]).parent.name == item["date"]
-    assert Path(item["server_path"]).parent.parent.name == "文件"
+    assert "server_path" not in item
 
     metadata = await gateway_client.get(f"/api/files/{item['id']}/metadata", headers=await auth_headers(gateway_client))
     assert metadata.status == 200
@@ -607,8 +836,7 @@ async def test_audio_upload_is_transcribed_on_server(gateway_client: TestClient)
     assert body["transcript"] == "测试语音"
     assert body["file"]["mime_type"] == "audio/mp4"
     assert body["file"]["category"] == "audio"
-    assert Path(body["file"]["server_path"]).parent.name == body["file"]["date"]
-    assert Path(body["file"]["server_path"]).parent.parent.name == "语音"
+    assert "server_path" not in body["file"]
 
     files = await gateway_client.get("/api/admin/files", headers=await auth_headers(gateway_client))
     audio = await gateway_client.get("/api/admin/audio", headers=await auth_headers(gateway_client))
@@ -645,7 +873,8 @@ async def test_chat_attachment_ids_become_hermes_readable_content(
     assert parts[0] == {"type": "text", "text": "请处理附件"}
     assert parts[1]["type"] == "image_url"
     assert parts[1]["image_url"]["url"].startswith("data:image/png;base64,")
-    assert text_file["server_path"] in parts[2]["text"]
+    assert "服务器路径" not in parts[2]["text"]
+    assert str(gateway_client.server.app[MEDIA_STORE_KEY].root) not in parts[2]["text"]
 
 
 @pytest.mark.asyncio
@@ -745,6 +974,105 @@ async def test_upload_rejects_oversized_file(tmp_path: Path, upstream_client: Te
         form.add_field("file", io.BytesIO(b"12345"), filename="large.bin", content_type="application/octet-stream")
         response = await client.post("/api/uploads", data=form, headers=await auth_headers(client))
         assert response.status == 413
+
+
+@pytest.mark.asyncio
+async def test_upload_rejects_when_total_storage_quota_would_be_exceeded(tmp_path: Path, upstream_client: TestClient):
+    app = create_app(
+        username="nexus",
+        password="test-password",
+        session_secret="test-session-secret",
+        upstream_url=str(upstream_client.make_url("/")).rstrip("/"),
+        upstream_token="upstream-secret",
+        storage_dir=tmp_path / "media",
+        max_upload_bytes=10,
+        max_total_storage_bytes=6,
+        min_free_disk_bytes=0,
+        transcribe_audio=lambda _path: {"success": True, "transcript": "test"},
+    )
+    async with TestClient(TestServer(app)) as client:
+        headers = await auth_headers(client)
+        first = FormData()
+        first.add_field("file", io.BytesIO(b"1234"), filename="first.bin")
+        assert (await client.post("/api/uploads", data=first, headers=headers)).status == 201
+        second = FormData()
+        second.add_field("file", io.BytesIO(b"567"), filename="second.bin")
+        response = await client.post("/api/uploads", data=second, headers=headers)
+        assert response.status == 507
+        assert (await response.json())["error"]["code"] == "storage_quota_exceeded"
+
+
+@pytest.mark.asyncio
+async def test_upload_rejects_when_disk_free_space_reaches_low_water_mark(
+    tmp_path: Path, upstream_client: TestClient, monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.setattr(
+        "nexus_gateway.app.shutil.disk_usage",
+        lambda _path: shutil._ntuple_diskusage(total=1000, used=950, free=50),
+    )
+    app = create_app(
+        username="nexus",
+        password="test-password",
+        session_secret="test-session-secret",
+        upstream_url=str(upstream_client.make_url("/")).rstrip("/"),
+        upstream_token="upstream-secret",
+        storage_dir=tmp_path / "media",
+        min_free_disk_bytes=50,
+        transcribe_audio=lambda _path: {"success": True, "transcript": "test"},
+    )
+    async with TestClient(TestServer(app)) as client:
+        form = FormData()
+        form.add_field("file", io.BytesIO(b"x"), filename="blocked.bin")
+        response = await client.post("/api/uploads", data=form, headers=await auth_headers(client))
+        assert response.status == 507
+        assert (await response.json())["error"]["code"] == "disk_space_low"
+
+
+@pytest.mark.asyncio
+async def test_transcription_failure_does_not_expose_internal_error(tmp_path: Path, upstream_client: TestClient):
+    app = create_app(
+        username="nexus",
+        password="test-password",
+        session_secret="test-session-secret",
+        upstream_url=str(upstream_client.make_url("/")).rstrip("/"),
+        upstream_token="upstream-secret",
+        storage_dir=tmp_path / "media",
+        min_free_disk_bytes=0,
+        transcribe_audio=lambda _path: {
+            "success": False,
+            "error": "secret=/data/private/token and host=internal.example",
+        },
+    )
+    form = FormData()
+    form.add_field("file", io.BytesIO(b"audio"), filename="voice.m4a", content_type="audio/mp4")
+    async with TestClient(TestServer(app)) as client:
+        response = await client.post(
+            "/api/audio/transcriptions", data=form, headers=await auth_headers(client),
+        )
+        assert response.status == 503
+        body = await response.json()
+        assert body["error"] == {"code": "transcription_failed", "message": "语音转写失败"}
+        assert "secret" not in json.dumps(body)
+
+
+@pytest.mark.asyncio
+async def test_unhandled_gateway_error_is_returned_as_sanitized_json(tmp_path: Path):
+    app = create_app(
+        username="nexus",
+        password="test-password",
+        session_secret="test-session-secret",
+        upstream_url="http://127.0.0.1:1",
+        upstream_token="upstream-secret",
+        storage_dir=tmp_path / "media",
+        min_free_disk_bytes=0,
+        transcribe_audio=lambda _path: {"success": True, "transcript": "test"},
+    )
+    async with TestClient(TestServer(app)) as client:
+        response = await client.get("/api/sessions", headers=await auth_headers(client))
+        assert response.status == 502
+        assert await response.json() == {
+            "error": {"code": "gateway_error", "message": "上游服务暂时不可用"}
+        }
 
 
 @pytest.mark.asyncio

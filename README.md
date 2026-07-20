@@ -70,8 +70,9 @@ docker compose up -d
 - 管理员账号和密码；
 - Hermes API Server 地址；
 - Hermes API Server Key。
+- `data/bootstrap.token` 中的一次性初始化令牌。
 
-Nexus 会自动生成 Session Secret，并将配置保存到仓库根目录 `data/`。首次部署不需要创建 `.env`。详细的 NAS、权限、备份、更新和旧网关迁移说明见 `docs/docker-deployment.md`。
+Nexus 会自动生成 Session Secret，并将配置保存到仓库根目录 `data/`。首次启动会创建 `data/bootstrap.token`，令牌不会通过公开 API 回显，初始化成功后文件会自动删除。首次部署不需要创建 `.env`。详细的 NAS、权限、备份、更新和旧网关迁移说明见 `docs/docker-deployment.md`。
 
 也可以直接使用 Python 运行：
 

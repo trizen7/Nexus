@@ -11,7 +11,11 @@ services:
       NEXUS_GATEWAY_PORT: 8787
       NEXUS_CONFIG_FILE: /data/config.json
       NEXUS_CREDENTIALS_FILE: /data/account.json
+      NEXUS_BOOTSTRAP_TOKEN_FILE: /data/bootstrap.token
       NEXUS_MEDIA_DIR: /data/media
+      NEXUS_MAX_UPLOAD_BYTES: 52428800
+      NEXUS_MAX_TOTAL_STORAGE_BYTES: 10737418240
+      NEXUS_MIN_FREE_DISK_BYTES: 536870912
     ports:
       - "8787:8787"
     volumes:

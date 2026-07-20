@@ -15,6 +15,7 @@ Nexus Gateway 推荐使用 Docker Compose 部署。容器只包含移动网关�
 │  ├─ start_gateway.py
 │  └─ nexus_gateway/
 └─ data/
+   ├─ bootstrap.token  # 仅首次初始化前存在
    ├─ config.json
    ├─ account.json
    └─ media/
@@ -36,8 +37,16 @@ http://NAS地址:8787
 - Nexus 管理员密码；
 - Hermes API Server 地址；
 - Hermes API Server Key。
+- 一次性初始化令牌：在宿主机读取 `data/bootstrap.token`，或在容器内读取 `/data/bootstrap.token`。
 
-Nexus 会自动生成 Session Secret。Hermes 配置保存在 `data/config.json`，管理员账号保存在 `data/account.json`，浏览器不会保存或回显 API Key。
+Nexus 会自动生成 Session Secret。Hermes 配置保存在 `data/config.json`，管理员账号保存在 `data/account.json`。初始化令牌不会通过 `/health`、`/api/setup/status` 或其他公开 API 回显，初始化成功后 `bootstrap.token` 会自动删除；浏览器不会保存或回显 API Key。
+
+查看首次初始化令牌（不要粘贴到日志、Issue 或聊天中）：
+
+```bash
+cat data/bootstrap.token
+# 或：docker compose exec nexus-gateway sh -c 'cat /data/bootstrap.token'
+```
 
 如果 Hermes API Server 与网关不在同一容器，请不要填写 `127.0.0.1`；容器内的回环地址只指向容器自身。填写 NAS 主机地址、局域网主机地址或可解析的服务名。
 
@@ -128,6 +137,8 @@ Compose 已配置 Docker `json-file` 日志轮转：
 
 容器不需要数据库或 Redis。账号状态、运行状态和媒体文件保存在 `/data`。
 
+默认存储保护：单文件上限 50 MiB、媒体总配额 10 GiB、磁盘至少保留 512 MiB。可通过 `NEXUS_MAX_UPLOAD_BYTES`、`NEXUS_MAX_TOTAL_STORAGE_BYTES`、`NEXUS_MIN_FREE_DISK_BYTES` 调整；登录限速可通过 `NEXUS_LOGIN_RATE_LIMIT` 和 `NEXUS_LOGIN_RATE_WINDOW_SECONDS` 调整。
+
 ## 8. 从旧星禾网关迁移
 
 以后只维护 Nexus，不再继续更新独立的星禾移动端分支。
@@ -148,6 +159,7 @@ Android 的 Nexus 包名为 `app.nexus.mobile`，它会与旧星禾版并存，�
 
 - 不提交 `gateway/.env` 和 `data/`；
 - Hermes 主 Token 只保存在网关；
+- 首次初始化必须使用 `/data/bootstrap.token` 中的一次性令牌，且令牌不由公开 API 返回；
 - App 只持有 Nexus 登录后签发的设备令牌；
 - 公网必须使用 HTTPS；
 - 定期轮换网关密码、Session Secret 和 Hermes API Token；

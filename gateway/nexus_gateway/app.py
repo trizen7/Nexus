@@ -9,6 +9,7 @@ import mimetypes
 import os
 import re
 import secrets
+import shutil
 import time
 import uuid
 from dataclasses import asdict, dataclass
@@ -35,13 +36,15 @@ USERNAME_KEY = web.AppKey("username", str)
 PASSWORD_KEY = web.AppKey("password", str)
 CREDENTIALS_PATH_KEY = web.AppKey("credentials_path", Path)
 CONFIG_PATH_KEY = web.AppKey("config_path", Path)
+BOOTSTRAP_TOKEN_PATH_KEY = web.AppKey("bootstrap_token_path", Path)
 GATEWAY_CONFIG_KEY = web.AppKey("gateway_config", object)
 AUTH_STATE_KEY = web.AppKey("auth_state", object)
 MEDIA_STORE_KEY = web.AppKey("media_store", object)
 HTTP_SESSION_KEY = web.AppKey("http_session", ClientSession)
 RUN_TRACKER_KEY = web.AppKey("run_tracker", object)
 TRANSCRIBE_AUDIO_KEY = web.AppKey("transcribe_audio", object)
-REQUEST_ATTACHMENT_IDS_KEY = web.AppKey("nexus_attachment_ids", list)
+REQUEST_ATTACHMENT_IDS_KEY = web.RequestKey("nexus_attachment_ids", list)
+LOGIN_RATE_LIMITER_KEY = web.AppKey("login_rate_limiter", object)
 TOKEN_TTL_SECONDS = 30 * 24 * 60 * 60
 PUBLIC_PATHS = {
     "/",
@@ -58,13 +61,16 @@ WEB_ROOT = Path(__file__).with_name("web")
 @dataclass
 class AuthState:
     username: str
-    password: str
+    password_salt: str
+    password_hash: str
+    legacy_password: str = ""
     revision: int = 1
 
 
 @dataclass
 class GatewayConfig:
     initialized: bool
+    setup_available: bool
     session_secret: str
     upstream_url: str
     upstream_token: str
@@ -232,16 +238,41 @@ class StoredFile:
 
     def public_dict(self) -> dict[str, Any]:
         data = asdict(self)
+        data.pop("server_path", None)
         data["date"] = self.date or time.strftime("%Y-%m-%d", time.localtime(self.created_at))
         data["download_url"] = f"/api/files/{self.id}"
         return data
 
 
 class MediaStore:
-    def __init__(self, root: Path, max_upload_bytes: int) -> None:
+    def __init__(
+        self,
+        root: Path,
+        max_upload_bytes: int,
+        max_total_storage_bytes: int = 10 * 1024 * 1024 * 1024,
+        min_free_disk_bytes: int = 512 * 1024 * 1024,
+    ) -> None:
         self.root = Path(root).resolve()
         self.root.mkdir(parents=True, exist_ok=True)
-        self.max_upload_bytes = max_upload_bytes
+        self.max_upload_bytes = max(1, max_upload_bytes)
+        self.max_total_storage_bytes = max(0, max_total_storage_bytes)
+        self.min_free_disk_bytes = max(0, min_free_disk_bytes)
+
+    def _stored_bytes(self) -> int:
+        return sum(item["size"] for item in self.list_files())
+
+    @staticmethod
+    def _storage_error(code: str, message: str) -> web.HTTPInsufficientStorage:
+        return web.HTTPInsufficientStorage(
+            text=json.dumps({"error": {"code": code, "message": message}}, ensure_ascii=False),
+            content_type="application/json",
+        )
+
+    def _check_capacity(self, existing_bytes: int, incoming_bytes: int) -> None:
+        if self.max_total_storage_bytes and existing_bytes + incoming_bytes > self.max_total_storage_bytes:
+            raise self._storage_error("storage_quota_exceeded", "存储空间配额不足，请删除旧文件后重试")
+        if shutil.disk_usage(self.root).free - incoming_bytes < self.min_free_disk_bytes:
+            raise self._storage_error("disk_space_low", "磁盘可用空间不足，请清理空间后重试")
 
     def _metadata_path(self, file_id: str, directory: Path | None = None) -> Path:
         return (directory or self.root) / f"{file_id}.json"
@@ -306,6 +337,8 @@ class MediaStore:
         temp_path = target_dir / f".{file_id}.upload"
         digest = hashlib.sha256()
         size = 0
+        existing_bytes = self._stored_bytes()
+        self._check_capacity(existing_bytes, 0)
         try:
             with temp_path.open("wb") as handle:
                 while True:
@@ -320,6 +353,7 @@ class MediaStore:
                             text=json.dumps({"error": {"code": "file_too_large", "message": "文件超过上传大小限制"}}, ensure_ascii=False),
                             content_type="application/json",
                         )
+                    self._check_capacity(existing_bytes, size)
                     digest.update(chunk)
                     handle.write(chunk)
             temp_path.replace(final_path)
@@ -488,7 +522,15 @@ class MediaStore:
 
 @web.middleware
 async def security_headers(request: web.Request, handler):
-    response = await handler(request)
+    try:
+        response = await handler(request)
+    except web.HTTPException:
+        raise
+    except Exception:
+        response = web.json_response(
+            {"error": {"code": "gateway_error", "message": "上游服务暂时不可用"}},
+            status=502,
+        )
     response.headers.setdefault("X-Content-Type-Options", "nosniff")
     response.headers.setdefault("X-Frame-Options", "DENY")
     response.headers.setdefault("Referrer-Policy", "no-referrer")
@@ -498,6 +540,50 @@ async def security_headers(request: web.Request, handler):
 
 def _secure_text_equal(left: str, right: str) -> bool:
     return hmac.compare_digest(left.encode("utf-8"), right.encode("utf-8"))
+
+
+def _hash_password(password: str, salt: bytes | None = None) -> tuple[str, str]:
+    resolved_salt = salt or secrets.token_bytes(16)
+    digest = hashlib.scrypt(password.encode("utf-8"), salt=resolved_salt, n=2**14, r=8, p=1, dklen=32)
+    return resolved_salt.hex(), digest.hex()
+
+
+def _verify_password(password: str, auth_state: AuthState) -> bool:
+    if auth_state.password_salt and auth_state.password_hash:
+        try:
+            _, candidate = _hash_password(password, bytes.fromhex(auth_state.password_salt))
+        except ValueError:
+            return False
+        return hmac.compare_digest(candidate, auth_state.password_hash)
+    return bool(auth_state.legacy_password) and _secure_text_equal(password, auth_state.legacy_password)
+
+
+class LoginRateLimiter:
+    """Per-IP sliding window limiter for /api/auth/login."""
+
+    def __init__(self, limit: int, window_seconds: float) -> None:
+        self.limit = max(1, limit)
+        self.window = max(0.1, window_seconds)
+        self.attempts: dict[str, list[float]] = {}
+
+    def allow(self, client_ip: str) -> tuple[bool, float]:
+        now = time.time()
+        bucket = self.attempts.get(client_ip, [])
+        cutoff = now - self.window
+        bucket[:] = [t for t in bucket if t > cutoff]
+        if len(bucket) >= self.limit:
+            retry_after = max(0.0, self.window - (now - bucket[0])) if bucket else self.window
+            return False, retry_after
+        bucket.append(now)
+        self.attempts[client_ip] = bucket
+        return True, 0.0
+
+    def record_success(self, client_ip: str) -> None:
+        self.attempts.pop(client_ip, None)
+
+
+def _client_ip(request: web.Request) -> str:
+    return request.remote or "unknown"
 
 
 def _encode_token(username: str, secret: str, revision: int = 1, expires_at: int | None = None) -> str:
@@ -570,7 +656,11 @@ async def web_asset(request: web.Request) -> web.StreamResponse:
 
 
 async def setup_status(request: web.Request) -> web.Response:
-    return web.json_response({"initialized": request.app[GATEWAY_CONFIG_KEY].initialized})
+    config = request.app[GATEWAY_CONFIG_KEY]
+    payload = {"initialized": config.initialized}
+    if not config.initialized and not config.setup_available:
+        payload["setup_available"] = False
+    return web.json_response(payload)
 
 
 async def login(request: web.Request) -> web.Response:
@@ -579,6 +669,17 @@ async def login(request: web.Request) -> web.Response:
             {"error": {"code": "setup_required", "message": "请先完成 Nexus 初始化"}},
             status=503,
         )
+    limiter = request.app[LOGIN_RATE_LIMITER_KEY]
+    client_ip = _client_ip(request)
+    allowed, retry_after = limiter.allow(client_ip)
+    if not allowed:
+        return web.json_response({
+            "error": {
+                "code": "login_throttled",
+                "message": "登录尝试过于频繁，请稍后再试",
+                "retry_after": round(retry_after, 2),
+            }
+        }, status=429)
     try:
         body = await request.json()
     except (json.JSONDecodeError, ValueError):
@@ -586,8 +687,15 @@ async def login(request: web.Request) -> web.Response:
     username = str(body.get("username", ""))
     password = str(body.get("password", ""))
     auth_state = request.app[AUTH_STATE_KEY]
-    if not _secure_text_equal(username, auth_state.username) or not _secure_text_equal(password, auth_state.password):
+    if not _secure_text_equal(username, auth_state.username) or not _verify_password(password, auth_state):
         return web.json_response({"error": {"code": "invalid_credentials", "message": "账号或密码错误"}}, status=401)
+    limiter.record_success(client_ip)
+    if auth_state.legacy_password:
+        salt, password_hash = _hash_password(password)
+        _write_credentials(request.app[CREDENTIALS_PATH_KEY], username, salt, password_hash, auth_state.revision)
+        auth_state.password_salt = salt
+        auth_state.password_hash = password_hash
+        auth_state.legacy_password = ""
     return web.json_response({
         "access_token": _encode_token(username, request.app[GATEWAY_CONFIG_KEY].session_secret, auth_state.revision),
         "token_type": "bearer",
@@ -596,12 +704,14 @@ async def login(request: web.Request) -> web.Response:
     })
 
 
-def _write_credentials(path: Path, username: str, password: str, revision: int) -> None:
+def _write_credentials(path: Path, username: str, password_salt: str, password_hash: str, revision: int) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary = path.with_suffix(path.suffix + ".tmp")
     temporary.write_text(json.dumps({
         "username": username,
-        "password": password,
+        "password_scheme": "scrypt",
+        "password_salt": password_salt,
+        "password_hash": password_hash,
         "revision": revision,
     }, ensure_ascii=False, indent=2), encoding="utf-8")
     temporary.replace(path)
@@ -625,6 +735,11 @@ async def setup(request: web.Request) -> web.Response:
             {"error": {"code": "already_initialized", "message": "Nexus 已完成初始化"}},
             status=409,
         )
+    if not config.setup_available:
+        return web.json_response(
+            {"error": {"code": "configuration_error", "message": "配置状态异常，请检查持久化数据"}},
+            status=503,
+        )
     try:
         body = await request.json()
     except (json.JSONDecodeError, ValueError):
@@ -633,6 +748,17 @@ async def setup(request: web.Request) -> web.Response:
     password = str(body.get("password", ""))
     hermes_api_url = str(body.get("hermes_api_url", "")).strip().rstrip("/")
     hermes_api_token = str(body.get("hermes_api_token", "")).strip()
+    supplied_bootstrap_token = str(body.get("bootstrap_token", ""))
+    token_path = request.app[BOOTSTRAP_TOKEN_PATH_KEY]
+    try:
+        expected_bootstrap_token = token_path.read_text(encoding="utf-8").strip()
+    except OSError:
+        expected_bootstrap_token = ""
+    if not expected_bootstrap_token or not _secure_text_equal(supplied_bootstrap_token, expected_bootstrap_token):
+        return web.json_response(
+            {"error": {"code": "invalid_bootstrap_token", "message": "初始化令牌无效"}},
+            status=403,
+        )
     if len(username) < 3 or len(username) > 48:
         return web.json_response({"error": {"code": "invalid_username", "message": "账号长度应为 3–48 个字符"}}, status=400)
     if len(password) < 8:
@@ -643,15 +769,19 @@ async def setup(request: web.Request) -> web.Response:
         return web.json_response({"error": {"code": "missing_hermes_token", "message": "请填写 Hermes API Server Key"}}, status=400)
     session_secret = secrets.token_urlsafe(48)
     _write_config(request.app[CONFIG_PATH_KEY], hermes_api_url, hermes_api_token, session_secret)
-    _write_credentials(request.app[CREDENTIALS_PATH_KEY], username, password, 1)
+    password_salt, password_hash = _hash_password(password)
+    _write_credentials(request.app[CREDENTIALS_PATH_KEY], username, password_salt, password_hash, 1)
     config.session_secret = session_secret
     config.upstream_url = hermes_api_url
     config.upstream_token = hermes_api_token
     config.initialized = True
     auth_state = request.app[AUTH_STATE_KEY]
     auth_state.username = username
-    auth_state.password = password
+    auth_state.password_salt = password_salt
+    auth_state.password_hash = password_hash
+    auth_state.legacy_password = ""
     auth_state.revision = 1
+    token_path.unlink(missing_ok=True)
     return web.json_response({"initialized": True, "username": username}, status=201)
 
 
@@ -664,16 +794,19 @@ async def change_account(request: web.Request) -> web.Response:
     username = str(body.get("username", "")).strip()
     password = str(body.get("password", ""))
     auth_state = request.app[AUTH_STATE_KEY]
-    if not _secure_text_equal(current_password, auth_state.password):
+    if not _verify_password(current_password, auth_state):
         return web.json_response({"error": {"code": "invalid_current_password", "message": "当前密码错误"}}, status=401)
     if len(username) < 3 or len(username) > 48:
         return web.json_response({"error": {"code": "invalid_username", "message": "账号长度应为 3–48 个字符"}}, status=400)
     if len(password) < 8:
         return web.json_response({"error": {"code": "weak_password", "message": "新密码至少需要 8 个字符"}}, status=400)
     revision = auth_state.revision + 1
-    _write_credentials(request.app[CREDENTIALS_PATH_KEY], username, password, revision)
+    password_salt, password_hash = _hash_password(password)
+    _write_credentials(request.app[CREDENTIALS_PATH_KEY], username, password_salt, password_hash, revision)
     auth_state.username = username
-    auth_state.password = password
+    auth_state.password_salt = password_salt
+    auth_state.password_hash = password_hash
+    auth_state.legacy_password = ""
     auth_state.revision = revision
     return web.json_response({
         "username": username,
@@ -765,7 +898,7 @@ async def transcribe_upload(request: web.Request) -> web.Response:
         result = await asyncio.to_thread(transcriber, item.server_path)
         if not result.get("success"):
             return web.json_response({
-                "error": {"code": "transcription_failed", "message": result.get("error") or "语音转写失败"},
+                "error": {"code": "transcription_failed", "message": "语音转写失败"},
                 "file": item.public_dict(),
             }, status=503)
         return web.json_response({
@@ -807,7 +940,7 @@ def _attachment_part(item: StoredFile, path: Path, kind: str | None = None) -> d
     if item.mime_type in IMAGE_MIME_TYPES and kind != "file":
         encoded = base64.b64encode(path.read_bytes()).decode("ascii")
         return {"type": "image_url", "image_url": {"url": f"data:{item.mime_type};base64,{encoded}"}}
-    note = f"附件：{item.name}\n类型：{item.mime_type}\n大小：{item.size} 字节\n服务器路径：{path}"
+    note = f"附件：{item.name}\n类型：{item.mime_type}\n大小：{item.size} 字节"
     if item.mime_type in TEXT_MIME_TYPES and item.size <= 512 * 1024:
         try:
             text = path.read_text(encoding="utf-8")
@@ -1015,8 +1148,8 @@ async def _tracked_session_stream(request: web.Request) -> web.StreamResponse:
             attachment_ids = request.get(REQUEST_ATTACHMENT_IDS_KEY, [])
             if attachment_ids:
                 request.app[MEDIA_STORE_KEY].discard_last_session_media(session_id, attachment_ids)
-            tracker.finish(session_id, "failed", str(exc))
-            payload = json.dumps({"message": str(exc)}, ensure_ascii=False)
+            tracker.finish(session_id, "failed", "上游服务暂时不可用")
+            payload = json.dumps({"message": "上游服务暂时不可用"}, ensure_ascii=False)
             tracker.publish(session_id, f"event: error\ndata: {payload}\n\n".encode("utf-8"))
         finally:
             if upstream is not None:
@@ -1059,17 +1192,26 @@ def create_app(
     storage_dir: Path,
     credentials_path: Path | None = None,
     config_path: Path | None = None,
+    bootstrap_token_path: Path | None = None,
     max_upload_bytes: int = 50 * 1024 * 1024,
+    max_total_storage_bytes: int = 10 * 1024 * 1024 * 1024,
+    min_free_disk_bytes: int = 512 * 1024 * 1024,
+    login_rate_limit: int = 5,
+    login_rate_window_seconds: float = 60.0,
     transcribe_audio: Callable[[str], dict[str, Any]] | None = None,
 ) -> web.Application:
     resolved_config_path = Path(config_path or (Path(storage_dir).resolve().parent / "config.json")).resolve()
     saved_config: dict[str, Any] = {}
-    if resolved_config_path.is_file():
+    config_exists = resolved_config_path.exists()
+    config_valid = not config_exists
+    if config_exists:
         try:
             loaded = json.loads(resolved_config_path.read_text(encoding="utf-8"))
-            saved_config = loaded if isinstance(loaded, dict) else {}
+            if isinstance(loaded, dict):
+                saved_config = loaded
+                config_valid = True
         except (OSError, ValueError, TypeError, json.JSONDecodeError):
-            saved_config = {}
+            config_valid = False
     username = str(saved_config.get("username") or username or "")
     password = str(saved_config.get("password") or password or "")
     session_secret = str(saved_config.get("session_secret") or session_secret or "")
@@ -1080,20 +1222,34 @@ def create_app(
         client_max_size=max_upload_bytes + 1024 * 1024,
     )
     resolved_credentials_path = Path(credentials_path or (Path(storage_dir).resolve().parent / "account.json")).resolve()
+    credentials_exists = resolved_credentials_path.exists()
+    credentials_valid = not credentials_exists
     revision = 1
-    if resolved_credentials_path.is_file():
+    password_salt = ""
+    password_hash = ""
+    legacy_password = ""
+    if credentials_exists:
         try:
             saved_credentials = json.loads(resolved_credentials_path.read_text(encoding="utf-8"))
+            if not isinstance(saved_credentials, dict):
+                raise ValueError("credentials must be an object")
             username = str(saved_credentials.get("username", username))
-            password = str(saved_credentials.get("password", password))
+            legacy_password = str(saved_credentials.get("password", ""))
+            password_salt = str(saved_credentials.get("password_salt", ""))
+            password_hash = str(saved_credentials.get("password_hash", ""))
             revision = max(1, int(saved_credentials.get("revision", 1)))
+            credentials_valid = bool(username and (legacy_password or (password_salt and password_hash)))
         except (OSError, ValueError, TypeError, json.JSONDecodeError):
-            pass
+            credentials_valid = False
     elif username and password:
-        _write_credentials(resolved_credentials_path, username, password, revision)
+        password_salt, password_hash = _hash_password(password)
+        _write_credentials(resolved_credentials_path, username, password_salt, password_hash, revision)
+        credentials_valid = True
     initialized = bool(
-        username
-        and password
+        config_valid
+        and credentials_valid
+        and username
+        and (legacy_password or (password_salt and password_hash))
         and len(session_secret) >= 16
         and upstream_token
         and upstream_url.startswith(("http://", "https://"))
@@ -1104,14 +1260,29 @@ def create_app(
     app[PASSWORD_KEY] = password
     app[CREDENTIALS_PATH_KEY] = resolved_credentials_path
     app[CONFIG_PATH_KEY] = resolved_config_path
+    resolved_bootstrap_token_path = Path(
+        bootstrap_token_path or (resolved_config_path.parent / "bootstrap.token")
+    ).resolve()
+    setup_available = not initialized and config_valid and credentials_valid and not config_exists and not credentials_exists
+    if setup_available and not resolved_bootstrap_token_path.exists():
+        resolved_bootstrap_token_path.parent.mkdir(parents=True, exist_ok=True)
+        resolved_bootstrap_token_path.write_text(secrets.token_urlsafe(32), encoding="utf-8")
+    app[BOOTSTRAP_TOKEN_PATH_KEY] = resolved_bootstrap_token_path
     app[GATEWAY_CONFIG_KEY] = GatewayConfig(
         initialized=initialized,
+        setup_available=setup_available,
         session_secret=session_secret,
         upstream_url=upstream_url.rstrip("/"),
         upstream_token=upstream_token,
     )
-    app[AUTH_STATE_KEY] = AuthState(username, password, revision)
-    app[MEDIA_STORE_KEY] = MediaStore(storage_dir, max_upload_bytes)
+    app[AUTH_STATE_KEY] = AuthState(username, password_salt, password_hash, legacy_password, revision)
+    app[LOGIN_RATE_LIMITER_KEY] = LoginRateLimiter(login_rate_limit, login_rate_window_seconds)
+    app[MEDIA_STORE_KEY] = MediaStore(
+        storage_dir,
+        max_upload_bytes,
+        max_total_storage_bytes,
+        min_free_disk_bytes,
+    )
     app[RUN_TRACKER_KEY] = RunTracker(Path(storage_dir).resolve().parent / "run_status.json")
     if transcribe_audio is None:
         try:
