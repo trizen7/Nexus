@@ -16,7 +16,9 @@ from aiohttp.test_utils import TestClient, TestServer
 
 from nexus_gateway.app import (
     CREDENTIALS_PATH_KEY,
+    GATEWAY_CONFIG_KEY,
     MEDIA_STORE_KEY,
+    SETUP_LOCK_KEY,
     MediaStore,
     RunTracker,
     StoredFile,
@@ -210,6 +212,157 @@ async def test_setup_requires_one_time_bootstrap_token(tmp_path: Path, upstream_
         assert not token_path.exists()
 
 
+@pytest.mark.asyncio
+async def test_concurrent_setup_with_same_token_commits_exactly_one_configuration(
+    tmp_path: Path, upstream_client: TestClient,
+):
+    config_path = tmp_path / "config.json"
+    account_path = tmp_path / "account.json"
+    token_path = tmp_path / "bootstrap.token"
+    app = create_app(
+        username=None,
+        password=None,
+        session_secret=None,
+        upstream_url=None,
+        upstream_token=None,
+        storage_dir=tmp_path / "media",
+        credentials_path=account_path,
+        config_path=config_path,
+        bootstrap_token_path=token_path,
+        transcribe_audio=lambda _path: {"success": False, "transcript": ""},
+    )
+    bootstrap_token = token_path.read_text(encoding="utf-8").strip()
+    assert isinstance(app[SETUP_LOCK_KEY], asyncio.Lock)
+    base_url = str(upstream_client.make_url("/")).rstrip("/")
+    payloads = [
+        {
+            "username": "first-admin",
+            "password": "first-password",
+            "hermes_api_url": base_url,
+            "hermes_api_token": "first-upstream-key",
+            "bootstrap_token": bootstrap_token,
+        },
+        {
+            "username": "second-admin",
+            "password": "second-password",
+            "hermes_api_url": base_url,
+            "hermes_api_token": "second-upstream-key",
+            "bootstrap_token": bootstrap_token,
+        },
+    ]
+
+    async with TestClient(TestServer(app)) as client:
+        responses = await asyncio.gather(*(
+            client.post("/api/setup", json=payload) for payload in payloads
+        ))
+        statuses = [response.status for response in responses]
+        assert statuses.count(201) == 1
+        assert sum(status in {409, 503} for status in statuses) == 1
+
+    winner = payloads[statuses.index(201)]
+    saved_config = json.loads(config_path.read_text(encoding="utf-8"))
+    saved_account = json.loads(account_path.read_text(encoding="utf-8"))
+    assert saved_config["hermes_api_token"] == winner["hermes_api_token"]
+    assert saved_account["username"] == winner["username"]
+
+
+@pytest.mark.asyncio
+async def test_setup_writes_execute_while_application_setup_lock_is_held(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+):
+    import nexus_gateway.app as gateway_app
+
+    token_path = tmp_path / "bootstrap.token"
+    app = create_app(
+        username=None,
+        password=None,
+        session_secret=None,
+        upstream_url=None,
+        upstream_token=None,
+        storage_dir=tmp_path / "media",
+        credentials_path=tmp_path / "account.json",
+        config_path=tmp_path / "config.json",
+        bootstrap_token_path=token_path,
+        transcribe_audio=lambda _path: {"success": False, "transcript": ""},
+    )
+    original_write_config = gateway_app._write_config
+    original_write_credentials = gateway_app._write_credentials
+    observed = []
+
+    def checked_write_config(*args, **kwargs):
+        observed.append(app[SETUP_LOCK_KEY].locked())
+        return original_write_config(*args, **kwargs)
+
+    def checked_write_credentials(*args, **kwargs):
+        observed.append(app[SETUP_LOCK_KEY].locked())
+        return original_write_credentials(*args, **kwargs)
+
+    monkeypatch.setattr(gateway_app, "_write_config", checked_write_config)
+    monkeypatch.setattr(gateway_app, "_write_credentials", checked_write_credentials)
+    async with TestClient(TestServer(app)) as client:
+        response = await client.post("/api/setup", json={
+            "username": "admin",
+            "password": "strong-password",
+            "hermes_api_url": "http://127.0.0.1:9",
+            "hermes_api_token": "upstream-key",
+            "bootstrap_token": token_path.read_text(encoding="utf-8").strip(),
+        })
+    assert response.status == 201
+    assert observed == [True, True]
+
+
+@pytest.mark.asyncio
+async def test_bootstrap_token_directory_fails_closed_without_blocking(tmp_path: Path):
+    token_path = tmp_path / "bootstrap.token"
+    token_path.mkdir()
+    app = create_app(
+        username=None,
+        password=None,
+        session_secret=None,
+        upstream_url=None,
+        upstream_token=None,
+        storage_dir=tmp_path / "media",
+        credentials_path=tmp_path / "account.json",
+        config_path=tmp_path / "config.json",
+        bootstrap_token_path=token_path,
+        transcribe_audio=lambda _path: {"success": False, "transcript": ""},
+    )
+    async with TestClient(TestServer(app)) as client:
+        status = await asyncio.wait_for(client.get("/api/setup/status"), timeout=1)
+        assert await status.json() == {"initialized": False, "setup_available": False}
+        response = await client.post("/api/setup", json={})
+        assert response.status == 503
+        assert (await response.json())["error"]["code"] == "configuration_error"
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX special files are unavailable on Windows")
+@pytest.mark.parametrize("kind", ["symlink", "fifo"])
+def test_bootstrap_token_rejects_posix_non_regular_files_without_blocking(tmp_path: Path, kind: str):
+    token_path = tmp_path / "bootstrap.token"
+    if kind == "symlink":
+        target = tmp_path / "target.token"
+        target.write_text("do-not-follow", encoding="utf-8")
+        token_path.symlink_to(target)
+    else:
+        os.mkfifo(token_path)
+
+    started = time.monotonic()
+    app = create_app(
+        username=None,
+        password=None,
+        session_secret=None,
+        upstream_url=None,
+        upstream_token=None,
+        storage_dir=tmp_path / "media",
+        credentials_path=tmp_path / "account.json",
+        config_path=tmp_path / "config.json",
+        bootstrap_token_path=token_path,
+        transcribe_audio=lambda _path: {"success": False, "transcript": ""},
+    )
+    assert time.monotonic() - started < 1
+    assert app[GATEWAY_CONFIG_KEY].setup_available is False
+
+
 def test_bootstrap_token_creation_is_exclusive(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     token_path = tmp_path / "bootstrap.token"
     generated = iter(("A" * 32, "B" * 32))
@@ -291,6 +444,39 @@ def test_existing_bootstrap_token_permissions_are_tightened(tmp_path: Path):
 
     assert token_path.read_text(encoding="utf-8") == "existing-token"
     assert stat.S_IMODE(token_path.stat().st_mode) == 0o600
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX permission bits are unavailable on Windows")
+def test_existing_bootstrap_token_fails_closed_when_permissions_cannot_be_tightened(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+):
+    import nexus_gateway.app as gateway_app
+
+    token_path = tmp_path / "bootstrap.token"
+    token_path.write_text("existing-token", encoding="utf-8")
+    token_path.chmod(0o666)
+    original_chmod = gateway_app.os.chmod
+
+    def denied_chmod(path, mode, *, dir_fd=None, follow_symlinks=True):
+        if Path(path) == token_path:
+            raise PermissionError("permission change denied")
+        return original_chmod(path, mode, dir_fd=dir_fd, follow_symlinks=follow_symlinks)
+
+    monkeypatch.setattr(gateway_app.os, "chmod", denied_chmod)
+    app = create_app(
+        username=None,
+        password=None,
+        session_secret=None,
+        upstream_url=None,
+        upstream_token=None,
+        storage_dir=tmp_path / "media",
+        credentials_path=tmp_path / "account.json",
+        config_path=tmp_path / "config.json",
+        bootstrap_token_path=token_path,
+        transcribe_audio=lambda _path: {"success": False, "transcript": ""},
+    )
+
+    assert app[GATEWAY_CONFIG_KEY].setup_available is False
 
 
 @pytest.mark.asyncio
@@ -398,6 +584,66 @@ async def test_setup_creates_admin_and_hermes_configuration(tmp_path: Path, upst
             json={"username": "admin", "password": "strong-password"},
         )
         assert login_response.status == 200
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX permission bits are unavailable on Windows")
+@pytest.mark.asyncio
+async def test_setup_persists_config_and_account_with_owner_only_permissions(tmp_path: Path):
+    config_path = tmp_path / "config.json"
+    account_path = tmp_path / "account.json"
+    token_path = tmp_path / "bootstrap.token"
+    app = create_app(
+        username=None,
+        password=None,
+        session_secret=None,
+        upstream_url=None,
+        upstream_token=None,
+        storage_dir=tmp_path / "media",
+        credentials_path=account_path,
+        config_path=config_path,
+        bootstrap_token_path=token_path,
+        transcribe_audio=lambda _path: {"success": False, "transcript": ""},
+    )
+    async with TestClient(TestServer(app)) as client:
+        response = await client.post("/api/setup", json={
+            "username": "admin",
+            "password": "strong-password",
+            "hermes_api_url": "http://127.0.0.1:9",
+            "hermes_api_token": "upstream-key",
+            "bootstrap_token": token_path.read_text(encoding="utf-8").strip(),
+        })
+    assert response.status == 201
+    assert stat.S_IMODE(config_path.stat().st_mode) == 0o600
+    assert stat.S_IMODE(account_path.stat().st_mode) == 0o600
+
+
+@pytest.mark.asyncio
+async def test_setup_secure_writes_leave_no_temporary_files(tmp_path: Path):
+    config_path = tmp_path / "config.json"
+    account_path = tmp_path / "account.json"
+    token_path = tmp_path / "bootstrap.token"
+    app = create_app(
+        username=None,
+        password=None,
+        session_secret=None,
+        upstream_url=None,
+        upstream_token=None,
+        storage_dir=tmp_path / "media",
+        credentials_path=account_path,
+        config_path=config_path,
+        bootstrap_token_path=token_path,
+        transcribe_audio=lambda _path: {"success": False, "transcript": ""},
+    )
+    async with TestClient(TestServer(app)) as client:
+        response = await client.post("/api/setup", json={
+            "username": "admin",
+            "password": "strong-password",
+            "hermes_api_url": "http://127.0.0.1:9",
+            "hermes_api_token": "upstream-key",
+            "bootstrap_token": token_path.read_text(encoding="utf-8").strip(),
+        })
+    assert response.status == 201
+    assert not list(tmp_path.glob(".*.tmp"))
 
 
 async def auth_headers(client: TestClient) -> dict[str, str]:

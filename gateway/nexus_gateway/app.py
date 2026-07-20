@@ -10,6 +10,7 @@ import os
 import re
 import secrets
 import shutil
+import stat
 import time
 import uuid
 from dataclasses import asdict, dataclass
@@ -45,6 +46,7 @@ RUN_TRACKER_KEY = web.AppKey("run_tracker", object)
 TRANSCRIBE_AUDIO_KEY = web.AppKey("transcribe_audio", object)
 REQUEST_ATTACHMENT_IDS_KEY = web.RequestKey("nexus_attachment_ids", list)
 LOGIN_RATE_LIMITER_KEY = web.AppKey("login_rate_limiter", object)
+SETUP_LOCK_KEY = web.AppKey("setup_lock", asyncio.Lock)
 TOKEN_TTL_SECONDS = 30 * 24 * 60 * 60
 PUBLIC_PATHS = {
     "/",
@@ -726,27 +728,21 @@ async def login(request: web.Request) -> web.Response:
 
 
 def _write_credentials(path: Path, username: str, password_salt: str, password_hash: str, revision: int) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_suffix(path.suffix + ".tmp")
-    temporary.write_text(json.dumps({
+    _secure_atomic_write(path, json.dumps({
         "username": username,
         "password_scheme": "scrypt",
         "password_salt": password_salt,
         "password_hash": password_hash,
         "revision": revision,
-    }, ensure_ascii=False, indent=2), encoding="utf-8")
-    temporary.replace(path)
+    }, ensure_ascii=False, indent=2))
 
 
 def _write_config(path: Path, hermes_api_url: str, hermes_api_token: str, session_secret: str) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_suffix(path.suffix + ".tmp")
-    temporary.write_text(json.dumps({
+    _secure_atomic_write(path, json.dumps({
         "hermes_api_url": hermes_api_url.rstrip("/"),
         "hermes_api_token": hermes_api_token,
         "session_secret": session_secret,
-    }, ensure_ascii=False, indent=2), encoding="utf-8")
-    temporary.replace(path)
+    }, ensure_ascii=False, indent=2))
 
 
 async def setup(request: web.Request) -> web.Response:
@@ -770,16 +766,7 @@ async def setup(request: web.Request) -> web.Response:
     hermes_api_url = str(body.get("hermes_api_url", "")).strip().rstrip("/")
     hermes_api_token = str(body.get("hermes_api_token", "")).strip()
     supplied_bootstrap_token = str(body.get("bootstrap_token", ""))
-    token_path = request.app[BOOTSTRAP_TOKEN_PATH_KEY]
-    try:
-        expected_bootstrap_token = token_path.read_text(encoding="utf-8").strip()
-    except OSError:
-        expected_bootstrap_token = ""
-    if not expected_bootstrap_token or not _secure_text_equal(supplied_bootstrap_token, expected_bootstrap_token):
-        return web.json_response(
-            {"error": {"code": "invalid_bootstrap_token", "message": "初始化令牌无效"}},
-            status=403,
-        )
+
     if len(username) < 3 or len(username) > 48:
         return web.json_response({"error": {"code": "invalid_username", "message": "账号长度应为 3–48 个字符"}}, status=400)
     if len(password) < 8:
@@ -788,21 +775,41 @@ async def setup(request: web.Request) -> web.Response:
         return web.json_response({"error": {"code": "invalid_hermes_url", "message": "Hermes 地址必须使用 http:// 或 https://"}}, status=400)
     if not hermes_api_token:
         return web.json_response({"error": {"code": "missing_hermes_token", "message": "请填写 Hermes API Server Key"}}, status=400)
-    session_secret = secrets.token_urlsafe(48)
-    _write_config(request.app[CONFIG_PATH_KEY], hermes_api_url, hermes_api_token, session_secret)
-    password_salt, password_hash = _hash_password(password)
-    _write_credentials(request.app[CREDENTIALS_PATH_KEY], username, password_salt, password_hash, 1)
-    config.session_secret = session_secret
-    config.upstream_url = hermes_api_url
-    config.upstream_token = hermes_api_token
-    config.initialized = True
-    auth_state = request.app[AUTH_STATE_KEY]
-    auth_state.username = username
-    auth_state.password_salt = password_salt
-    auth_state.password_hash = password_hash
-    auth_state.legacy_password = ""
-    auth_state.revision = 1
-    token_path.unlink(missing_ok=True)
+    async with request.app[SETUP_LOCK_KEY]:
+        config = request.app[GATEWAY_CONFIG_KEY]
+        if config.initialized:
+            return web.json_response(
+                {"error": {"code": "already_initialized", "message": "Nexus 已完成初始化"}},
+                status=409,
+            )
+        if not config.setup_available:
+            return web.json_response(
+                {"error": {"code": "configuration_error", "message": "配置状态异常，请检查持久化数据"}},
+                status=503,
+            )
+        token_path = request.app[BOOTSTRAP_TOKEN_PATH_KEY]
+        expected_bootstrap_token = _read_secure_bootstrap_token(token_path)
+        if not expected_bootstrap_token or not _secure_text_equal(supplied_bootstrap_token, expected_bootstrap_token):
+            return web.json_response(
+                {"error": {"code": "invalid_bootstrap_token", "message": "初始化令牌无效"}},
+                status=403,
+            )
+        session_secret = secrets.token_urlsafe(48)
+        _write_config(request.app[CONFIG_PATH_KEY], hermes_api_url, hermes_api_token, session_secret)
+        password_salt, password_hash = _hash_password(password)
+        _write_credentials(request.app[CREDENTIALS_PATH_KEY], username, password_salt, password_hash, 1)
+        token_path.unlink()
+        config.session_secret = session_secret
+        config.upstream_url = hermes_api_url
+        config.upstream_token = hermes_api_token
+        config.initialized = True
+        config.setup_available = False
+        auth_state = request.app[AUTH_STATE_KEY]
+        auth_state.username = username
+        auth_state.password_salt = password_salt
+        auth_state.password_hash = password_hash
+        auth_state.legacy_password = ""
+        auth_state.revision = 1
     return web.json_response({"initialized": True, "username": username}, status=201)
 
 
@@ -1203,25 +1210,101 @@ def _valid_file_id(file_id: str) -> bool:
     return len(file_id) == 32 and all(char in "0123456789abcdef" for char in file_id)
 
 
-def _secure_bootstrap_token_file(path: Path) -> None:
+def _secure_atomic_write(path: Path, content: str) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
+    temporary = path.parent / f".{path.name}.{uuid.uuid4().hex}.tmp"
     flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
     if hasattr(os, "O_BINARY"):
         flags |= os.O_BINARY
+    descriptor = os.open(temporary, flags, 0o600)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as handle:
+            descriptor = -1
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+        if os.name != "nt":
+            os.chmod(temporary, 0o600)
+            if stat.S_IMODE(os.stat(temporary, follow_symlinks=False).st_mode) != 0o600:
+                raise OSError("temporary file permissions are not owner-only")
+        os.replace(temporary, path)
+        if os.name != "nt" and stat.S_IMODE(os.stat(path, follow_symlinks=False).st_mode) != 0o600:
+            raise OSError("persisted file permissions are not owner-only")
+    finally:
+        if descriptor != -1:
+            os.close(descriptor)
+        temporary.unlink(missing_ok=True)
+
+
+def _bootstrap_open_flags(access: int) -> int:
+    flags = access
+    if hasattr(os, "O_BINARY"):
+        flags |= os.O_BINARY
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    if hasattr(os, "O_NONBLOCK"):
+        flags |= os.O_NONBLOCK
+    return flags
+
+
+def _read_secure_bootstrap_token(path: Path) -> str:
+    try:
+        file_stat = path.lstat()
+        if not stat.S_ISREG(file_stat.st_mode) or path.is_symlink():
+            return ""
+        if os.name != "nt" and stat.S_IMODE(file_stat.st_mode) != 0o600:
+            return ""
+        descriptor = os.open(path, _bootstrap_open_flags(os.O_RDONLY))
+        try:
+            opened_stat = os.fstat(descriptor)
+            if not stat.S_ISREG(opened_stat.st_mode):
+                return ""
+            if os.name != "nt" and stat.S_IMODE(opened_stat.st_mode) != 0o600:
+                return ""
+            if (opened_stat.st_dev, opened_stat.st_ino) != (file_stat.st_dev, file_stat.st_ino):
+                return ""
+            with os.fdopen(descriptor, "r", encoding="utf-8") as handle:
+                descriptor = -1
+                return handle.read().strip()
+        finally:
+            if descriptor != -1:
+                os.close(descriptor)
+    except (OSError, UnicodeError):
+        return ""
+
+
+def _secure_bootstrap_token_file(path: Path) -> bool:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    flags = _bootstrap_open_flags(os.O_WRONLY | os.O_CREAT | os.O_EXCL)
     try:
         descriptor = os.open(path, flags, 0o600)
     except FileExistsError:
-        descriptor = None
+        try:
+            existing_stat = path.lstat()
+            if not stat.S_ISREG(existing_stat.st_mode) or path.is_symlink():
+                return False
+            if os.name != "nt":
+                os.chmod(path, 0o600, follow_symlinks=False)
+        except (OSError, NotImplementedError):
+            return False
+        return bool(_read_secure_bootstrap_token(path))
+    except OSError:
+        return False
     if descriptor is not None:
         try:
             os.write(descriptor, secrets.token_urlsafe(32).encode("utf-8"))
+            os.fsync(descriptor)
         finally:
             os.close(descriptor)
     if os.name != "nt":
         try:
-            path.chmod(0o600)
+            if stat.S_IMODE(path.lstat().st_mode) != 0o600:
+                path.unlink(missing_ok=True)
+                return False
         except OSError:
-            pass
+            path.unlink(missing_ok=True)
+            return False
+    return bool(_read_secure_bootstrap_token(path))
 
 
 def create_app(
@@ -1302,12 +1385,12 @@ def create_app(
     app[PASSWORD_KEY] = password
     app[CREDENTIALS_PATH_KEY] = resolved_credentials_path
     app[CONFIG_PATH_KEY] = resolved_config_path
-    resolved_bootstrap_token_path = Path(
+    resolved_bootstrap_token_path = Path(os.path.abspath(Path(
         bootstrap_token_path or (resolved_config_path.parent / "bootstrap.token")
-    ).resolve()
+    )))
     setup_available = not initialized and config_valid and credentials_valid and not config_exists and not credentials_exists
     if setup_available:
-        _secure_bootstrap_token_file(resolved_bootstrap_token_path)
+        setup_available = _secure_bootstrap_token_file(resolved_bootstrap_token_path)
     app[BOOTSTRAP_TOKEN_PATH_KEY] = resolved_bootstrap_token_path
     app[GATEWAY_CONFIG_KEY] = GatewayConfig(
         initialized=initialized,
@@ -1318,6 +1401,7 @@ def create_app(
     )
     app[AUTH_STATE_KEY] = AuthState(username, password_salt, password_hash, legacy_password, revision)
     app[LOGIN_RATE_LIMITER_KEY] = LoginRateLimiter(login_rate_limit, login_rate_window_seconds)
+    app[SETUP_LOCK_KEY] = asyncio.Lock()
     app[MEDIA_STORE_KEY] = MediaStore(
         storage_dir,
         max_upload_bytes,
