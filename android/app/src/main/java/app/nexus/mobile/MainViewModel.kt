@@ -61,6 +61,7 @@ data class MainUiState(
     val sessionToDelete: HermesSession? = null,
     val selectedDownload: ChatFile? = null,
     val downloadStates: Map<String, FileDownloadState> = emptyMap(),
+    val insecureHttpConfirmationPending: Boolean = false,
     val error: String? = null
 ) {
     val activeSession: HermesSession?
@@ -125,6 +126,23 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun connect() {
+        if (requiresInsecureHttpConfirmation(_uiState.value.serverUrl)) {
+            _uiState.update { it.copy(insecureHttpConfirmationPending = true, error = null) }
+            return
+        }
+        connectConfirmed()
+    }
+
+    fun confirmInsecureHttpConnection() {
+        _uiState.update { it.copy(insecureHttpConfirmationPending = false) }
+        connectConfirmed()
+    }
+
+    fun cancelInsecureHttpConnection() {
+        _uiState.update { it.copy(insecureHttpConfirmationPending = false) }
+    }
+
+    private fun connectConfirmed() {
         val snapshot = _uiState.value
         if (snapshot.serverUrl.isBlank() || snapshot.username.isBlank() || (snapshot.token.isBlank() && snapshot.password.isBlank())) {
             _uiState.update { it.copy(error = "请填写服务器、账号和密码") }
@@ -983,7 +1001,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
         downloadJobs[key] = viewModelScope.launch {
             runCatching {
-                DownloadHelper.download(getApplication(), key, url, _uiState.value.token, file.name) { progress ->
+                DownloadHelper.download(
+                    getApplication(),
+                    key,
+                    url,
+                    _uiState.value.token,
+                    _uiState.value.serverUrl,
+                    file.name
+                ) { progress ->
                     if (downloadGenerations[key] != generation) return@download
                     if (progress < 100) NotificationHelper.showTransfer(app, key, file.name, progress, uploading = false, sessionId = sourceSessionId)
                     _uiState.update { state ->
@@ -1103,6 +1128,31 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun logout() {
         stopPolling()
+        performLocalLogoutCleanup(
+            cancelStream = {
+                streamJob?.cancel()
+                streamJob = null
+                sessionLoadJob?.cancel()
+                sessionLoadJob = null
+                runStatusJob?.cancel()
+                runStatusJob = null
+                answerStatusJob?.cancel()
+                answerStatusJob = null
+            },
+            cancelUploads = {
+                uploadJob?.cancel()
+                uploadJob = null
+                imageUploadJobs.values.forEach(Job::cancel)
+                imageUploadJobs.clear()
+            },
+            cancelDownloads = {
+                downloadJobs.values.forEach(Job::cancel)
+                downloadJobs.clear()
+                DownloadHelper.cancelAll()
+            },
+            cancelMonitors = { RunMonitorService.cancelAll(getApplication()) },
+            cancelNotifications = { NotificationHelper.cancelAll(getApplication()) }
+        )
         connectionStore.clear()
         client = null
         _uiState.value = MainUiState()

@@ -7,6 +7,7 @@ import android.os.IBinder
 import androidx.core.content.ContextCompat
 import app.nexus.mobile.network.HermesApiClient
 import kotlinx.coroutines.CoroutineScope
+import kotlinx.coroutines.CoroutineStart
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.SupervisorJob
@@ -14,10 +15,11 @@ import kotlinx.coroutines.cancel
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
 import kotlinx.coroutines.launch
+import kotlin.coroutines.coroutineContext
 
 class RunMonitorService : Service() {
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
-    private var monitorJob: Job? = null
+    private val monitorJobs = SessionMonitorRegistry<Job>()
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         val serverUrl = intent?.getStringExtra(EXTRA_SERVER_URL).orEmpty()
@@ -29,10 +31,9 @@ class RunMonitorService : Service() {
             return START_NOT_STICKY
         }
         NotificationHelper.ensureChannels(this)
-        NotificationHelper.showRun(this, sessionId, title, RunNotificationKind.RUNNING)
-        startForeground(NotificationHelper.answerForegroundNotificationId(sessionId), NotificationHelper.runNotification(this, sessionId, title, RunNotificationKind.RUNNING))
-        monitorJob?.cancel()
-        monitorJob = scope.launch {
+        NotificationHelper.showRun(this@RunMonitorService, sessionId, title, RunNotificationKind.RUNNING)
+        startForeground(NotificationHelper.answerForegroundNotificationId(sessionId), NotificationHelper.runNotification(this@RunMonitorService, sessionId, title, RunNotificationKind.RUNNING))
+        val job = scope.launch(start = CoroutineStart.LAZY) {
             val client = HermesApiClient(serverUrl, token)
             while (isActive) {
                 val status = runCatching { client.getSessionRunStatus(sessionId) }.getOrNull()
@@ -40,19 +41,25 @@ class RunMonitorService : Service() {
                     val kind = runNotificationKind(status.status, status.active)
                     if (kind != RunNotificationKind.RUNNING && kind != RunNotificationKind.NONE) {
                         NotificationHelper.showRun(this@RunMonitorService, sessionId, title, kind)
-                        stopForeground(STOP_FOREGROUND_REMOVE)
-                        stopSelf(startId)
+                        monitorJobs.remove(sessionId, coroutineContext[Job]!!)
+                        if (monitorJobs.size == 0) {
+                            stopForeground(STOP_FOREGROUND_REMOVE)
+                            stopSelf()
+                        }
                         break
                     }
                 }
                 delay(4_000)
             }
         }
+        monitorJobs.put(sessionId, job)?.cancel()
+        job.start()
         return START_NOT_STICKY
     }
 
     override fun onDestroy() {
-        monitorJob?.cancel()
+        monitorJobs.values().forEach(Job::cancel)
+        monitorJobs.clear()
         scope.cancel()
         super.onDestroy()
     }
@@ -73,6 +80,10 @@ class RunMonitorService : Service() {
                 putExtra(EXTRA_TITLE, title)
             }
             ContextCompat.startForegroundService(context, intent)
+        }
+
+        fun cancelAll(context: Context) {
+            context.stopService(Intent(context, RunMonitorService::class.java))
         }
     }
 }

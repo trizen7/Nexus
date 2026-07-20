@@ -275,6 +275,15 @@ private fun NexusApp(state: MainUiState, viewModel: MainViewModel) {
     if (state.settingsOpen) {
         SettingsDialog(state, viewModel)
     }
+    if (state.insecureHttpConfirmationPending) {
+        AlertDialog(
+            onDismissRequest = viewModel::cancelInsecureHttpConnection,
+            title = { Text("使用不安全的 HTTP 连接？") },
+            text = { Text("HTTP 会以明文传输账号、密码和消息。请只在可信局域网中使用；公网连接应使用 HTTPS。") },
+            confirmButton = { TextButton(onClick = viewModel::confirmInsecureHttpConnection) { Text("仍然登录") } },
+            dismissButton = { TextButton(onClick = viewModel::cancelInsecureHttpConnection) { Text("取消") } }
+        )
+    }
     state.selectedDownload?.let { file ->
         FileDownloadDialog(file, state.downloadStates[file.id], viewModel)
     }
@@ -558,7 +567,7 @@ private fun ChatScreen(state: MainUiState, viewModel: MainViewModel) {
                 }
                 if (state.messages.isEmpty() && !state.loading) item { EmptyConversation() }
                 items(visibleMessages, key = { it.id }) { message ->
-                    MessageBubble(message, state.token, viewModel::selectDownload)
+                    MessageBubble(message, state.serverUrl, state.token, viewModel::selectDownload)
                 }
                 state.toolStatus?.let { status ->
                     item { Text(status, color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 13.sp, modifier = Modifier.padding(8.dp)) }
@@ -665,6 +674,7 @@ private fun ChatComposer(state: MainUiState, input: String, viewModel: MainViewM
             PendingImageStrip(
                 state.pendingImages,
                 state.preparingImage,
+                state.serverUrl,
                 state.token,
                 viewModel::removeImage,
                 viewModel::retryImageUpload
@@ -823,6 +833,7 @@ private fun ChatComposer(state: MainUiState, input: String, viewModel: MainViewM
 private fun PendingImageStrip(
     images: List<ChatImage>,
     preparing: Boolean,
+    serverUrl: String,
     token: String,
     onRemove: (String) -> Unit,
     onRetry: (String) -> Unit
@@ -837,7 +848,11 @@ private fun PendingImageStrip(
                     model = if (image.previewUri.startsWith("http")) {
                         coil.request.ImageRequest.Builder(LocalContext.current)
                             .data(image.previewUri)
-                            .addHeader("Authorization", "Bearer $token")
+                            .apply {
+                                bearerTokenFor(serverUrl, image.previewUri, token)?.let {
+                                    addHeader("Authorization", "Bearer $it")
+                                }
+                            }
                             .build()
                     } else image.previewUri,
                     contentDescription = "待发送图片",
@@ -927,6 +942,7 @@ private fun EmptyConversation() {
 @Composable
 private fun MessageBubble(
     message: ChatMessage,
+    serverUrl: String,
     token: String,
     onFileClick: (app.nexus.mobile.network.ChatFile) -> Unit
 ) {
@@ -952,7 +968,11 @@ private fun MessageBubble(
                             AsyncImage(
                                 model = coil.request.ImageRequest.Builder(context)
                                     .data(image.previewUri)
-                                    .addHeader("Authorization", "Bearer $token")
+                                    .apply {
+                                        bearerTokenFor(serverUrl, image.previewUri, token)?.let {
+                                            addHeader("Authorization", "Bearer $it")
+                                        }
+                                    }
                                     .build(),
                                 contentDescription = "聊天图片",
                                 modifier = Modifier.size(150.dp).background(MaterialTheme.colorScheme.surfaceVariant, RoundedCornerShape(12.dp))

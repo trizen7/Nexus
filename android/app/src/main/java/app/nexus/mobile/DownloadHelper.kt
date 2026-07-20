@@ -26,6 +26,7 @@ object DownloadHelper {
         key: String,
         url: String,
         token: String?,
+        serverUrl: String,
         fileName: String,
         onProgress: (Int) -> Unit
     ): File = withContext(Dispatchers.IO) {
@@ -35,7 +36,7 @@ object DownloadHelper {
         val existing = partial.takeIf(File::exists)?.length() ?: 0L
         val requestUrl = url.substringBefore('#')
         val request = Request.Builder().url(requestUrl).apply {
-            token?.takeIf(String::isNotBlank)?.let { header("Authorization", "Bearer $it") }
+            bearerTokenFor(serverUrl, requestUrl, token.orEmpty())?.let { header("Authorization", "Bearer $it") }
             if (existing > 0) header("Range", "bytes=$existing-")
         }.build()
         val call = client.newCall(request)
@@ -95,6 +96,11 @@ object DownloadHelper {
 
     fun pause(key: String) {
         activeCalls.remove(key)?.cancel()
+    }
+
+    fun cancelAll() {
+        activeCalls.values.forEach(Call::cancel)
+        activeCalls.clear()
     }
 
     private fun safeFileName(name: String): String =

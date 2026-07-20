@@ -28,12 +28,13 @@ object NotificationHelper {
         manager.createNotificationChannel(
             NotificationChannel(TRANSFER_CHANNEL, "文件传输", NotificationManager.IMPORTANCE_LOW).apply {
                 description = "显示Nexus文件上传和下载进度"
+                lockscreenVisibility = android.app.Notification.VISIBILITY_PRIVATE
             }
         )
         manager.createNotificationChannel(
             NotificationChannel(ANSWER_CHANNEL, "回答提醒", NotificationManager.IMPORTANCE_DEFAULT).apply {
                 description = "Nexus完成回答或执行失败时提醒"
-                lockscreenVisibility = android.app.Notification.VISIBILITY_PUBLIC
+                lockscreenVisibility = android.app.Notification.VISIBILITY_PRIVATE
             }
         )
     }
@@ -59,6 +60,7 @@ object NotificationHelper {
                 .setOnlyAlertOnce(true)
                 .setOngoing(progress < 100)
                 .setProgress(100, progress.coerceIn(0, 100), false)
+                .setVisibility(NotificationCompat.VISIBILITY_PRIVATE)
                 .setContentIntent(openAppIntent(context, type = PendingIntentType.TRANSFER, sessionId = sessionId, fileKey = key))
                 .build()
         )
@@ -87,6 +89,7 @@ object NotificationHelper {
                 .setOngoing(false)
                 .setOnlyAlertOnce(false)
                 .setAutoCancel(true)
+                .setVisibility(NotificationCompat.VISIBILITY_PRIVATE)
                 .setContentIntent(openAppIntent(context, type = PendingIntentType.TRANSFER, sessionId = sessionId, fileKey = key))
                 .build()
         )
@@ -110,6 +113,7 @@ object NotificationHelper {
                 .setContentText("下载已暂停 · $progress%")
                 .setProgress(100, progress.coerceIn(0, 100), false)
                 .setOngoing(false)
+                .setVisibility(NotificationCompat.VISIBILITY_PRIVATE)
                 .setContentIntent(openAppIntent(context, type = PendingIntentType.TRANSFER, sessionId = sessionId, fileKey = key))
                 .build()
         )
@@ -144,7 +148,7 @@ object NotificationHelper {
             .setOngoing(ongoing)
             .setOnlyAlertOnce(ongoing)
             .setAutoCancel(!ongoing)
-            .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
+            .setVisibility(NotificationCompat.VISIBILITY_PRIVATE)
             .setContentIntent(openAppIntent(context, type = PendingIntentType.ANSWER, sessionId = sessionId))
             .build()
     }
@@ -176,6 +180,10 @@ object NotificationHelper {
         fun encode(value: String?): String = Base64.getUrlEncoder().withoutPadding()
             .encodeToString(value.orEmpty().toByteArray(StandardCharsets.UTF_8))
         return "nexus://notification/${type.name.lowercase()}/${encode(sessionId)}/${encode(fileKey)}"
+    }
+
+    fun cancelAll(context: Context) {
+        NotificationManagerCompat.from(context).cancelAll()
     }
 
     private fun canNotify(context: Context): Boolean =
