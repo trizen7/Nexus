@@ -1,7 +1,12 @@
 import asyncio
+from concurrent.futures import ThreadPoolExecutor
 import io
 import json
+import os
 import shutil
+import stat
+import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -14,6 +19,7 @@ from nexus_gateway.app import (
     MEDIA_STORE_KEY,
     MediaStore,
     RunTracker,
+    StoredFile,
     create_app,
 )
 
@@ -202,6 +208,89 @@ async def test_setup_requires_one_time_bootstrap_token(tmp_path: Path, upstream_
         created = await client.post("/api/setup", json=payload)
         assert created.status == 201
         assert not token_path.exists()
+
+
+def test_bootstrap_token_creation_is_exclusive(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+    token_path = tmp_path / "bootstrap.token"
+    generated = iter(("A" * 32, "B" * 32))
+    token_calls = 0
+    calls_lock = threading.Lock()
+
+    def coordinated_token(_length: int) -> str:
+        nonlocal token_calls
+        token = next(generated)
+        with calls_lock:
+            token_calls += 1
+        if token.startswith("A"):
+            time.sleep(0.1)
+        return token
+
+    monkeypatch.setattr("nexus_gateway.app.secrets.token_urlsafe", coordinated_token)
+
+    def build_app(storage_name: str) -> None:
+        create_app(
+            username=None,
+            password=None,
+            session_secret=None,
+            upstream_url=None,
+            upstream_token=None,
+            storage_dir=tmp_path / storage_name,
+            credentials_path=tmp_path / f"{storage_name}.account.json",
+            config_path=tmp_path / f"{storage_name}.config.json",
+            bootstrap_token_path=token_path,
+            transcribe_audio=lambda _path: {"success": False, "transcript": ""},
+        )
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        futures = [executor.submit(build_app, name) for name in ("one", "two")]
+        for future in futures:
+            future.result()
+
+    assert token_calls == 1
+    assert token_path.read_text(encoding="utf-8") in {"A" * 32, "B" * 32}
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX permission bits are unavailable on Windows")
+def test_bootstrap_token_is_created_with_owner_only_permissions(tmp_path: Path):
+    token_path = tmp_path / "bootstrap.token"
+
+    create_app(
+        username=None,
+        password=None,
+        session_secret=None,
+        upstream_url=None,
+        upstream_token=None,
+        storage_dir=tmp_path / "media",
+        credentials_path=tmp_path / "account.json",
+        config_path=tmp_path / "config.json",
+        bootstrap_token_path=token_path,
+        transcribe_audio=lambda _path: {"success": False, "transcript": ""},
+    )
+
+    assert stat.S_IMODE(token_path.stat().st_mode) == 0o600
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX permission bits are unavailable on Windows")
+def test_existing_bootstrap_token_permissions_are_tightened(tmp_path: Path):
+    token_path = tmp_path / "bootstrap.token"
+    token_path.write_text("existing-token", encoding="utf-8")
+    token_path.chmod(0o666)
+
+    create_app(
+        username=None,
+        password=None,
+        session_secret=None,
+        upstream_url=None,
+        upstream_token=None,
+        storage_dir=tmp_path / "media",
+        credentials_path=tmp_path / "account.json",
+        config_path=tmp_path / "config.json",
+        bootstrap_token_path=token_path,
+        transcribe_audio=lambda _path: {"success": False, "transcript": ""},
+    )
+
+    assert token_path.read_text(encoding="utf-8") == "existing-token"
+    assert stat.S_IMODE(token_path.stat().st_mode) == 0o600
 
 
 @pytest.mark.asyncio
@@ -974,6 +1063,164 @@ async def test_upload_rejects_oversized_file(tmp_path: Path, upstream_client: Te
         form.add_field("file", io.BytesIO(b"12345"), filename="large.bin", content_type="application/octet-stream")
         response = await client.post("/api/uploads", data=form, headers=await auth_headers(client))
         assert response.status == 413
+
+
+class CoordinatedUploadField:
+    def __init__(
+        self,
+        content: bytes,
+        started: asyncio.Barrier,
+        release: asyncio.Event | None = None,
+        after_chunk: asyncio.Barrier | None = None,
+    ):
+        self.filename = "concurrent.bin"
+        self.headers = {"Content-Type": "application/octet-stream"}
+        self._content = content
+        self._started = started
+        self._release = release
+        self._after_chunk = after_chunk
+        self._read = False
+
+    async def read_chunk(self, size: int) -> bytes:
+        if self._read:
+            if self._after_chunk is not None:
+                await self._after_chunk.wait()
+            return b""
+        self._read = True
+        await self._started.wait()
+        if self._release is not None:
+            await self._release.wait()
+        return self._content
+
+
+class ChunkedUploadField:
+    def __init__(self, chunks: list[bytes]):
+        self.filename = "chunked.bin"
+        self.headers = {"Content-Type": "application/octet-stream"}
+        self._chunks = iter(chunks)
+
+    async def read_chunk(self, size: int) -> bytes:
+        return next(self._chunks, b"")
+
+
+@pytest.mark.asyncio
+async def test_concurrent_uploads_reserve_total_storage_quota(tmp_path: Path):
+    store = MediaStore(
+        tmp_path / "media",
+        max_upload_bytes=10,
+        max_total_storage_bytes=6,
+        min_free_disk_bytes=0,
+    )
+    started = asyncio.Barrier(2)
+
+    results = await asyncio.gather(
+        store.save(CoordinatedUploadField(b"1234", started)),
+        store.save(CoordinatedUploadField(b"5678", started)),
+        return_exceptions=True,
+    )
+
+    assert sum(isinstance(result, StoredFile) for result in results) == 1
+    failures = [result for result in results if isinstance(result, web.HTTPInsufficientStorage)]
+    assert len(failures) == 1
+    assert json.loads(failures[0].text)["error"]["code"] == "storage_quota_exceeded"
+    assert sum(item["size"] for item in store.list_files()) == 4
+
+
+@pytest.mark.asyncio
+async def test_concurrent_uploads_reserve_disk_low_water_space(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+):
+    monkeypatch.setattr(
+        "nexus_gateway.app.shutil.disk_usage",
+        lambda _path: shutil._ntuple_diskusage(total=100, used=94, free=6),
+    )
+    store = MediaStore(
+        tmp_path / "media",
+        max_upload_bytes=10,
+        max_total_storage_bytes=0,
+        min_free_disk_bytes=2,
+    )
+    release_first = asyncio.Event()
+
+    class HeldUploadField:
+        filename = "first.bin"
+        headers = {"Content-Type": "application/octet-stream"}
+        reads = 0
+
+        async def read_chunk(self, size: int) -> bytes:
+            self.reads += 1
+            if self.reads == 1:
+                return b"1234"
+            await release_first.wait()
+            return b""
+
+    first = asyncio.create_task(store.save(HeldUploadField()))
+    while store._reserved_upload_bytes != 4:
+        await asyncio.sleep(0)
+
+    second = await asyncio.gather(
+        store.save(ChunkedUploadField([b"5678"])),
+        return_exceptions=True,
+    )
+    release_first.set()
+    saved = await first
+
+    assert isinstance(saved, StoredFile)
+    assert isinstance(second[0], web.HTTPInsufficientStorage)
+    assert json.loads(second[0].text)["error"]["code"] == "disk_space_low"
+
+
+@pytest.mark.asyncio
+async def test_failed_upload_releases_reserved_capacity(tmp_path: Path):
+    store = MediaStore(
+        tmp_path / "media",
+        max_upload_bytes=6,
+        max_total_storage_bytes=6,
+        min_free_disk_bytes=0,
+    )
+
+    with pytest.raises(web.HTTPRequestEntityTooLarge):
+        await store.save(ChunkedUploadField([b"1234", b"567"]))
+
+    saved = await store.save(ChunkedUploadField([b"abcdef"]))
+    assert saved.size == 6
+
+
+@pytest.mark.asyncio
+async def test_cancelled_upload_releases_reserved_capacity(tmp_path: Path):
+    store = MediaStore(
+        tmp_path / "media",
+        max_upload_bytes=10,
+        max_total_storage_bytes=6,
+        min_free_disk_bytes=0,
+    )
+    first_chunk_read = asyncio.Event()
+    release = asyncio.Event()
+
+    class CancellableField:
+        def __init__(self):
+            self.filename = "cancelled.bin"
+            self.headers = {"Content-Type": "application/octet-stream"}
+            self.reads = 0
+
+        async def read_chunk(self, size: int) -> bytes:
+            self.reads += 1
+            if self.reads == 1:
+                first_chunk_read.set()
+                return b"1234"
+            await release.wait()
+            return b""
+
+    task = asyncio.create_task(store.save(CancellableField()))
+    await first_chunk_read.wait()
+    while store._reserved_upload_bytes != 4:
+        await asyncio.sleep(0)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    saved = await store.save(ChunkedUploadField([b"abcdef"]))
+    assert saved.size == 6
 
 
 @pytest.mark.asyncio

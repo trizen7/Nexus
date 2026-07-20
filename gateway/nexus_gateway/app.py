@@ -257,6 +257,8 @@ class MediaStore:
         self.max_upload_bytes = max(1, max_upload_bytes)
         self.max_total_storage_bytes = max(0, max_total_storage_bytes)
         self.min_free_disk_bytes = max(0, min_free_disk_bytes)
+        self._capacity_lock = asyncio.Lock()
+        self._reserved_upload_bytes = 0
 
     def _stored_bytes(self) -> int:
         return sum(item["size"] for item in self.list_files())
@@ -273,6 +275,18 @@ class MediaStore:
             raise self._storage_error("storage_quota_exceeded", "存储空间配额不足，请删除旧文件后重试")
         if shutil.disk_usage(self.root).free - incoming_bytes < self.min_free_disk_bytes:
             raise self._storage_error("disk_space_low", "磁盘可用空间不足，请清理空间后重试")
+
+    async def _reserve_upload_bytes(self, incoming_bytes: int) -> None:
+        async with self._capacity_lock:
+            self._check_capacity(
+                self._stored_bytes(),
+                self._reserved_upload_bytes + incoming_bytes,
+            )
+            self._reserved_upload_bytes += incoming_bytes
+
+    async def _release_upload_bytes(self, reserved_bytes: int) -> None:
+        async with self._capacity_lock:
+            self._reserved_upload_bytes = max(0, self._reserved_upload_bytes - reserved_bytes)
 
     def _metadata_path(self, file_id: str, directory: Path | None = None) -> Path:
         return (directory or self.root) / f"{file_id}.json"
@@ -337,8 +351,8 @@ class MediaStore:
         temp_path = target_dir / f".{file_id}.upload"
         digest = hashlib.sha256()
         size = 0
-        existing_bytes = self._stored_bytes()
-        self._check_capacity(existing_bytes, 0)
+        reserved_bytes = 0
+        committed = False
         try:
             with temp_path.open("wb") as handle:
                 while True:
@@ -353,10 +367,10 @@ class MediaStore:
                             text=json.dumps({"error": {"code": "file_too_large", "message": "文件超过上传大小限制"}}, ensure_ascii=False),
                             content_type="application/json",
                         )
-                    self._check_capacity(existing_bytes, size)
+                    await self._reserve_upload_bytes(len(chunk))
+                    reserved_bytes += len(chunk)
                     digest.update(chunk)
                     handle.write(chunk)
-            temp_path.replace(final_path)
             item = StoredFile(
                 id=file_id,
                 name=clean_name,
@@ -368,12 +382,19 @@ class MediaStore:
                 category=resolved_category,
                 date=date,
             )
-            self._metadata_path(file_id, target_dir).write_text(json.dumps(asdict(item), ensure_ascii=False, indent=2), encoding="utf-8")
+            async with self._capacity_lock:
+                temp_path.replace(final_path)
+                self._metadata_path(file_id, target_dir).write_text(json.dumps(asdict(item), ensure_ascii=False, indent=2), encoding="utf-8")
+                self._reserved_upload_bytes = max(0, self._reserved_upload_bytes - reserved_bytes)
+                reserved_bytes = 0
+                committed = True
             return item
-        except Exception:
+        finally:
+            if reserved_bytes:
+                await asyncio.shield(self._release_upload_bytes(reserved_bytes))
             temp_path.unlink(missing_ok=True)
-            final_path.unlink(missing_ok=True)
-            raise
+            if not committed:
+                final_path.unlink(missing_ok=True)
 
     def delete(self, file_id: str) -> bool:
         found = self.get(file_id)
@@ -1182,6 +1203,27 @@ def _valid_file_id(file_id: str) -> bool:
     return len(file_id) == 32 and all(char in "0123456789abcdef" for char in file_id)
 
 
+def _secure_bootstrap_token_file(path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    if hasattr(os, "O_BINARY"):
+        flags |= os.O_BINARY
+    try:
+        descriptor = os.open(path, flags, 0o600)
+    except FileExistsError:
+        descriptor = None
+    if descriptor is not None:
+        try:
+            os.write(descriptor, secrets.token_urlsafe(32).encode("utf-8"))
+        finally:
+            os.close(descriptor)
+    if os.name != "nt":
+        try:
+            path.chmod(0o600)
+        except OSError:
+            pass
+
+
 def create_app(
     *,
     username: str | None,
@@ -1264,9 +1306,8 @@ def create_app(
         bootstrap_token_path or (resolved_config_path.parent / "bootstrap.token")
     ).resolve()
     setup_available = not initialized and config_valid and credentials_valid and not config_exists and not credentials_exists
-    if setup_available and not resolved_bootstrap_token_path.exists():
-        resolved_bootstrap_token_path.parent.mkdir(parents=True, exist_ok=True)
-        resolved_bootstrap_token_path.write_text(secrets.token_urlsafe(32), encoding="utf-8")
+    if setup_available:
+        _secure_bootstrap_token_file(resolved_bootstrap_token_path)
     app[BOOTSTRAP_TOKEN_PATH_KEY] = resolved_bootstrap_token_path
     app[GATEWAY_CONFIG_KEY] = GatewayConfig(
         initialized=initialized,
