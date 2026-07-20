@@ -288,14 +288,14 @@ async def test_setup_rolls_back_when_account_commit_fails(
         transcribe_audio=lambda _path: {"success": False, "transcript": ""},
     )
     token = token_path.read_text(encoding="utf-8").strip()
-    original_replace = gateway_app.os.replace
+    original_write = gateway_app._secure_exclusive_write
 
-    def fail_account_commit(source, destination):
-        if Path(destination) == account_path:
+    def fail_account_commit(path, content):
+        if path == account_path:
             raise OSError("injected account commit failure")
-        return original_replace(source, destination)
+        return original_write(path, content)
 
-    monkeypatch.setattr(gateway_app.os, "replace", fail_account_commit)
+    monkeypatch.setattr(gateway_app, "_secure_exclusive_write", fail_account_commit)
     async with TestClient(TestServer(app)) as client:
         response = await client.post("/api/setup", json={
             "username": "admin",
@@ -359,6 +359,133 @@ async def test_setup_rolls_back_when_bootstrap_token_cannot_be_consumed(
 
 
 @pytest.mark.asyncio
+async def test_setup_rollback_does_not_delete_replaced_foreign_config(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+):
+    import nexus_gateway.app as gateway_app
+
+    config_path = tmp_path / "config.json"
+    account_path = tmp_path / "account.json"
+    token_path = tmp_path / "bootstrap.token"
+    app = create_app(
+        username=None,
+        password=None,
+        session_secret=None,
+        upstream_url=None,
+        upstream_token=None,
+        storage_dir=tmp_path / "media",
+        credentials_path=account_path,
+        config_path=config_path,
+        bootstrap_token_path=token_path,
+        transcribe_audio=lambda _path: {"success": False, "transcript": ""},
+    )
+    token = token_path.read_text(encoding="utf-8").strip()
+    original_write = gateway_app._secure_exclusive_write
+
+    def replace_config_before_account_failure(path, content):
+        if path == account_path:
+            config_path.unlink()
+            config_path.write_text("foreign-config", encoding="utf-8")
+            raise OSError("injected account commit failure")
+        return original_write(path, content)
+
+    monkeypatch.setattr(gateway_app, "_secure_exclusive_write", replace_config_before_account_failure)
+    async with TestClient(TestServer(app)) as client:
+        response = await client.post("/api/setup", json={
+            "username": "admin",
+            "password": "strong-password",
+            "hermes_api_url": "http://127.0.0.1:9",
+            "hermes_api_token": "upstream-key",
+            "bootstrap_token": token,
+        })
+
+    assert response.status == 502
+    assert config_path.read_text(encoding="utf-8") == "foreign-config"
+    assert not account_path.exists()
+    assert token_path.exists()
+
+
+def test_existing_config_and_account_are_read_from_verified_descriptors(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+):
+    config_path = tmp_path / "config.json"
+    account_path = tmp_path / "account.json"
+    config_path.write_text(json.dumps({
+        "hermes_api_url": "http://example.test",
+        "hermes_api_token": "secret",
+        "session_secret": "s" * 32,
+    }), encoding="utf-8")
+    account_path.write_text(json.dumps({
+        "username": "admin",
+        "password": "legacy-password",
+        "revision": 1,
+    }), encoding="utf-8")
+    original_read_text = Path.read_text
+
+    def reject_unverified_read(path, *args, **kwargs):
+        if path in {config_path, account_path}:
+            raise AssertionError("configuration must be read from its verified descriptor")
+        return original_read_text(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "read_text", reject_unverified_read)
+    app = create_app(
+        username=None,
+        password=None,
+        session_secret=None,
+        upstream_url=None,
+        upstream_token=None,
+        storage_dir=tmp_path / "media",
+        credentials_path=account_path,
+        config_path=config_path,
+        transcribe_audio=lambda _path: {"success": False, "transcript": ""},
+    )
+
+    assert app[GATEWAY_CONFIG_KEY].initialized is True
+
+
+@pytest.mark.asyncio
+async def test_two_app_instances_share_one_bootstrap_claim(
+    tmp_path: Path,
+):
+    config_path = tmp_path / "config.json"
+    account_path = tmp_path / "account.json"
+    token_path = tmp_path / "bootstrap.token"
+    kwargs = dict(
+        username=None,
+        password=None,
+        session_secret=None,
+        upstream_url=None,
+        upstream_token=None,
+        storage_dir=tmp_path / "media",
+        credentials_path=account_path,
+        config_path=config_path,
+        bootstrap_token_path=token_path,
+        transcribe_audio=lambda _path: {"success": False, "transcript": ""},
+    )
+    first_app = create_app(**kwargs)
+    second_app = create_app(**kwargs)
+    token = token_path.read_text(encoding="utf-8").strip()
+    payload = {
+        "username": "admin",
+        "password": "strong-password",
+        "hermes_api_url": "http://127.0.0.1:9",
+        "hermes_api_token": "upstream-key",
+        "bootstrap_token": token,
+    }
+
+    async with TestClient(TestServer(first_app)) as first, TestClient(TestServer(second_app)) as second:
+        responses = await asyncio.gather(
+            first.post("/api/setup", json=payload),
+            second.post("/api/setup", json=payload),
+        )
+
+    assert sum(response.status == 201 for response in responses) == 1
+    assert config_path.exists()
+    assert account_path.exists()
+    assert not token_path.exists()
+
+
+@pytest.mark.asyncio
 async def test_setup_writes_execute_while_application_setup_lock_is_held(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ):
@@ -377,20 +504,14 @@ async def test_setup_writes_execute_while_application_setup_lock_is_held(
         bootstrap_token_path=token_path,
         transcribe_audio=lambda _path: {"success": False, "transcript": ""},
     )
-    original_write_config = gateway_app._write_config
-    original_write_credentials = gateway_app._write_credentials
+    original_write = gateway_app._secure_exclusive_write
     observed = []
 
-    def checked_write_config(*args, **kwargs):
+    def checked_write(*args, **kwargs):
         observed.append(app[SETUP_LOCK_KEY].locked())
-        return original_write_config(*args, **kwargs)
+        return original_write(*args, **kwargs)
 
-    def checked_write_credentials(*args, **kwargs):
-        observed.append(app[SETUP_LOCK_KEY].locked())
-        return original_write_credentials(*args, **kwargs)
-
-    monkeypatch.setattr(gateway_app, "_write_config", checked_write_config)
-    monkeypatch.setattr(gateway_app, "_write_credentials", checked_write_credentials)
+    monkeypatch.setattr(gateway_app, "_secure_exclusive_write", checked_write)
     async with TestClient(TestServer(app)) as client:
         response = await client.post("/api/setup", json={
             "username": "admin",

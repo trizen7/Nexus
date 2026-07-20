@@ -797,15 +797,28 @@ async def setup(request: web.Request) -> web.Response:
         session_secret = secrets.token_urlsafe(48)
         config_path = request.app[CONFIG_PATH_KEY]
         credentials_path = request.app[CREDENTIALS_PATH_KEY]
+        config_identity = None
+        credentials_identity = None
         try:
-            _write_config(config_path, hermes_api_url, hermes_api_token, session_secret)
+            config_identity = _secure_exclusive_write(config_path, json.dumps({
+                "hermes_api_url": hermes_api_url.rstrip("/"),
+                "hermes_api_token": hermes_api_token,
+                "session_secret": session_secret,
+            }, ensure_ascii=False, indent=2))
             password_salt, password_hash = _hash_password(password)
-            _write_credentials(credentials_path, username, password_salt, password_hash, 1)
+            credentials_identity = _secure_exclusive_write(credentials_path, json.dumps({
+                "username": username,
+                "password_scheme": "scrypt",
+                "password_salt": password_salt,
+                "password_hash": password_hash,
+                "revision": 1,
+            }, ensure_ascii=False, indent=2))
             token_path.unlink()
         except Exception:
-            config_path.unlink(missing_ok=True)
-            credentials_path.unlink(missing_ok=True)
+            _unlink_owned_file(config_path, config_identity)
+            _unlink_owned_file(credentials_path, credentials_identity)
             raise
+
         config.session_secret = session_secret
         config.upstream_url = hermes_api_url
         config.upstream_token = hermes_api_token
@@ -1243,27 +1256,62 @@ def _secure_atomic_write(path: Path, content: str) -> None:
         temporary.unlink(missing_ok=True)
 
 
-def _secure_existing_file(path: Path) -> bool:
+def _read_secure_existing_file(path: Path) -> str | None:
     try:
         file_stat = path.lstat()
         if not stat.S_ISREG(file_stat.st_mode) or path.is_symlink():
-            return False
+            return None
         if os.name != "nt":
             os.chmod(path, 0o600, follow_symlinks=False)
         descriptor = os.open(path, _bootstrap_open_flags(os.O_RDONLY))
         try:
             opened_stat = os.fstat(descriptor)
             if not stat.S_ISREG(opened_stat.st_mode):
-                return False
+                return None
             if (opened_stat.st_dev, opened_stat.st_ino) != (file_stat.st_dev, file_stat.st_ino):
-                return False
+                return None
             if os.name != "nt" and stat.S_IMODE(opened_stat.st_mode) != 0o600:
-                return False
+                return None
+            with os.fdopen(descriptor, "r", encoding="utf-8") as handle:
+                descriptor = -1
+                return handle.read()
         finally:
+            if descriptor != -1:
+                os.close(descriptor)
+    except (OSError, UnicodeError, NotImplementedError):
+        return None
+
+
+def _secure_exclusive_write(path: Path, content: str) -> tuple[int, int]:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor = os.open(path, _bootstrap_open_flags(os.O_WRONLY | os.O_CREAT | os.O_EXCL), 0o600)
+    try:
+        with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as handle:
+            descriptor = -1
+            handle.write(content)
+            handle.flush()
+            os.fsync(handle.fileno())
+            written_stat = os.fstat(handle.fileno())
+        if os.name != "nt" and stat.S_IMODE(written_stat.st_mode) != 0o600:
+            raise OSError("persisted file permissions are not owner-only")
+        return written_stat.st_dev, written_stat.st_ino
+    except Exception:
+        path.unlink(missing_ok=True)
+        raise
+    finally:
+        if descriptor != -1:
             os.close(descriptor)
-        return True
-    except (OSError, NotImplementedError):
-        return False
+
+
+def _unlink_owned_file(path: Path, identity: tuple[int, int] | None) -> None:
+    if identity is None:
+        return
+    try:
+        current = path.lstat()
+        if (current.st_dev, current.st_ino) == identity and stat.S_ISREG(current.st_mode):
+            path.unlink()
+    except OSError:
+        pass
 
 
 def _bootstrap_open_flags(access: int) -> int:
@@ -1361,9 +1409,10 @@ def create_app(
     config_valid = not config_exists
     if config_exists:
         try:
-            if not _secure_existing_file(resolved_config_path):
+            config_content = _read_secure_existing_file(resolved_config_path)
+            if config_content is None:
                 raise OSError("configuration file is not secure")
-            loaded = json.loads(resolved_config_path.read_text(encoding="utf-8"))
+            loaded = json.loads(config_content)
             if isinstance(loaded, dict):
                 saved_config = loaded
                 config_valid = True
@@ -1387,9 +1436,10 @@ def create_app(
     legacy_password = ""
     if credentials_exists:
         try:
-            if not _secure_existing_file(resolved_credentials_path):
+            credentials_content = _read_secure_existing_file(resolved_credentials_path)
+            if credentials_content is None:
                 raise OSError("credentials file is not secure")
-            saved_credentials = json.loads(resolved_credentials_path.read_text(encoding="utf-8"))
+            saved_credentials = json.loads(credentials_content)
             if not isinstance(saved_credentials, dict):
                 raise ValueError("credentials must be an object")
             username = str(saved_credentials.get("username", username))
