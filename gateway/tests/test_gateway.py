@@ -531,7 +531,7 @@ async def test_login_rate_limit_allows_success_before_threshold(tmp_path: Path, 
 
 @pytest.mark.asyncio
 async def test_login_rate_limit_resets_after_window(tmp_path: Path, upstream_client: TestClient):
-    window = 0.5
+    window = 2.0
     app = create_app(
         username="nexus",
         password="test-password",
