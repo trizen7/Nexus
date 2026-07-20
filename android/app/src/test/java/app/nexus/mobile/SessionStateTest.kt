@@ -311,6 +311,30 @@ class SessionStateTest {
     }
 
     @Test
+    fun `message cache keys are reversible and do not collide for Java hash collisions`() {
+        val first = messageCacheKey("FB")
+        val second = messageCacheKey("Ea")
+
+        assertTrue(first.startsWith("message_cache_v2_"))
+        assertEquals("FB", sessionIdFromMessageCacheKey(first))
+        assertEquals("Ea", sessionIdFromMessageCacheKey(second))
+        assertTrue(first != second)
+    }
+
+    @Test
+    fun `message cache keys safely encode Unicode and separators`() {
+        val sessionId = "会话/emoji-😀?a=b\\c"
+
+        assertEquals(sessionId, sessionIdFromMessageCacheKey(messageCacheKey(sessionId)))
+    }
+
+    @Test
+    fun `file selection falls back to a private copy when persistable permission fails`() {
+        assertEquals(SelectedUriStorage.PERSISTED_URI, selectedUriStorage(permissionPersisted = true))
+        assertEquals(SelectedUriStorage.PRIVATE_COPY, selectedUriStorage(permissionPersisted = false))
+    }
+
+    @Test
     fun `message cache excludes transient image upload bytes`() {
         val message = app.nexus.mobile.network.ChatMessage(
             "m1",

@@ -9,6 +9,9 @@ import android.content.Context
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Build
+import android.net.Uri
+import java.nio.charset.StandardCharsets
+import java.util.Base64
 
 import androidx.core.app.NotificationCompat
 import androidx.core.app.NotificationManagerCompat
@@ -48,7 +51,7 @@ object NotificationHelper {
         val text = if (uploading) "正在上传 $progress%" else "正在下载 $progress%"
         notify(
             context,
-            transferId(key),
+            transferId(sessionId, key),
             NotificationCompat.Builder(context, TRANSFER_CHANNEL)
                 .setSmallIcon(if (uploading) android.R.drawable.stat_sys_upload else android.R.drawable.stat_sys_download)
                 .setContentTitle(compactNotificationFileName(title))
@@ -56,7 +59,7 @@ object NotificationHelper {
                 .setOnlyAlertOnce(true)
                 .setOngoing(progress < 100)
                 .setProgress(100, progress.coerceIn(0, 100), false)
-                .setContentIntent(openAppIntent(context, sessionId = sessionId, fileKey = key))
+                .setContentIntent(openAppIntent(context, type = PendingIntentType.TRANSFER, sessionId = sessionId, fileKey = key))
                 .build()
         )
     }
@@ -75,7 +78,7 @@ object NotificationHelper {
         val text = if (success) "${action}完成" else "${action}失败"
         notify(
             context,
-            transferId(key),
+            transferId(sessionId, key),
             NotificationCompat.Builder(context, TRANSFER_CHANNEL)
                 .setSmallIcon(if (success) android.R.drawable.stat_sys_download_done else android.R.drawable.stat_notify_error)
                 .setContentTitle(compactNotificationFileName(title))
@@ -84,7 +87,7 @@ object NotificationHelper {
                 .setOngoing(false)
                 .setOnlyAlertOnce(false)
                 .setAutoCancel(true)
-                .setContentIntent(openAppIntent(context, sessionId = sessionId, fileKey = key))
+                .setContentIntent(openAppIntent(context, type = PendingIntentType.TRANSFER, sessionId = sessionId, fileKey = key))
                 .build()
         )
     }
@@ -100,20 +103,20 @@ object NotificationHelper {
         ensureChannels(context)
         notify(
             context,
-            transferId(key),
+            transferId(sessionId, key),
             NotificationCompat.Builder(context, TRANSFER_CHANNEL)
                 .setSmallIcon(android.R.drawable.stat_sys_download)
                 .setContentTitle(compactNotificationFileName(title))
                 .setContentText("下载已暂停 · $progress%")
                 .setProgress(100, progress.coerceIn(0, 100), false)
                 .setOngoing(false)
-                .setContentIntent(openAppIntent(context, sessionId = sessionId, fileKey = key))
+                .setContentIntent(openAppIntent(context, type = PendingIntentType.TRANSFER, sessionId = sessionId, fileKey = key))
                 .build()
         )
     }
 
-    fun cancelTransfer(context: Context, key: String) {
-        NotificationManagerCompat.from(context).cancel(transferId(key))
+    fun cancelTransfer(context: Context, key: String, sessionId: String? = null) {
+        NotificationManagerCompat.from(context).cancel(transferId(sessionId, key))
     }
 
     fun showRun(context: Context, sessionId: String, title: String, kind: RunNotificationKind) {
@@ -142,13 +145,38 @@ object NotificationHelper {
             .setOnlyAlertOnce(ongoing)
             .setAutoCancel(!ongoing)
             .setVisibility(NotificationCompat.VISIBILITY_PUBLIC)
-            .setContentIntent(openAppIntent(context, sessionId = sessionId))
+            .setContentIntent(openAppIntent(context, type = PendingIntentType.ANSWER, sessionId = sessionId))
             .build()
     }
 
-    fun answerNotificationId(sessionId: String): Int = ANSWER_NOTIFICATION_BASE + (sessionId.hashCode() and 0x0FFF)
+    fun answerNotificationId(sessionId: String): Int = ANSWER_NOTIFICATION_BASE + fnv32(sessionId)
 
     fun answerForegroundNotificationId(sessionId: String): Int = answerNotificationId(sessionId) + 50_000
+
+    fun transferNotificationId(sessionId: String?, key: String): Int =
+        TRANSFER_NOTIFICATION_BASE + fnv32("transfer|${sessionId.orEmpty()}|$key")
+
+    private fun transferId(sessionId: String?, key: String): Int = transferNotificationId(sessionId, key)
+
+    enum class PendingIntentType(val prefix: Int) {
+        ANSWER(1),
+        TRANSFER(2);
+
+        companion object {
+            fun fromPrefix(prefix: Int): PendingIntentType = entries.firstOrNull { it.prefix == prefix } ?: ANSWER
+        }
+    }
+
+    fun pendingIntentRequestCode(type: PendingIntentType, sessionId: String?, fileKey: String?): Int {
+        val seed = type.prefix.toString() + "|" + (sessionId ?: "") + "|" + (fileKey ?: "")
+        return fnv32(seed)
+    }
+
+    fun pendingIntentData(type: PendingIntentType, sessionId: String?, fileKey: String?): String {
+        fun encode(value: String?): String = Base64.getUrlEncoder().withoutPadding()
+            .encodeToString(value.orEmpty().toByteArray(StandardCharsets.UTF_8))
+        return "nexus://notification/${type.name.lowercase()}/${encode(sessionId)}/${encode(fileKey)}"
+    }
 
     private fun canNotify(context: Context): Boolean =
         Build.VERSION.SDK_INT < 33 || context.checkSelfPermission(Manifest.permission.POST_NOTIFICATIONS) == PackageManager.PERMISSION_GRANTED
@@ -162,21 +190,34 @@ object NotificationHelper {
         }
     }
 
-    private fun openAppIntent(context: Context, sessionId: String? = null, fileKey: String? = null): PendingIntent {
+    private fun openAppIntent(
+        context: Context,
+        type: PendingIntentType,
+        sessionId: String? = null,
+        fileKey: String? = null
+    ): PendingIntent {
         val intent = Intent(context, MainActivity::class.java).apply {
             flags = Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP
+            data = Uri.parse(pendingIntentData(type, sessionId, fileKey))
             sessionId?.let { putExtra(EXTRA_SESSION_ID, it) }
             fileKey?.let { putExtra(EXTRA_FILE_KEY, it) }
         }
         return PendingIntent.getActivity(
             context,
-            sessionId?.hashCode() ?: fileKey?.hashCode() ?: 0,
+            pendingIntentRequestCode(type, sessionId, fileKey),
             intent,
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
     }
 
-    private fun transferId(key: String): Int = TRANSFER_NOTIFICATION_BASE + (key.hashCode() and 0x0FFF)
+    private fun fnv32(value: String): Int {
+        var hash = 0x811c9dc5L
+        for (byte in value.toByteArray(Charsets.UTF_8)) {
+            hash = (hash xor (byte.toInt() and 0xff).toLong()) * 0x01000193L
+            hash = hash and 0xffffffffL
+        }
+        return (hash and 0x7fffffffL).toInt()
+    }
 
     const val EXTRA_SESSION_ID = "nexus_notification_session_id"
     const val EXTRA_FILE_KEY = "nexus_notification_file_key"

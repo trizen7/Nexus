@@ -11,6 +11,7 @@ import com.google.gson.Gson
 import com.google.gson.reflect.TypeToken
 import java.nio.charset.StandardCharsets
 import java.security.KeyStore
+import java.util.Base64 as JavaBase64
 import javax.crypto.Cipher
 import javax.crypto.KeyGenerator
 import javax.crypto.SecretKey
@@ -78,7 +79,7 @@ class ConnectionStore(context: Context) {
         preferences.edit().clear().apply()
     }
 
-    private fun cacheKey(sessionId: String): String = "message_cache_${sessionId.hashCode()}"
+    private fun cacheKey(sessionId: String): String = messageCacheKey(sessionId)
 
     private companion object {
         const val MESSAGE_CACHE_SIZE = 10
@@ -93,6 +94,15 @@ class ConnectionStore(context: Context) {
         const val KEY_DRAFTS = "composer_drafts_v1"
     }
 }
+
+fun messageCacheKey(sessionId: String): String =
+    "message_cache_v2_${JavaBase64.getUrlEncoder().withoutPadding().encodeToString(sessionId.toByteArray(StandardCharsets.UTF_8))}"
+
+fun sessionIdFromMessageCacheKey(key: String): String? = runCatching {
+    val encoded = key.removePrefix("message_cache_v2_")
+    require(encoded != key)
+    String(JavaBase64.getUrlDecoder().decode(encoded), StandardCharsets.UTF_8)
+}.getOrNull()
 
 data class PersistedDraftBundle(
     val localDraftKey: String = "",
@@ -155,12 +165,12 @@ private class TokenCipher {
         val cipher = Cipher.getInstance(TRANSFORMATION)
         cipher.init(Cipher.ENCRYPT_MODE, secretKey())
         val payload = cipher.iv + cipher.doFinal(value.toByteArray(StandardCharsets.UTF_8))
-        return Base64.encodeToString(payload, Base64.NO_WRAP)
+        return android.util.Base64.encodeToString(payload, android.util.Base64.NO_WRAP)
     }
 
     fun decrypt(value: String): String = runCatching {
         if (value.isBlank()) return ""
-        val payload = Base64.decode(value, Base64.NO_WRAP)
+        val payload = android.util.Base64.decode(value, android.util.Base64.NO_WRAP)
         if (payload.size <= IV_BYTES) return ""
         val cipher = Cipher.getInstance(TRANSFORMATION)
         cipher.init(Cipher.DECRYPT_MODE, secretKey(), GCMParameterSpec(128, payload.copyOfRange(0, IV_BYTES)))

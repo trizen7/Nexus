@@ -704,10 +704,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         saveCurrentDraft()
     }
 
-    fun prepareFile(uri: Uri) {
+    fun prepareFile(uri: Uri, storage: SelectedUriStorage = SelectedUriStorage.PERSISTED_URI) {
         uploadJob?.cancel()
         uploadJob = viewModelScope.launch {
-            runCatching { FileProcessor.prepare(getApplication(), uri) }
+            runCatching { FileProcessor.prepare(getApplication(), uri, storage) }
                 .onSuccess { localFile ->
                     _uiState.update {
                         it.copy(

@@ -636,7 +636,15 @@ private fun ChatComposer(state: MainUiState, input: String, viewModel: MainViewM
         uri?.let(viewModel::prepareImage)
     }
     val fileLauncher = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
-        uri?.let(viewModel::prepareFile)
+        uri?.let {
+            val persisted = runCatching {
+                context.contentResolver.takePersistableUriPermission(
+                    it,
+                    android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION
+                )
+            }.isSuccess
+            viewModel.prepareFile(it, selectedUriStorage(persisted))
+        }
     }
     var cameraUri by remember { mutableStateOf<android.net.Uri?>(null) }
     val cameraLauncher = rememberLauncherForActivityResult(ActivityResultContracts.TakePicture()) { captured ->
