@@ -8,6 +8,8 @@ import app.nexus.mobile.network.UploadSource
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import java.io.File
+import java.io.InputStream
+import java.io.OutputStream
 import java.util.UUID
 
 object FileProcessor {
@@ -36,7 +38,7 @@ object FileProcessor {
             val safeName = name.replace(Regex("[^A-Za-z0-9._-]"), "_")
             val target = File(directory, "${UUID.randomUUID()}-$safeName")
             resolver.openInputStream(uri)?.use { input ->
-                target.outputStream().use { output -> input.copyTo(output) }
+                copyToFileWithByteLimit(input, target, MAX_FILE_BYTES)
             } ?: error("无法读取所选文件")
             size = target.length()
             Uri.fromFile(target)
@@ -61,6 +63,33 @@ object FileProcessor {
         else -> "$bytes B"
     }
 }
+
+internal fun copyWithByteLimit(
+    input: InputStream,
+    output: OutputStream,
+    maxBytes: Long,
+    bufferSize: Int = DEFAULT_BUFFER_SIZE
+): Long {
+    require(maxBytes >= 0)
+    val buffer = ByteArray(bufferSize)
+    var total = 0L
+    while (true) {
+        val allowed = (maxBytes - total + 1L).coerceAtMost(buffer.size.toLong()).toInt()
+        val read = input.read(buffer, 0, allowed)
+        if (read < 0) return total
+        total += read
+        require(total <= maxBytes) { "文件不能超过 50MB" }
+        output.write(buffer, 0, read)
+    }
+}
+
+internal fun copyToFileWithByteLimit(input: InputStream, target: File, maxBytes: Long): Long =
+    try {
+        target.outputStream().use { output -> copyWithByteLimit(input, output, maxBytes) }
+    } catch (error: Throwable) {
+        target.delete()
+        throw error
+    }
 
 enum class SelectedUriStorage { PERSISTED_URI, PRIVATE_COPY }
 

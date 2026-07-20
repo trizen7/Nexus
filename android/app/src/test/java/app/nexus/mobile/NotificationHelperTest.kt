@@ -2,6 +2,7 @@ package app.nexus.mobile
 
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertNotEquals
+import org.junit.Assert.assertTrue
 import org.junit.Test
 
 class NotificationHelperTest {
@@ -37,14 +38,36 @@ class NotificationHelperTest {
     }
 
     @Test
-    fun `answer and transfer ids live in disjoint ranges`() {
+    fun `notification ids use explicit stable positive type ranges`() {
         val answer = NotificationHelper.answerNotificationId("session-x")
-        val foreground = NotificationHelper.answerForegroundNotificationId("session-x")
+        val foreground = NotificationHelper.answerForegroundNotificationId()
         val transfer = NotificationHelper.transferNotificationId("session-x", "file-y")
 
-        assertNotEquals(answer, transfer)
-        assertNotEquals(foreground, transfer)
-        assertNotEquals(answer, foreground)
+        assertTrue(answer in 0x20000000..0x3fffffff)
+        assertTrue(transfer in 0x40000000..0x5fffffff)
+        assertEquals(0x60000000, foreground)
+        assertTrue(answer > 0 && transfer > 0 && foreground > 0)
+    }
+
+    @Test
+    fun `download cancellation id includes the state session id`() {
+        val state = FileDownloadState(
+            key = "file-y",
+            status = DownloadStatus.DOWNLOADING,
+            sessionId = "session-x"
+        )
+        val target = downloadTransferNotificationTarget(state)
+
+        assertEquals("file-y", target.key)
+        assertEquals("session-x", target.sessionId)
+        assertEquals(
+            NotificationHelper.transferNotificationId("session-x", "file-y"),
+            downloadTransferNotificationId(state)
+        )
+        assertNotEquals(
+            NotificationHelper.transferNotificationId(null, "file-y"),
+            downloadTransferNotificationId(state)
+        )
     }
 
     @Test

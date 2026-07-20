@@ -18,8 +18,10 @@ import kotlinx.coroutines.launch
 import kotlin.coroutines.coroutineContext
 
 class RunMonitorService : Service() {
+    private data class Monitor(val job: Job, val title: String)
+
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
-    private val monitorJobs = SessionMonitorRegistry<Job>()
+    private val monitorJobs = SessionMonitorRegistry<Monitor>()
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         val serverUrl = intent?.getStringExtra(EXTRA_SERVER_URL).orEmpty()
@@ -32,7 +34,7 @@ class RunMonitorService : Service() {
         }
         NotificationHelper.ensureChannels(this)
         NotificationHelper.showRun(this@RunMonitorService, sessionId, title, RunNotificationKind.RUNNING)
-        startForeground(NotificationHelper.answerForegroundNotificationId(sessionId), NotificationHelper.runNotification(this@RunMonitorService, sessionId, title, RunNotificationKind.RUNNING))
+        startForeground(NotificationHelper.answerForegroundNotificationId(), NotificationHelper.runNotification(this@RunMonitorService, sessionId, title, RunNotificationKind.RUNNING))
         val job = scope.launch(start = CoroutineStart.LAZY) {
             val client = HermesApiClient(serverUrl, token)
             while (isActive) {
@@ -41,10 +43,16 @@ class RunMonitorService : Service() {
                     val kind = runNotificationKind(status.status, status.active)
                     if (kind != RunNotificationKind.RUNNING && kind != RunNotificationKind.NONE) {
                         NotificationHelper.showRun(this@RunMonitorService, sessionId, title, kind)
-                        monitorJobs.remove(sessionId, coroutineContext[Job]!!)
-                        if (monitorJobs.size == 0) {
+                        val removal = monitorJobs.remove(sessionId, Monitor(coroutineContext[Job]!!, title))
+                        if (removal.nextOwner == null) {
                             stopForeground(STOP_FOREGROUND_REMOVE)
                             stopSelf()
+                        } else if (removal.wasOwner) {
+                            val next = removal.nextOwner
+                            startForeground(
+                                NotificationHelper.answerForegroundNotificationId(),
+                                NotificationHelper.runNotification(this@RunMonitorService, next.sessionId, next.value.title, RunNotificationKind.RUNNING)
+                            )
                         }
                         break
                     }
@@ -52,13 +60,13 @@ class RunMonitorService : Service() {
                 delay(4_000)
             }
         }
-        monitorJobs.put(sessionId, job)?.cancel()
+        monitorJobs.put(sessionId, Monitor(job, title))?.job?.cancel()
         job.start()
         return START_NOT_STICKY
     }
 
     override fun onDestroy() {
-        monitorJobs.values().forEach(Job::cancel)
+        monitorJobs.values().forEach { it.job.cancel() }
         monitorJobs.clear()
         scope.cancel()
         super.onDestroy()

@@ -1046,9 +1046,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun cancelDownload() {
         val file = _uiState.value.selectedDownload ?: return
+        val state = _uiState.value.downloadStates[file.id]
         downloadGenerations[file.id] = (downloadGenerations[file.id] ?: 0L) + 1L
         downloadJobs.remove(file.id)?.cancel()
-        NotificationHelper.cancelTransfer(getApplication(), file.id)
+        val target = state?.let(::downloadTransferNotificationTarget)
+            ?: TransferNotificationTarget(file.id, null)
+        NotificationHelper.cancelTransfer(getApplication(), target.key, target.sessionId)
         DownloadHelper.cancel(getApplication(), file.id)
         _uiState.update { it.copy(downloadStates = it.downloadStates - file.id) }
     }

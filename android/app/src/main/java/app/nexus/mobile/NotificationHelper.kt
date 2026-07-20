@@ -19,8 +19,10 @@ import androidx.core.app.NotificationManagerCompat
 object NotificationHelper {
     private const val TRANSFER_CHANNEL = "nexus_transfers"
     private const val ANSWER_CHANNEL = "nexus_answers_v2"
-    private const val TRANSFER_NOTIFICATION_BASE = 10_000
-    private const val ANSWER_NOTIFICATION_BASE = 20_000
+    private const val HASH_MASK = 0x1fffffff
+    private const val ANSWER_NOTIFICATION_TYPE = 0x20000000
+    private const val TRANSFER_NOTIFICATION_TYPE = 0x40000000
+    private const val FOREGROUND_NOTIFICATION_ID = 0x60000000
 
     fun ensureChannels(context: Context) {
         if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
@@ -153,12 +155,12 @@ object NotificationHelper {
             .build()
     }
 
-    fun answerNotificationId(sessionId: String): Int = ANSWER_NOTIFICATION_BASE + fnv32(sessionId)
+    fun answerNotificationId(sessionId: String): Int = ANSWER_NOTIFICATION_TYPE or typedHash(sessionId)
 
-    fun answerForegroundNotificationId(sessionId: String): Int = answerNotificationId(sessionId) + 50_000
+    fun answerForegroundNotificationId(): Int = FOREGROUND_NOTIFICATION_ID
 
     fun transferNotificationId(sessionId: String?, key: String): Int =
-        TRANSFER_NOTIFICATION_BASE + fnv32("transfer|${sessionId.orEmpty()}|$key")
+        TRANSFER_NOTIFICATION_TYPE or typedHash("${sessionId.orEmpty()}|$key")
 
     private fun transferId(sessionId: String?, key: String): Int = transferNotificationId(sessionId, key)
 
@@ -226,6 +228,8 @@ object NotificationHelper {
         }
         return (hash and 0x7fffffffL).toInt()
     }
+
+    private fun typedHash(value: String): Int = fnv32(value) and HASH_MASK
 
     const val EXTRA_SESSION_ID = "nexus_notification_session_id"
     const val EXTRA_FILE_KEY = "nexus_notification_file_key"

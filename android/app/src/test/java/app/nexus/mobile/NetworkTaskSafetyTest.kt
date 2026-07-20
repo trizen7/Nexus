@@ -45,6 +45,33 @@ class NetworkTaskSafetyTest {
     }
 
     @Test
+    fun `removing foreground owner selects another running session`() {
+        val registry = SessionMonitorRegistry<String>()
+        registry.put("one", "job-1")
+        registry.put("two", "job-2")
+
+        val removal = registry.remove("two", "job-2")
+
+        assertTrue(removal.removed)
+        assertTrue(removal.wasOwner)
+        assertEquals("one", removal.nextOwner?.sessionId)
+        assertEquals("job-1", removal.nextOwner?.value)
+    }
+
+    @Test
+    fun `removing non owner leaves current foreground owner unchanged`() {
+        val registry = SessionMonitorRegistry<String>()
+        registry.put("one", "job-1")
+        registry.put("two", "job-2")
+
+        val removal = registry.remove("one", "job-1")
+
+        assertTrue(removal.removed)
+        assertFalse(removal.wasOwner)
+        assertEquals("two", removal.nextOwner?.sessionId)
+    }
+
+    @Test
     fun `logout cleanup remains local and never stops the remote run`() {
         val actions = mutableListOf<String>()
 

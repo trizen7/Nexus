@@ -29,13 +29,39 @@ private fun effectivePort(uri: URI): Int = when {
 }
 
 internal class SessionMonitorRegistry<T : Any> {
-    private val entries = java.util.concurrent.ConcurrentHashMap<String, T>()
+    data class Entry<T>(val sessionId: String, val value: T)
+    data class Removal<T>(val removed: Boolean, val wasOwner: Boolean, val nextOwner: Entry<T>?)
+
+    private val entries = linkedMapOf<String, T>()
+    private var ownerSessionId: String? = null
     val size: Int get() = entries.size
 
-    fun put(sessionId: String, value: T): T? = entries.put(sessionId, value)
-    fun remove(sessionId: String, value: T): Boolean = entries.remove(sessionId, value)
+    @Synchronized
+    fun put(sessionId: String, value: T): T? {
+        val previous = entries.put(sessionId, value)
+        ownerSessionId = sessionId
+        return previous
+    }
+
+    @Synchronized
+    fun remove(sessionId: String, value: T): Removal<T> {
+        val removed = entries[sessionId] == value && entries.remove(sessionId) != null
+        val wasOwner = removed && ownerSessionId == sessionId
+        if (wasOwner) ownerSessionId = entries.keys.lastOrNull()
+        return Removal(removed, wasOwner, owner())
+    }
+
+    @Synchronized
+    fun owner(): Entry<T>? = ownerSessionId?.let { id -> entries[id]?.let { Entry(id, it) } }
+
+    @Synchronized
     fun values(): List<T> = entries.values.toList()
-    fun clear() = entries.clear()
+
+    @Synchronized
+    fun clear() {
+        entries.clear()
+        ownerSessionId = null
+    }
 }
 
 internal inline fun performLocalLogoutCleanup(

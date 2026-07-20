@@ -305,6 +305,16 @@ data class FileDownloadState(
     val sessionId: String? = null
 )
 
+data class TransferNotificationTarget(val key: String, val sessionId: String?)
+
+fun downloadTransferNotificationTarget(state: FileDownloadState): TransferNotificationTarget =
+    TransferNotificationTarget(state.key, state.sessionId)
+
+fun downloadTransferNotificationId(state: FileDownloadState): Int {
+    val target = downloadTransferNotificationTarget(state)
+    return NotificationHelper.transferNotificationId(target.sessionId, target.key)
+}
+
 data class ComposerDraft(
     val text: String = "",
     val imageIds: List<String> = emptyList(),
