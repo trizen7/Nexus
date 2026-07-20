@@ -4,14 +4,15 @@ Nexus 是一个面向 Hermes Agent 的社区移动客户端与轻量移动网关
 
 项目目标是让 Hermes 核心保持原版、可独立升级，同时把移动端所需的登录、会话、附件、缓存、下载、通知和断线续接能力放在客户端与移动网关中。
 
-当前版本：0.0.1
+当前版本：0.0.2
 
 ## 组成
 
 - `android/`：Kotlin + Jetpack Compose Android 客户端；
 - `gateway/`：Python + aiohttp 移动网关和管理网页；
 - `docs/`：Docker、NAS、迁移与运维文档；
-- `.github/`：持续集成、Issue 和 Pull Request 模板。
+- `.github/`：持续集成、Issue 和 Pull Request 模板；
+- `文档/`：版本更新记录和分级开发待办。
 
 ## 当前能力
 
@@ -160,6 +161,11 @@ cd android
 - Nexus 使用新包名，可与旧星禾版并存；本地草稿和缓存不会自动迁移。
 
 欢迎通过 Issue 报告 Bug，提交时请附版本、Android 系统、复现步骤和必要日志。请勿附带密码、Token、私人会话或用户文件。
+
+项目进展见：
+
+- [`文档/05-版本更新记录.md`](文档/05-版本更新记录.md)；
+- [`文档/06-开发计划与待办.md`](文档/06-开发计划与待办.md)。
 
 ## 许可证与品牌
 
