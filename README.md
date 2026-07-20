@@ -10,8 +10,10 @@ Nexus 是一个面向 Hermes Agent 的社区移动客户端与轻量移动网关
 
 - `android/`：Kotlin + Jetpack Compose Android 客户端；
 - `gateway/`：Python + aiohttp 移动网关和管理网页；
-- `docs/`：Docker、NAS、迁移与运维文档；
+- `docs/`：Docker、NAS、迁移、运维和开发计划文档；
 - `.github/`：持续集成、Issue 和 Pull Request 模板。
+
+开发方向与待办见 [`docs/development-roadmap.md`](docs/development-roadmap.md)。
 
 ## 当前能力
 
