@@ -795,10 +795,17 @@ async def setup(request: web.Request) -> web.Response:
                 status=403,
             )
         session_secret = secrets.token_urlsafe(48)
-        _write_config(request.app[CONFIG_PATH_KEY], hermes_api_url, hermes_api_token, session_secret)
-        password_salt, password_hash = _hash_password(password)
-        _write_credentials(request.app[CREDENTIALS_PATH_KEY], username, password_salt, password_hash, 1)
-        token_path.unlink()
+        config_path = request.app[CONFIG_PATH_KEY]
+        credentials_path = request.app[CREDENTIALS_PATH_KEY]
+        try:
+            _write_config(config_path, hermes_api_url, hermes_api_token, session_secret)
+            password_salt, password_hash = _hash_password(password)
+            _write_credentials(credentials_path, username, password_salt, password_hash, 1)
+            token_path.unlink()
+        except Exception:
+            config_path.unlink(missing_ok=True)
+            credentials_path.unlink(missing_ok=True)
+            raise
         config.session_secret = session_secret
         config.upstream_url = hermes_api_url
         config.upstream_token = hermes_api_token
@@ -1236,6 +1243,29 @@ def _secure_atomic_write(path: Path, content: str) -> None:
         temporary.unlink(missing_ok=True)
 
 
+def _secure_existing_file(path: Path) -> bool:
+    try:
+        file_stat = path.lstat()
+        if not stat.S_ISREG(file_stat.st_mode) or path.is_symlink():
+            return False
+        if os.name != "nt":
+            os.chmod(path, 0o600, follow_symlinks=False)
+        descriptor = os.open(path, _bootstrap_open_flags(os.O_RDONLY))
+        try:
+            opened_stat = os.fstat(descriptor)
+            if not stat.S_ISREG(opened_stat.st_mode):
+                return False
+            if (opened_stat.st_dev, opened_stat.st_ino) != (file_stat.st_dev, file_stat.st_ino):
+                return False
+            if os.name != "nt" and stat.S_IMODE(opened_stat.st_mode) != 0o600:
+                return False
+        finally:
+            os.close(descriptor)
+        return True
+    except (OSError, NotImplementedError):
+        return False
+
+
 def _bootstrap_open_flags(access: int) -> int:
     flags = access
     if hasattr(os, "O_BINARY"):
@@ -1331,6 +1361,8 @@ def create_app(
     config_valid = not config_exists
     if config_exists:
         try:
+            if not _secure_existing_file(resolved_config_path):
+                raise OSError("configuration file is not secure")
             loaded = json.loads(resolved_config_path.read_text(encoding="utf-8"))
             if isinstance(loaded, dict):
                 saved_config = loaded
@@ -1355,6 +1387,8 @@ def create_app(
     legacy_password = ""
     if credentials_exists:
         try:
+            if not _secure_existing_file(resolved_credentials_path):
+                raise OSError("credentials file is not secure")
             saved_credentials = json.loads(resolved_credentials_path.read_text(encoding="utf-8"))
             if not isinstance(saved_credentials, dict):
                 raise ValueError("credentials must be an object")

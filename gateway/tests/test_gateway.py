@@ -267,6 +267,98 @@ async def test_concurrent_setup_with_same_token_commits_exactly_one_configuratio
 
 
 @pytest.mark.asyncio
+async def test_setup_rolls_back_when_account_commit_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+):
+    import nexus_gateway.app as gateway_app
+
+    config_path = tmp_path / "config.json"
+    account_path = tmp_path / "account.json"
+    token_path = tmp_path / "bootstrap.token"
+    app = create_app(
+        username=None,
+        password=None,
+        session_secret=None,
+        upstream_url=None,
+        upstream_token=None,
+        storage_dir=tmp_path / "media",
+        credentials_path=account_path,
+        config_path=config_path,
+        bootstrap_token_path=token_path,
+        transcribe_audio=lambda _path: {"success": False, "transcript": ""},
+    )
+    token = token_path.read_text(encoding="utf-8").strip()
+    original_replace = gateway_app.os.replace
+
+    def fail_account_commit(source, destination):
+        if Path(destination) == account_path:
+            raise OSError("injected account commit failure")
+        return original_replace(source, destination)
+
+    monkeypatch.setattr(gateway_app.os, "replace", fail_account_commit)
+    async with TestClient(TestServer(app)) as client:
+        response = await client.post("/api/setup", json={
+            "username": "admin",
+            "password": "strong-password",
+            "hermes_api_url": "http://127.0.0.1:9",
+            "hermes_api_token": "upstream-key",
+            "bootstrap_token": token,
+        })
+
+    assert response.status == 502
+    assert not config_path.exists()
+    assert not account_path.exists()
+    assert token_path.read_text(encoding="utf-8").strip() == token
+    assert app[GATEWAY_CONFIG_KEY].initialized is False
+    assert app[GATEWAY_CONFIG_KEY].setup_available is True
+
+
+@pytest.mark.asyncio
+async def test_setup_rolls_back_when_bootstrap_token_cannot_be_consumed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+):
+    config_path = tmp_path / "config.json"
+    account_path = tmp_path / "account.json"
+    token_path = tmp_path / "bootstrap.token"
+    app = create_app(
+        username=None,
+        password=None,
+        session_secret=None,
+        upstream_url=None,
+        upstream_token=None,
+        storage_dir=tmp_path / "media",
+        credentials_path=account_path,
+        config_path=config_path,
+        bootstrap_token_path=token_path,
+        transcribe_audio=lambda _path: {"success": False, "transcript": ""},
+    )
+    token = token_path.read_text(encoding="utf-8").strip()
+    original_unlink = Path.unlink
+
+    def fail_token_unlink(path, *args, **kwargs):
+        if path == token_path:
+            raise PermissionError("injected token unlink failure")
+        return original_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(Path, "unlink", fail_token_unlink)
+    async with TestClient(TestServer(app)) as client:
+        response = await client.post("/api/setup", json={
+            "username": "admin",
+            "password": "strong-password",
+            "hermes_api_url": "http://127.0.0.1:9",
+            "hermes_api_token": "upstream-key",
+            "bootstrap_token": token,
+        })
+
+    assert response.status == 502
+    assert not config_path.exists()
+    assert not account_path.exists()
+    assert token_path.read_text(encoding="utf-8").strip() == token
+    assert app[GATEWAY_CONFIG_KEY].initialized is False
+    assert app[GATEWAY_CONFIG_KEY].setup_available is True
+
+
+@pytest.mark.asyncio
 async def test_setup_writes_execute_while_application_setup_lock_is_held(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ):
@@ -477,6 +569,78 @@ def test_existing_bootstrap_token_fails_closed_when_permissions_cannot_be_tighte
     )
 
     assert app[GATEWAY_CONFIG_KEY].setup_available is False
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX symlinks are unavailable on Windows")
+@pytest.mark.parametrize("file_name", ["config.json", "account.json"])
+def test_existing_config_and_account_symlinks_fail_closed(tmp_path: Path, file_name: str):
+    config_path = tmp_path / "config.json"
+    account_path = tmp_path / "account.json"
+    config_content = json.dumps({
+        "hermes_api_url": "http://example.test",
+        "hermes_api_token": "secret",
+        "session_secret": "s" * 32,
+    })
+    account_content = json.dumps({
+        "username": "admin",
+        "password": "legacy-password",
+        "revision": 1,
+    })
+    config_path.write_text(config_content, encoding="utf-8")
+    account_path.write_text(account_content, encoding="utf-8")
+    link_path = tmp_path / file_name
+    target_path = tmp_path / f"real-{file_name}"
+    link_path.replace(target_path)
+    link_path.symlink_to(target_path)
+
+    app = create_app(
+        username=None,
+        password=None,
+        session_secret=None,
+        upstream_url=None,
+        upstream_token=None,
+        storage_dir=tmp_path / "media",
+        credentials_path=account_path,
+        config_path=config_path,
+        transcribe_audio=lambda _path: {"success": False, "transcript": ""},
+    )
+
+    assert app[GATEWAY_CONFIG_KEY].initialized is False
+    assert app[GATEWAY_CONFIG_KEY].setup_available is False
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX permission bits are unavailable on Windows")
+def test_existing_config_and_account_permissions_are_tightened(tmp_path: Path):
+    config_path = tmp_path / "config.json"
+    account_path = tmp_path / "account.json"
+    config_path.write_text(json.dumps({
+        "hermes_api_url": "http://example.test",
+        "hermes_api_token": "secret",
+        "session_secret": "s" * 32,
+    }), encoding="utf-8")
+    account_path.write_text(json.dumps({
+        "username": "admin",
+        "password": "legacy-password",
+        "revision": 1,
+    }), encoding="utf-8")
+    config_path.chmod(0o644)
+    account_path.chmod(0o644)
+
+    app = create_app(
+        username=None,
+        password=None,
+        session_secret=None,
+        upstream_url=None,
+        upstream_token=None,
+        storage_dir=tmp_path / "media",
+        credentials_path=account_path,
+        config_path=config_path,
+        transcribe_audio=lambda _path: {"success": False, "transcript": ""},
+    )
+
+    assert app[GATEWAY_CONFIG_KEY].initialized is True
+    assert stat.S_IMODE(config_path.stat().st_mode) == 0o600
+    assert stat.S_IMODE(account_path.stat().st_mode) == 0o600
 
 
 @pytest.mark.asyncio
