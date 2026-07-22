@@ -10,6 +10,8 @@ import app.nexus.mobile.network.ChatImage
 import app.nexus.mobile.network.ChatMessage
 import app.nexus.mobile.network.ChatRole
 import app.nexus.mobile.network.HermesApiClient
+import app.nexus.mobile.network.HermesCronJob
+import app.nexus.mobile.network.HermesModel
 import app.nexus.mobile.network.HermesSession
 import app.nexus.mobile.network.HermesStreamEvent
 import app.nexus.mobile.network.friendlyNetworkError
@@ -32,6 +34,17 @@ data class MainUiState(
     val hermesVersion: String? = null,
     val sessions: List<HermesSession> = emptyList(),
     val activeSessionId: String? = null,
+    val models: List<HermesModel> = emptyList(),
+    val selectedModelId: String? = null,
+    val modelsLoading: Boolean = false,
+    val modelPickerOpen: Boolean = false,
+    val cronManagerOpen: Boolean = false,
+    val cronJobs: List<HermesCronJob> = emptyList(),
+    val cronJobsLoading: Boolean = false,
+    val cronBusyJobId: String? = null,
+    val cronEditor: CronJobEditorState? = null,
+    val cronJobToDelete: HermesCronJob? = null,
+    val cronNotice: String? = null,
     val messages: List<ChatMessage> = emptyList(),
     val input: String = "",
     val pendingImages: List<ChatImage> = emptyList(),
@@ -66,6 +79,12 @@ data class MainUiState(
 ) {
     val activeSession: HermesSession?
         get() = sessions.firstOrNull { it.id == activeSessionId }
+
+    val selectedModel: HermesModel?
+        get() = models.firstOrNull { it.id == selectedModelId }
+
+    val selectedModelLabel: String
+        get() = selectedModel?.displayName ?: selectedModelId ?: "服务器默认"
 }
 
 enum class ConnectionStatus { NOT_CONFIGURED, CONNECTING, CONNECTED, FAILED }
@@ -87,6 +106,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             password = "",
             token = savedConnection.token,
             activeSessionId = savedConnection.activeSessionId,
+            selectedModelId = savedConnection.selectedModelId,
             autoRefresh = savedConnection.autoRefresh,
             themeMode = savedConnection.themeMode,
             connectionStatus = if (savedConnection.isUsable) ConnectionStatus.CONNECTING else ConnectionStatus.NOT_CONFIGURED
@@ -154,13 +174,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 val api = HermesApiClient(snapshot.serverUrl, snapshot.token)
                 val accessToken = snapshot.token.ifBlank { api.login(snapshot.username, snapshot.password) }
                 val health = api.health()
-                val sessions = api.listSessions()
+                val sessions = visibleSessions(api.listSessions())
                 client = api
                 Triple(accessToken, health, sessions)
             }.onSuccess { (accessToken, health, sessions) ->
-                val selected = _uiState.value.activeSessionId
-                    ?.takeIf { id -> sessions.any { it.id == id } }
-                    ?: sessions.firstOrNull()?.id
+                val selected = resolveVisibleActiveSessionId(sessions, _uiState.value.activeSessionId)
                 connectionStore.saveLogin(snapshot.serverUrl, snapshot.username, accessToken, selected)
                 _uiState.update {
                     it.copy(
@@ -174,6 +192,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         error = null
                     )
                 }
+                refreshModels(showErrors = false)
                 if (selected != null) {
                     loadSession(selected)
                     refreshActiveRunStatus()
@@ -193,8 +212,26 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun refreshSessions() {
         val api = client ?: return
         viewModelScope.launch {
-            runCatching { api.listSessions() }
-                .onSuccess { sessions -> _uiState.update { it.copy(sessions = sessions) } }
+            runCatching { visibleSessions(api.listSessions()) }
+                .onSuccess { sessions ->
+                    val currentSessionId = _uiState.value.activeSessionId
+                    val selected = resolveVisibleActiveSessionId(
+                        sessions = sessions,
+                        preferredSessionId = currentSessionId,
+                        chooseFirstWhenMissing = currentSessionId != null
+                    )
+                    _uiState.update { state ->
+                        state.copy(
+                            sessions = sessions,
+                            activeSessionId = selected,
+                            messages = if (currentSessionId != selected && selected == null) emptyList() else state.messages
+                        )
+                    }
+                    if (currentSessionId != selected) {
+                        connectionStore.saveActiveSession(selected)
+                        if (selected != null) loadSession(selected)
+                    }
+                }
                 .onFailure { showError(it) }
         }
     }
@@ -871,7 +908,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     sessionId = sessionId,
                     message = text,
                     attachmentIds = uploadedImageIds + uploadedFileId?.let(::listOf).orEmpty(),
-                    attachmentKinds = uploadedFileId?.let { mapOf(it to "file") }.orEmpty()
+                    attachmentKinds = uploadedFileId?.let { mapOf(it to "file") }.orEmpty(),
+                    model = state.selectedModelId
                 ) { event -> handleStreamEvent(sessionId, assistantId, event) }
                 connectionStore.saveMessageCache(sessionId, _uiState.value.messages)
             }.onSuccess {
@@ -1109,6 +1147,259 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun showComingSoon(feature: String) {
         _uiState.update { it.copy(featurePanelOpen = false, error = "${feature}将在后续版本开放") }
     }
+
+    fun openModelPicker() {
+        _uiState.update { it.copy(modelPickerOpen = true, settingsOpen = false, error = null) }
+        if (_uiState.value.models.isEmpty() && !_uiState.value.modelsLoading) refreshModels()
+    }
+
+    fun closeModelPicker() {
+        _uiState.update { it.copy(modelPickerOpen = false) }
+    }
+
+    fun refreshModels(showErrors: Boolean = true) {
+        val api = client ?: return
+        if (_uiState.value.modelsLoading) return
+        _uiState.update { it.copy(modelsLoading = true) }
+        viewModelScope.launch {
+            runCatching { api.listModels() }
+                .onSuccess { models ->
+                    val selected = resolveSelectedModelId(models, _uiState.value.selectedModelId)
+                    connectionStore.saveSelectedModel(selected)
+                    _uiState.update {
+                        it.copy(
+                            models = models,
+                            selectedModelId = selected,
+                            modelsLoading = false
+                        )
+                    }
+                }
+                .onFailure { error ->
+                    _uiState.update { it.copy(modelsLoading = false) }
+                    if (showErrors) showError(error)
+                }
+        }
+    }
+
+    fun selectModel(modelId: String?) {
+        if (modelId != null && _uiState.value.models.none { it.id == modelId }) return
+        connectionStore.saveSelectedModel(modelId)
+        _uiState.update { it.copy(selectedModelId = modelId, modelPickerOpen = false, error = null) }
+    }
+
+    fun openCronManager() {
+        _uiState.update {
+            it.copy(
+                cronManagerOpen = true,
+                settingsOpen = false,
+                cronNotice = null,
+                error = null
+            )
+        }
+        refreshCronJobs()
+    }
+
+    fun closeCronManager() {
+        _uiState.update {
+            it.copy(
+                cronManagerOpen = false,
+                cronEditor = null,
+                cronJobToDelete = null,
+                cronNotice = null,
+                error = null
+            )
+        }
+    }
+
+    fun refreshCronJobs() {
+        val api = client ?: return
+        if (_uiState.value.cronJobsLoading) return
+        _uiState.update { it.copy(cronJobsLoading = true, cronNotice = null) }
+        viewModelScope.launch {
+            runCatching { api.listCronJobs() }
+                .onSuccess { jobs -> _uiState.update { it.copy(cronJobs = jobs, cronJobsLoading = false) } }
+                .onFailure { error ->
+                    _uiState.update { it.copy(cronJobsLoading = false) }
+                    showError(error)
+                }
+        }
+    }
+
+    fun createCronJob() {
+        _uiState.update { it.copy(cronEditor = CronJobEditorState.create(), cronNotice = null, error = null) }
+    }
+
+    fun editCronJob(job: HermesCronJob) {
+        _uiState.update { it.copy(cronEditor = CronJobEditorState.edit(job), cronNotice = null, error = null) }
+    }
+
+    fun cancelCronEditor() {
+        if (_uiState.value.cronBusyJobId != null) return
+        _uiState.update { it.copy(cronEditor = null, error = null) }
+    }
+
+    fun updateCronJobName(value: String) = updateCronEditor { it.copy(name = value) }
+
+    fun updateCronJobSchedule(value: String) = updateCronEditor { it.copy(schedule = value) }
+
+    fun updateCronJobPrompt(value: String) = updateCronEditor { it.copy(prompt = value) }
+
+    fun updateCronJobRepeat(value: String) = updateCronEditor { it.copy(repeatText = value) }
+
+    fun updateCronJobEnabled(value: Boolean) = updateCronEditor { it.copy(enabled = value) }
+
+    private fun updateCronEditor(transform: (CronJobEditorState) -> CronJobEditorState) {
+        if (_uiState.value.cronBusyJobId != null) return
+        _uiState.update { state ->
+            state.copy(cronEditor = state.cronEditor?.let(transform), error = null)
+        }
+    }
+
+    fun saveCronJob() {
+        val api = client ?: return
+        val editor = _uiState.value.cronEditor ?: return
+        val name = editor.name.trim()
+        val schedule = editor.schedule.trim()
+        val prompt = editor.prompt.trim()
+        when {
+            name.isBlank() -> {
+                _uiState.update { it.copy(error = "任务名称不能为空") }
+                return
+            }
+            schedule.isBlank() -> {
+                _uiState.update { it.copy(error = "执行计划不能为空") }
+                return
+            }
+            prompt.isBlank() -> {
+                _uiState.update { it.copy(error = "任务内容不能为空") }
+                return
+            }
+            !isValidRepeatInput(editor.repeatText) -> {
+                _uiState.update { it.copy(error = "重复次数必须是大于 0 的整数，留空表示一直执行") }
+                return
+            }
+        }
+        val busyKey = editor.key
+        _uiState.update { it.copy(cronBusyJobId = busyKey, cronNotice = null, error = null) }
+        viewModelScope.launch {
+            runCatching {
+                var saved = if (editor.jobId == null) {
+                    api.createCronJob(name, schedule, prompt, repeatCountOrNull(editor.repeatText))
+                } else {
+                    api.updateCronJob(
+                        jobId = editor.jobId,
+                        name = name,
+                        schedule = schedule,
+                        prompt = prompt,
+                        repeatTimes = repeatCountOrNull(editor.repeatText),
+                        completedRuns = editor.completedRuns
+                    )
+                }
+                saved = when {
+                    editor.enabled && saved.isPaused -> api.resumeCronJob(saved.id)
+                    !editor.enabled && !saved.isPaused -> api.pauseCronJob(saved.id)
+                    else -> saved
+                }
+                saved
+            }.onSuccess { job ->
+                _uiState.update { state ->
+                    state.copy(
+                        cronJobs = upsertCronJob(state.cronJobs, job),
+                        cronBusyJobId = null,
+                        cronEditor = null,
+                        cronNotice = if (editor.jobId == null) "定时任务已创建" else "定时任务已保存"
+                    )
+                }
+            }.onFailure { error ->
+                _uiState.update { it.copy(cronBusyJobId = null) }
+                showError(error)
+            }
+        }
+    }
+
+    fun toggleCronJob(job: HermesCronJob) {
+        val api = client ?: return
+        if (_uiState.value.cronBusyJobId != null) return
+        _uiState.update { it.copy(cronBusyJobId = job.id, cronNotice = null, error = null) }
+        viewModelScope.launch {
+            runCatching { if (job.isPaused) api.resumeCronJob(job.id) else api.pauseCronJob(job.id) }
+                .onSuccess { updated ->
+                    _uiState.update { state ->
+                        state.copy(
+                            cronJobs = upsertCronJob(state.cronJobs, updated),
+                            cronBusyJobId = null,
+                            cronNotice = if (updated.isPaused) "任务已暂停" else "任务已恢复"
+                        )
+                    }
+                }
+                .onFailure { error ->
+                    _uiState.update { it.copy(cronBusyJobId = null) }
+                    showError(error)
+                }
+        }
+    }
+
+    fun runCronJobNow(job: HermesCronJob) {
+        val api = client ?: return
+        if (_uiState.value.cronBusyJobId != null) return
+        _uiState.update { it.copy(cronBusyJobId = job.id, cronNotice = null, error = null) }
+        viewModelScope.launch {
+            runCatching { api.runCronJob(job.id) }
+                .onSuccess { updated ->
+                    _uiState.update { state ->
+                        state.copy(
+                            cronJobs = upsertCronJob(state.cronJobs, updated),
+                            cronBusyJobId = null,
+                            cronNotice = "任务已提交执行"
+                        )
+                    }
+                }
+                .onFailure { error ->
+                    _uiState.update { it.copy(cronBusyJobId = null) }
+                    showError(error)
+                }
+        }
+    }
+
+    fun requestDeleteCronJob(job: HermesCronJob) {
+        if (_uiState.value.cronBusyJobId != null) return
+        _uiState.update { it.copy(cronJobToDelete = job, cronNotice = null, error = null) }
+    }
+
+    fun cancelDeleteCronJob() {
+        if (_uiState.value.cronBusyJobId != null) return
+        _uiState.update { it.copy(cronJobToDelete = null, error = null) }
+    }
+
+    fun confirmDeleteCronJob() {
+        val api = client ?: return
+        val job = _uiState.value.cronJobToDelete ?: return
+        if (_uiState.value.cronBusyJobId != null) return
+        _uiState.update { it.copy(cronBusyJobId = job.id, error = null) }
+        viewModelScope.launch {
+            runCatching {
+                check(api.deleteCronJob(job.id)) { "服务器未删除该定时任务" }
+            }
+                .onSuccess {
+                    _uiState.update { state ->
+                        state.copy(
+                            cronJobs = state.cronJobs.filterNot { it.id == job.id },
+                            cronBusyJobId = null,
+                            cronJobToDelete = null,
+                            cronNotice = "定时任务已删除"
+                        )
+                    }
+                }
+                .onFailure { error ->
+                    _uiState.update { it.copy(cronBusyJobId = null) }
+                    showError(error)
+                }
+        }
+    }
+
+    private fun upsertCronJob(jobs: List<HermesCronJob>, job: HermesCronJob): List<HermesCronJob> =
+        if (jobs.any { it.id == job.id }) jobs.map { if (it.id == job.id) job else it }
+        else listOf(job) + jobs
 
     fun openSettings() {
         _uiState.update { it.copy(settingsOpen = true, drawerOpen = false) }

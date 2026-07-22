@@ -103,3 +103,49 @@ data class SessionRunStatus(
     val toolName: String? = null,
     val message: String? = null
 )
+data class HermesModel(
+    val id: String,
+    val root: String? = null,
+    val ownedBy: String? = null
+) {
+    val displayName: String
+        get() = id.ifBlank { root.orEmpty() }
+}
+
+data class HermesCronSchedule(
+    val kind: String = "",
+    val expression: String = "",
+    val runAt: String? = null,
+    val minutes: Int? = null,
+    val display: String? = null
+) {
+    val editableValue: String
+        get() = when (kind.lowercase()) {
+            "cron" -> expression
+            "interval" -> minutes?.let { "every ${it}m" }.orEmpty()
+            "once" -> runAt.orEmpty()
+            else -> expression.ifBlank { runAt.orEmpty() }
+        }
+
+    val displayValue: String
+        get() = display?.takeIf { it.isNotBlank() }
+            ?: editableValue.ifBlank { "未设置" }
+}
+
+data class HermesCronJob(
+    val id: String,
+    val name: String,
+    val prompt: String,
+    val schedule: HermesCronSchedule,
+    val repeatTimes: Int? = null,
+    val completedRuns: Int = 0,
+    val enabled: Boolean = true,
+    val state: String = "scheduled",
+    val nextRunAt: String? = null,
+    val lastRunAt: String? = null,
+    val lastStatus: String? = null,
+    val lastError: String? = null
+) {
+    val isPaused: Boolean
+        get() = !enabled || state.equals("paused", ignoreCase = true)
+}

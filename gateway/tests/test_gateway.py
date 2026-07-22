@@ -29,6 +29,8 @@ from nexus_gateway.app import (
 @pytest_asyncio.fixture
 async def upstream_client():
     captured_chat: dict = {}
+    captured_completion: dict = {}
+    captured_completion_headers: dict[str, str] = {}
     release_chat = asyncio.Event()
     chat_started = asyncio.Event()
 
@@ -69,6 +71,26 @@ async def upstream_client():
             content_type="text/event-stream",
         )
 
+    async def chat_completions(request):
+        assert request.headers["Authorization"] == "Bearer upstream-secret"
+        captured_completion.clear()
+        captured_completion.update(await request.json())
+        captured_completion_headers.clear()
+        captured_completion_headers.update(dict(request.headers))
+        return web.Response(
+            text=(
+                'data: {"choices":[{"index":0,"delta":{"role":"assistant"},"finish_reason":null}]}\n\n'
+                'event: hermes.tool.progress\n'
+                'data: {"tool":"search","toolCallId":"tool-1","status":"running"}\n\n'
+                'event: hermes.tool.progress\n'
+                'data: {"tool":"search","toolCallId":"tool-1","status":"completed"}\n\n'
+                'data: {"choices":[{"index":0,"delta":{"content":"\u6a21\u578b\u56de\u590d"},"finish_reason":null}]}\n\n'
+                'data: {"choices":[{"index":0,"delta":{},"finish_reason":"stop"}]}\n\n'
+                'data: [DONE]\n\n'
+            ),
+            content_type="text/event-stream",
+        )
+
     async def messages(request):
         assert request.headers["Authorization"] == "Bearer upstream-secret"
         data = [
@@ -105,9 +127,12 @@ async def upstream_client():
     app.router.add_delete("/api/sessions/{session_id}", delete_session)
     app.router.add_get("/api/sessions/{session_id}/messages", messages)
     app.router.add_post("/api/sessions/{session_id}/chat/stream", chat)
+    app.router.add_post("/v1/chat/completions", chat_completions)
     server = TestServer(app)
     client = TestClient(server)
     client.captured_chat = captured_chat
+    client.captured_completion = captured_completion
+    client.captured_completion_headers = captured_completion_headers
     client.release_chat = release_chat
     client.chat_started = chat_started
     await client.start_server()
@@ -1462,6 +1487,54 @@ async def test_audio_upload_is_transcribed_on_server(gateway_client: TestClient)
     audio = await gateway_client.get("/api/admin/audio", headers=await auth_headers(gateway_client))
     assert (await files.json())["data"] == []
     assert len((await audio.json())["data"]) == 1
+
+
+@pytest.mark.asyncio
+async def test_selected_model_uses_openai_route_and_adapts_stream(
+    gateway_client: TestClient,
+    upstream_client: TestClient,
+):
+    response = await gateway_client.post(
+        "/api/sessions/session-1/chat/stream",
+        json={"message": "hello", "model": "route-fast"},
+        headers=await auth_headers(gateway_client),
+    )
+
+    assert response.status == 200
+    stream = await response.text()
+    assert "event: run.started" in stream
+    assert "event: tool.started" in stream
+    assert "event: tool.completed" in stream
+    assert "event: assistant.delta" in stream
+    assert "\u6a21\u578b\u56de\u590d" in stream
+    assert "event: run.completed" in stream
+    assert stream.count("event: run.completed") == 1
+    assert stream.rstrip().endswith("event: done\ndata: {}")
+
+    captured = upstream_client.captured_completion
+    assert captured == {
+        "model": "route-fast",
+        "stream": True,
+        "messages": [{"role": "user", "content": "hello"}],
+    }
+    assert upstream_client.captured_completion_headers["X-Hermes-Session-Id"] == "session-1"
+
+
+@pytest.mark.asyncio
+async def test_chat_without_model_keeps_native_session_route(
+    gateway_client: TestClient,
+    upstream_client: TestClient,
+):
+    response = await gateway_client.post(
+        "/api/sessions/session-1/chat/stream",
+        json={"message": "native"},
+        headers=await auth_headers(gateway_client),
+    )
+
+    assert response.status == 200
+    assert "\u6536\u5230" in await response.text()
+    assert upstream_client.captured_chat == {"message": "native"}
+    assert upstream_client.captured_completion == {}
 
 
 @pytest.mark.asyncio

@@ -1159,6 +1159,104 @@ async def proxy(request: web.Request) -> web.StreamResponse:
     return response
 
 
+def _session_sse_event(event_name: str, payload: dict[str, Any] | None = None) -> bytes:
+    data = json.dumps(payload or {}, ensure_ascii=False, separators=(",", ":"))
+    return f"event: {event_name}\ndata: {data}\n\n".encode("utf-8")
+
+
+class _OpenAISessionStreamAdapter:
+    """Convert Hermes' OpenAI-compatible SSE into the mobile session SSE contract."""
+
+    def __init__(self) -> None:
+        self._buffer = b""
+        self.outcome: str | None = None
+
+    def feed(self, chunk: bytes) -> list[bytes]:
+        self._buffer += chunk
+        blocks = re.split(br"\r?\n\r?\n", self._buffer)
+        self._buffer = blocks.pop() if blocks else b""
+        events: list[bytes] = []
+        for block in blocks:
+            events.extend(self._convert_block(block))
+        return events
+
+    def finish(self) -> list[bytes]:
+        events: list[bytes] = []
+        if self._buffer.strip():
+            events.extend(self._convert_block(self._buffer))
+        self._buffer = b""
+        if self.outcome is None:
+            self.outcome = "failed"
+            events.append(_session_sse_event("error", {"message": "Hermes 模型请求失败：流意外结束"}))
+        return events
+
+    def _convert_block(self, block: bytes) -> list[bytes]:
+        event_name = ""
+        data_lines: list[str] = []
+        for raw_line in block.decode("utf-8", errors="replace").splitlines():
+            if raw_line.startswith("event:"):
+                event_name = raw_line.partition(":")[2].strip()
+            elif raw_line.startswith("data:"):
+                data_lines.append(raw_line.partition(":")[2].lstrip())
+        data_text = "\n".join(data_lines).strip()
+        if not data_text:
+            return []
+        if data_text == "[DONE]":
+            return self._complete_if_needed()
+        try:
+            payload = json.loads(data_text)
+        except json.JSONDecodeError:
+            return []
+        if not isinstance(payload, dict):
+            return []
+
+        if event_name == "hermes.tool.progress":
+            status = str(payload.get("status", "")).lower()
+            tool_name = payload.get("tool") or payload.get("tool_name") or payload.get("name")
+            event = "tool.completed" if status in {"completed", "complete", "success", "succeeded"} else "tool.started"
+            return [_session_sse_event(event, {"tool_name": tool_name})]
+
+        choices = payload.get("choices")
+        if not isinstance(choices, list) or not choices:
+            if payload.get("error"):
+                return self._fail("Hermes 模型请求失败")
+            return []
+        choice = choices[0] if isinstance(choices[0], dict) else {}
+        delta = choice.get("delta") if isinstance(choice.get("delta"), dict) else {}
+        content = delta.get("content")
+        events: list[bytes] = []
+        if isinstance(content, str) and content:
+            events.append(_session_sse_event("assistant.delta", {"delta": content}))
+        elif isinstance(content, list):
+            text = "".join(
+                str(part.get("text", ""))
+                for part in content
+                if isinstance(part, dict) and part.get("type") in {"text", "output_text"}
+            )
+            if text:
+                events.append(_session_sse_event("assistant.delta", {"delta": text}))
+
+        finish_reason = choice.get("finish_reason")
+        if finish_reason:
+            if str(finish_reason).lower() == "stop":
+                events.extend(self._complete_if_needed())
+            else:
+                events.extend(self._fail("Hermes 模型请求失败"))
+        return events
+
+    def _complete_if_needed(self) -> list[bytes]:
+        if self.outcome is not None:
+            return []
+        self.outcome = "completed"
+        return [_session_sse_event("run.completed", {"completed": True})]
+
+    def _fail(self, message: str) -> list[bytes]:
+        if self.outcome is not None:
+            return []
+        self.outcome = "failed"
+        return [_session_sse_event("error", {"message": message})]
+
+
 async def _tracked_session_stream(request: web.Request) -> web.StreamResponse:
     session_id = request.path.split("/")[3]
     tracker: RunTracker = request.app[RUN_TRACKER_KEY]
@@ -1170,7 +1268,19 @@ async def _tracked_session_stream(request: web.Request) -> web.StreamResponse:
     except (json.JSONDecodeError, ValueError):
         return web.json_response({"error": {"code": "invalid_json", "message": "请求 JSON 无效"}}, status=400)
     body = await _prepare_chat_body(request, body)
-    body_bytes = json.dumps(body, ensure_ascii=False).encode("utf-8")
+    selected_model = str(body.pop("model", "") or "").strip()
+    use_model_route = bool(selected_model)
+    if use_model_route:
+        upstream_body = {
+            "model": selected_model,
+            "stream": True,
+            "messages": [{"role": "user", "content": body.get("message", "")}],
+        }
+        upstream_path = "/v1/chat/completions"
+    else:
+        upstream_body = body
+        upstream_path = request.path_qs
+    body_bytes = json.dumps(upstream_body, ensure_ascii=False).encode("utf-8")
     queue = tracker.subscribe(session_id)
     run_id = f"run_{uuid.uuid4().hex}"
     tracker.start(session_id, run_id)
@@ -1178,17 +1288,38 @@ async def _tracked_session_stream(request: web.Request) -> web.StreamResponse:
     async def consume_upstream() -> None:
         upstream = None
         try:
+            upstream_headers = _upstream_headers(request.app, request)
+            if use_model_route:
+                upstream_headers.update({
+                    "Accept": "text/event-stream",
+                    "Content-Type": "application/json",
+                    "X-Hermes-Session-Id": session_id,
+                })
             upstream = await request.app[HTTP_SESSION_KEY].post(
-                f"{request.app[GATEWAY_CONFIG_KEY].upstream_url}{request.path_qs}",
-                headers=_upstream_headers(request.app, request),
+                f"{request.app[GATEWAY_CONFIG_KEY].upstream_url}{upstream_path}",
+                headers=upstream_headers,
                 data=body_bytes,
             )
             if not upstream.ok:
                 raise RuntimeError(f"Hermes HTTP {upstream.status}")
-            async for chunk in upstream.content.iter_chunked(CHUNK_SIZE):
-                tracker.consume_sse(session_id, chunk)
-                tracker.publish(session_id, chunk)
-            tracker.finish(session_id, "completed")
+            if use_model_route:
+                adapter = _OpenAISessionStreamAdapter()
+                started = _session_sse_event("run.started", {"run_id": run_id})
+                tracker.consume_sse(session_id, started)
+                tracker.publish(session_id, started)
+                async for chunk in upstream.content.iter_chunked(CHUNK_SIZE):
+                    for event in adapter.feed(chunk):
+                        tracker.consume_sse(session_id, event)
+                        tracker.publish(session_id, event)
+                for event in adapter.finish():
+                    tracker.consume_sse(session_id, event)
+                    tracker.publish(session_id, event)
+                tracker.finish(session_id, adapter.outcome or "failed")
+            else:
+                async for chunk in upstream.content.iter_chunked(CHUNK_SIZE):
+                    tracker.consume_sse(session_id, chunk)
+                    tracker.publish(session_id, chunk)
+                tracker.finish(session_id, "completed")
         except asyncio.CancelledError:
             tracker.finish(session_id, "stopped")
             raise

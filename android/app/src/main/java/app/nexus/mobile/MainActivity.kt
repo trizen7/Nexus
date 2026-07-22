@@ -279,6 +279,7 @@ private fun NexusApp(state: MainUiState, viewModel: MainViewModel) {
     if (state.settingsOpen) {
         SettingsDialog(state, viewModel)
     }
+    ManagementDialogs(state, viewModel)
     if (state.insecureHttpConfirmationPending) {
         AlertDialog(
             onDismissRequest = viewModel::cancelInsecureHttpConnection,
@@ -341,6 +342,13 @@ private fun SettingsDialog(state: MainUiState, viewModel: MainViewModel) {
                 Text("服务器：${state.serverUrl}", color = primaryInk())
                 Text("Hermes：${state.hermesVersion ?: "未知"}", color = MaterialTheme.colorScheme.onSurfaceVariant)
                 Text("客户端：${BuildConfig.VERSION_NAME}", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Text("聊天模型：${state.selectedModelLabel}", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                OutlinedButton(onClick = viewModel::openModelPicker, modifier = Modifier.fillMaxWidth()) {
+                    Text("选择聊天模型")
+                }
+                OutlinedButton(onClick = viewModel::openCronManager, modifier = Modifier.fillMaxWidth()) {
+                    Text("管理定时任务")
+                }
                 Row(verticalAlignment = Alignment.CenterVertically) {
                     Text("自动刷新会话", modifier = Modifier.weight(1f))
                     Switch(checked = state.autoRefresh, onCheckedChange = viewModel::setAutoRefresh)
@@ -461,7 +469,7 @@ private fun ChatScreen(state: MainUiState, viewModel: MainViewModel) {
                     Box(Modifier.size(6.dp).background(Color(0xFF49A37E), RoundedCornerShape(6.dp)))
                     Spacer(Modifier.width(5.dp))
                     Text(
-                        state.answerStatus.label ?: "已连接 · Hermes ${state.hermesVersion ?: ""}",
+                        state.answerStatus.label ?: "${state.selectedModelLabel} · Hermes ${state.hermesVersion ?: ""}",
                         color = when (state.answerStatus) {
                             AnswerStatus.COMPLETED -> Color(0xFF3B8A68)
                             AnswerStatus.FAILED -> Color(0xFF9D493E)
@@ -491,6 +499,14 @@ private fun ChatScreen(state: MainUiState, viewModel: MainViewModel) {
                     androidx.compose.material3.DropdownMenuItem(
                         text = { Text("刷新当前对话") },
                         onClick = { moreOpen = false; viewModel.refreshFromForeground() }
+                    )
+                    androidx.compose.material3.DropdownMenuItem(
+                        text = { Text("选择模型") },
+                        onClick = { moreOpen = false; viewModel.openModelPicker() }
+                    )
+                    androidx.compose.material3.DropdownMenuItem(
+                        text = { Text("定时任务") },
+                        onClick = { moreOpen = false; viewModel.openCronManager() }
                     )
                     androidx.compose.material3.DropdownMenuItem(
                         text = { Text("设置") },

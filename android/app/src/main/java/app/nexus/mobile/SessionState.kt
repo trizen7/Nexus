@@ -2,6 +2,8 @@ package app.nexus.mobile
 
 import app.nexus.mobile.network.ChatMessage
 import app.nexus.mobile.network.ChatRole
+import app.nexus.mobile.network.HermesCronJob
+import app.nexus.mobile.network.HermesModel
 import app.nexus.mobile.network.HermesSession
 import app.nexus.mobile.network.SessionChannel
 
@@ -12,8 +14,29 @@ data class VoiceTranscriptState(val text: String, val uploading: Boolean)
 fun voiceTranscriptState(transcript: String): VoiceTranscriptState =
     VoiceTranscriptState(text = transcript.trim(), uploading = false)
 
+fun visibleSessions(sessions: List<HermesSession>): List<HermesSession> =
+    sessions.filterNot { it.channel == SessionChannel.CRON }
+
+fun resolveVisibleActiveSessionId(
+    sessions: List<HermesSession>,
+    preferredSessionId: String?,
+    chooseFirstWhenMissing: Boolean = true
+): String? {
+    val visible = visibleSessions(sessions)
+    return preferredSessionId?.takeIf { id -> visible.any { it.id == id } }
+        ?: visible.firstOrNull()?.id?.takeIf { chooseFirstWhenMissing }
+}
+
+fun resolveSelectedModelId(models: List<HermesModel>, preferredModelId: String?): String? =
+    preferredModelId?.takeIf { id -> models.any { it.id == id } }
+
+fun isValidRepeatInput(value: String): Boolean =
+    value.isBlank() || (value.toIntOrNull()?.let { it > 0 } == true)
+
+fun repeatCountOrNull(value: String): Int? = value.trim().takeIf { it.isNotEmpty() }?.toIntOrNull()
+
 fun groupSessionsByChannel(sessions: List<HermesSession>): List<SessionGroup> =
-    sessions
+    visibleSessions(sessions)
         .groupBy { it.channel }
         .map { (channel, items) ->
             SessionGroup(channel, items.sortedByDescending { it.lastActive })
@@ -38,12 +61,39 @@ data class SavedConnection(
     val token: String,
     val activeSessionId: String?,
     val autoRefresh: Boolean = true,
-    val themeMode: ThemeMode = ThemeMode.SYSTEM
+    val themeMode: ThemeMode = ThemeMode.SYSTEM,
+    val selectedModelId: String? = null
 ) {
     val isUsable: Boolean
         get() = serverUrl.isNotBlank() && username.isNotBlank() && token.isNotBlank()
 }
 
+data class CronJobEditorState(
+    val jobId: String? = null,
+    val name: String = "",
+    val schedule: String = "",
+    val prompt: String = "",
+    val repeatText: String = "",
+    val enabled: Boolean = true,
+    val completedRuns: Int = 0
+) {
+    val key: String
+        get() = jobId ?: "new"
+
+    companion object {
+        fun create(): CronJobEditorState = CronJobEditorState()
+
+        fun edit(job: HermesCronJob): CronJobEditorState = CronJobEditorState(
+            jobId = job.id,
+            name = job.name,
+            schedule = job.schedule.editableValue,
+            prompt = job.prompt,
+            repeatText = job.repeatTimes?.toString().orEmpty(),
+            enabled = !job.isPaused,
+            completedRuns = job.completedRuns
+        )
+    }
+}
 data class ConversationDraft(
     val persistedSessionId: String?
 ) {

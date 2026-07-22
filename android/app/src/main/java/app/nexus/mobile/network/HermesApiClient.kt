@@ -4,6 +4,7 @@ import com.google.gson.Gson
 import com.google.gson.JsonArray
 import com.google.gson.JsonElement
 import com.google.gson.JsonObject
+import com.google.gson.JsonNull
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.withContext
 import okhttp3.MediaType.Companion.toMediaType
@@ -57,6 +58,20 @@ class HermesApiClient(
         }
     }
 
+    suspend fun listModels(): List<HermesModel> = withContext(Dispatchers.IO) {
+        val root = getJson("v1/models")
+        root.array("data").mapNotNull { element ->
+            element.asJsonObjectOrNull()?.toModel()
+        }
+    }
+
+    suspend fun listCronJobs(): List<HermesCronJob> = withContext(Dispatchers.IO) {
+        val root = getJson("api/jobs?include_disabled=true")
+        root.array("jobs").mapNotNull { element ->
+            element.asJsonObjectOrNull()?.toCronJob()
+        }
+    }
+
     suspend fun createSession(): HermesSession = withContext(Dispatchers.IO) {
         val payload = "{}"
         val root = requestJson(
@@ -85,6 +100,76 @@ class HermesApiClient(
                 .delete()
         )
         root.booleanValue("deleted")
+    }
+
+    suspend fun createCronJob(
+        name: String,
+        schedule: String,
+        prompt: String,
+        repeatTimes: Int?
+    ): HermesCronJob = withContext(Dispatchers.IO) {
+        val payload = JsonObject().apply {
+            addProperty("name", name)
+            addProperty("schedule", schedule)
+            addProperty("prompt", prompt)
+            addProperty("deliver", "local")
+            repeatTimes?.let { addProperty("repeat", it) }
+        }
+        val root = requestJson(
+            Request.Builder()
+                .url(baseUrl + "api/jobs")
+                .post(gson.toJson(payload).toRequestBody(jsonType))
+        )
+        root.objectValue("job").toCronJob() ?: error("服务器没有返回有效定时任务")
+    }
+
+    suspend fun updateCronJob(
+        jobId: String,
+        name: String,
+        schedule: String,
+        prompt: String,
+        repeatTimes: Int?,
+        completedRuns: Int
+    ): HermesCronJob = withContext(Dispatchers.IO) {
+        val repeatPayload = JsonObject().apply {
+            if (repeatTimes == null) add("times", JsonNull.INSTANCE) else addProperty("times", repeatTimes)
+            addProperty("completed", completedRuns)
+        }
+        val payload = JsonObject().apply {
+            addProperty("name", name)
+            addProperty("schedule", schedule)
+            addProperty("prompt", prompt)
+            add("repeat", repeatPayload)
+        }
+        val root = requestJson(
+            Request.Builder()
+                .url(baseUrl + "api/jobs/${encodePathSegment(jobId)}")
+                .patch(gson.toJson(payload).toRequestBody(jsonType))
+        )
+        root.objectValue("job").toCronJob() ?: error("服务器没有返回有效定时任务")
+    }
+
+    suspend fun deleteCronJob(jobId: String): Boolean = withContext(Dispatchers.IO) {
+        requestJson(
+            Request.Builder()
+                .url(baseUrl + "api/jobs/${encodePathSegment(jobId)}")
+                .delete()
+        ).booleanValue("ok")
+    }
+
+    suspend fun pauseCronJob(jobId: String): HermesCronJob = mutateCronJob(jobId, "pause")
+
+    suspend fun resumeCronJob(jobId: String): HermesCronJob = mutateCronJob(jobId, "resume")
+
+    suspend fun runCronJob(jobId: String): HermesCronJob = mutateCronJob(jobId, "run")
+
+    private suspend fun mutateCronJob(jobId: String, action: String): HermesCronJob = withContext(Dispatchers.IO) {
+        val root = requestJson(
+            Request.Builder()
+                .url(baseUrl + "api/jobs/${encodePathSegment(jobId)}/$action")
+                .post("{}".toRequestBody(jsonType))
+        )
+        root.objectValue("job").toCronJob() ?: error("服务器没有返回有效定时任务")
     }
 
     suspend fun deleteFile(fileId: String): Boolean = withContext(Dispatchers.IO) {
@@ -291,6 +376,7 @@ class HermesApiClient(
         images: List<ChatImage> = emptyList(),
         attachmentIds: List<String> = emptyList(),
         attachmentKinds: Map<String, String> = emptyMap(),
+        model: String? = null,
         onEvent: (HermesStreamEvent) -> Unit = {}
     ): List<HermesStreamEvent> = withContext(Dispatchers.IO) {
         val userContent: Any = if (images.isEmpty()) {
@@ -311,6 +397,7 @@ class HermesApiClient(
         val body = mutableMapOf<String, Any>("message" to userContent)
         if (attachmentIds.isNotEmpty()) body["attachment_ids"] = attachmentIds
         if (attachmentKinds.isNotEmpty()) body["attachment_kinds"] = attachmentKinds
+        model?.trim()?.takeIf { it.isNotEmpty() }?.let { body["model"] = it }
         val payload = gson.toJson(body)
         val request = authorizedRequest(
             baseUrl + "api/sessions/${encodePathSegment(sessionId)}/chat/stream"
@@ -465,11 +552,76 @@ private fun JsonObject.toSession(): HermesSession? {
     )
 }
 
+private fun JsonObject.toModel(): HermesModel? {
+    val id = string("id")
+    if (id.isBlank()) return null
+    return HermesModel(
+        id = id,
+        root = string("root").ifBlank { null },
+        ownedBy = string("owned_by").ifBlank { null }
+    )
+}
+
+private fun JsonObject.toCronJob(): HermesCronJob? {
+    val id = string("id")
+    if (id.isBlank()) return null
+    val scheduleElement = get("schedule")
+    val fallbackDisplay = string("schedule_display").ifBlank { null }
+    val schedule = when {
+        scheduleElement?.isJsonObject == true -> scheduleElement.asJsonObject.toCronSchedule(fallbackDisplay)
+        scheduleElement?.isJsonPrimitive == true -> HermesCronSchedule(
+            expression = scheduleElement.asString,
+            display = fallbackDisplay ?: scheduleElement.asString
+        )
+        else -> HermesCronSchedule(display = fallbackDisplay)
+    }
+    val repeatElement = get("repeat")
+    val repeatTimes = when {
+        repeatElement?.isJsonObject == true -> repeatElement.asJsonObject.nullableInt("times")
+        repeatElement?.isJsonPrimitive == true -> runCatching { repeatElement.asInt }.getOrNull()
+        else -> null
+    }
+    val completedRuns = if (repeatElement?.isJsonObject == true) {
+        repeatElement.asJsonObject.intValue("completed")
+    } else {
+        0
+    }
+    val enabled = get("enabled")
+        ?.takeUnless { it.isJsonNull }
+        ?.let { runCatching { it.asBoolean }.getOrNull() }
+        ?: true
+    return HermesCronJob(
+        id = id,
+        name = string("name").ifBlank { id },
+        prompt = string("prompt"),
+        schedule = schedule,
+        repeatTimes = repeatTimes,
+        completedRuns = completedRuns,
+        enabled = enabled,
+        state = string("state").ifBlank { if (enabled) "scheduled" else "paused" },
+        nextRunAt = string("next_run_at").ifBlank { null },
+        lastRunAt = string("last_run_at").ifBlank { null },
+        lastStatus = string("last_status").ifBlank { null },
+        lastError = string("last_error").ifBlank { null }
+    )
+}
+
+private fun JsonObject.toCronSchedule(fallbackDisplay: String?): HermesCronSchedule = HermesCronSchedule(
+    kind = string("kind"),
+    expression = string("expr"),
+    runAt = string("run_at").ifBlank { null },
+    minutes = nullableInt("minutes"),
+    display = string("display").ifBlank { fallbackDisplay }
+)
+
 private fun JsonObject.string(key: String): String =
     get(key)?.takeUnless { it.isJsonNull }?.let { runCatching { it.asString }.getOrNull() }.orEmpty()
 
 private fun JsonObject.intValue(key: String): Int =
     get(key)?.takeUnless { it.isJsonNull }?.let { runCatching { it.asInt }.getOrNull() } ?: 0
+
+private fun JsonObject.nullableInt(key: String): Int? =
+    get(key)?.takeUnless { it.isJsonNull }?.let { runCatching { it.asInt }.getOrNull() }
 
 private fun JsonObject.doubleValue(key: String): Double =
     get(key)?.takeUnless { it.isJsonNull }?.let { runCatching { it.asDouble }.getOrNull() } ?: 0.0

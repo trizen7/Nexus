@@ -1,5 +1,8 @@
 package app.nexus.mobile
 
+import app.nexus.mobile.network.HermesCronJob
+import app.nexus.mobile.network.HermesCronSchedule
+import app.nexus.mobile.network.HermesModel
 import app.nexus.mobile.network.HermesSession
 import app.nexus.mobile.network.SessionChannel
 import org.junit.Assert.assertEquals
@@ -34,7 +37,7 @@ class SessionStateTest {
 
         val groups = groupSessionsByChannel(sessions)
 
-        assertEquals(listOf(SessionChannel.API, SessionChannel.PC, SessionChannel.CRON), groups.map { it.channel })
+        assertEquals(listOf(SessionChannel.API, SessionChannel.PC), groups.map { it.channel })
     }
 
     @Test
@@ -500,4 +503,69 @@ class SessionStateTest {
         assertTrue(compact.endsWith(".apk"))
         assertTrue("…" in compact)
     }
+    @Test
+    fun `cron sessions are hidden from the conversation list`() {
+        val sessions = listOf(
+            HermesSession("api", "Mobile", "api_server", 2, 2.0),
+            HermesSession("cron", "Scheduled run", "cron", 4, 3.0)
+        )
+
+        assertEquals(listOf("api"), visibleSessions(sessions).map { it.id })
+        assertEquals(listOf(SessionChannel.API), groupSessionsByChannel(sessions).map { it.channel })
+    }
+
+    @Test
+    fun `hidden cron active session falls back to a visible conversation`() {
+        val sessions = listOf(
+            HermesSession("cron", null, "cron", 0, 3.0),
+            HermesSession("api", null, "api_server", 0, 2.0)
+        )
+
+        assertEquals("api", resolveVisibleActiveSessionId(sessions, "cron"))
+        assertEquals(null, resolveVisibleActiveSessionId(sessions, null, chooseFirstWhenMissing = false))
+    }
+
+    @Test
+    fun `model preference is retained when available and otherwise uses server default`() {
+        val models = listOf(HermesModel("model-a"), HermesModel("model-b"))
+
+        assertEquals("model-b", resolveSelectedModelId(models, "model-b"))
+        assertEquals(null, resolveSelectedModelId(models, "missing"))
+        assertEquals(null, resolveSelectedModelId(models, null))
+        assertEquals(null, resolveSelectedModelId(emptyList(), "missing"))
+    }
+
+    @Test
+    fun `repeat input accepts blank or positive integers only`() {
+        assertEquals(true, isValidRepeatInput(""))
+        assertEquals(true, isValidRepeatInput("3"))
+        assertEquals(false, isValidRepeatInput("0"))
+        assertEquals(false, isValidRepeatInput("-1"))
+        assertEquals(false, isValidRepeatInput("three"))
+        assertEquals(3, repeatCountOrNull(" 3 "))
+        assertEquals(null, repeatCountOrNull(""))
+    }
+
+    @Test
+    fun `cron editor preserves persisted values while editing`() {
+        val job = HermesCronJob(
+            id = "job-1",
+            name = "Daily summary",
+            prompt = "Summarize activity",
+            schedule = HermesCronSchedule(kind = "cron", expression = "0 9 * * *"),
+            repeatTimes = 3,
+            completedRuns = 1,
+            enabled = false,
+            state = "paused"
+        )
+
+        val editor = CronJobEditorState.edit(job)
+
+        assertEquals("job-1", editor.jobId)
+        assertEquals("0 9 * * *", editor.schedule)
+        assertEquals("3", editor.repeatText)
+        assertEquals(1, editor.completedRuns)
+        assertEquals(false, editor.enabled)
+    }
+
 }

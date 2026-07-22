@@ -461,4 +461,113 @@ class HermesApiClientTest {
         assertEquals("/api/sessions/mobile-session/chat/stream", request.path)
         assertEquals("Bearer test-token", request.getHeader("Authorization"))
     }
+
+    @Test
+    fun `listModels parses selectable model ids`() = runTest {
+        server.enqueue(
+            MockResponse()
+                .setResponseCode(200)
+                .setHeader("Content-Type", "application/json")
+                .setBody("""{"object":"list","data":[{"id":"model-a","root":"root-a","owned_by":"local"},{"id":"model-b","owned_by":"remote"}]}""")
+        )
+        val client = HermesApiClient(server.url("/").toString(), "test-token")
+
+        val models = client.listModels()
+
+        assertEquals(listOf("model-a", "model-b"), models.map { it.id })
+        assertEquals("root-a", models.first().root)
+        assertEquals("local", models.first().ownedBy)
+        assertEquals("/v1/models", server.takeRequest().path)
+    }
+
+    @Test
+    fun `listCronJobs parses schedule repeat and paused state`() = runTest {
+        server.enqueue(
+            MockResponse()
+                .setResponseCode(200)
+                .setHeader("Content-Type", "application/json")
+                .setBody(
+                    """{"jobs":[{"id":"job-1","name":"Daily","prompt":"Summarize","schedule":{"kind":"cron","expr":"0 9 * * *","display":"Daily at 09:00"},"repeat":{"times":3,"completed":1},"enabled":false,"state":"paused","next_run_at":"2026-07-23T01:00:00Z","last_status":"completed"},{"id":"job-2","name":"Once","prompt":"Check","schedule":"2026-08-01T00:00:00Z","repeat":1,"enabled":true}]}"""
+                )
+        )
+        val client = HermesApiClient(server.url("/").toString(), "test-token")
+
+        val jobs = client.listCronJobs()
+
+        assertEquals(2, jobs.size)
+        assertEquals("0 9 * * *", jobs[0].schedule.editableValue)
+        assertEquals("Daily at 09:00", jobs[0].schedule.displayValue)
+        assertEquals(3, jobs[0].repeatTimes)
+        assertEquals(1, jobs[0].completedRuns)
+        assertEquals(true, jobs[0].isPaused)
+        assertEquals(1, jobs[1].repeatTimes)
+        assertEquals("/api/jobs?include_disabled=true", server.takeRequest().path)
+    }
+
+    @Test
+    fun `create and update cron jobs use Hermes payload shapes`() = runTest {
+        val createdJob = """{"job":{"id":"job-1","name":"Daily","prompt":"Summarize","schedule":{"kind":"cron","expr":"0 9 * * *"},"repeat":{"times":3,"completed":0},"enabled":true,"state":"scheduled"}}"""
+        val updatedJob = """{"job":{"id":"job-1","name":"Morning","prompt":"Review","schedule":{"kind":"cron","expr":"0 8 * * *"},"repeat":{"times":5,"completed":2},"enabled":true,"state":"scheduled"}}"""
+        server.enqueue(MockResponse().setResponseCode(201).setHeader("Content-Type", "application/json").setBody(createdJob))
+        server.enqueue(MockResponse().setResponseCode(200).setHeader("Content-Type", "application/json").setBody(updatedJob))
+        val client = HermesApiClient(server.url("/").toString(), "test-token")
+
+        client.createCronJob("Daily", "0 9 * * *", "Summarize", 3)
+        client.updateCronJob("job-1", "Morning", "0 8 * * *", "Review", 5, 2)
+
+        val createRequest = server.takeRequest()
+        assertEquals("POST", createRequest.method)
+        assertEquals("/api/jobs", createRequest.path)
+        val createJson = com.google.gson.JsonParser.parseString(createRequest.body.readUtf8()).asJsonObject
+        assertEquals("local", createJson.get("deliver").asString)
+        assertEquals(3, createJson.get("repeat").asInt)
+
+        val updateRequest = server.takeRequest()
+        assertEquals("PATCH", updateRequest.method)
+        assertEquals("/api/jobs/job-1", updateRequest.path)
+        val repeat = com.google.gson.JsonParser.parseString(updateRequest.body.readUtf8())
+            .asJsonObject.getAsJsonObject("repeat")
+        assertEquals(5, repeat.get("times").asInt)
+        assertEquals(2, repeat.get("completed").asInt)
+    }
+
+    @Test
+    fun `cron job actions use dedicated Hermes endpoints`() = runTest {
+        val jobBody = """{"job":{"id":"job-1","name":"Daily","prompt":"Summarize","schedule":{"kind":"cron","expr":"0 9 * * *"},"enabled":true,"state":"scheduled"}}"""
+        repeat(3) {
+            server.enqueue(MockResponse().setResponseCode(200).setHeader("Content-Type", "application/json").setBody(jobBody))
+        }
+        server.enqueue(MockResponse().setResponseCode(200).setHeader("Content-Type", "application/json").setBody("{\"ok\":true}"))
+        val client = HermesApiClient(server.url("/").toString(), "test-token")
+
+        client.pauseCronJob("job-1")
+        client.resumeCronJob("job-1")
+        client.runCronJob("job-1")
+        assertEquals(true, client.deleteCronJob("job-1"))
+
+        assertEquals("POST /api/jobs/job-1/pause", requestSignature(server.takeRequest()))
+        assertEquals("POST /api/jobs/job-1/resume", requestSignature(server.takeRequest()))
+        assertEquals("POST /api/jobs/job-1/run", requestSignature(server.takeRequest()))
+        assertEquals("DELETE /api/jobs/job-1", requestSignature(server.takeRequest()))
+    }
+
+    @Test
+    fun `streamChat sends selected model`() = runTest {
+        server.enqueue(
+            MockResponse()
+                .setResponseCode(200)
+                .setHeader("Content-Type", "text/event-stream")
+                .setBody("event: run.completed\ndata: {\"completed\":true}\n\n")
+        )
+        val client = HermesApiClient(server.url("/").toString(), "test-token")
+
+        client.streamChat("mobile-session", "hello", model = "model-fast")
+
+        val body = com.google.gson.JsonParser.parseString(server.takeRequest().body.readUtf8()).asJsonObject
+        assertEquals("model-fast", body.get("model").asString)
+    }
+
+    private fun requestSignature(request: okhttp3.mockwebserver.RecordedRequest): String =
+        "${request.method} ${request.path}"
+
 }
