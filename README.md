@@ -120,6 +120,25 @@ android/app/build/outputs/apk/debug/app-debug.apk
 
 ## 测试
 
+### 持续本地测试环境（无需 Docker）
+
+本机已安装并启用 Hermes API Server 时，可一键创建隔离测试环境：
+
+```bat
+scripts\local-test.cmd setup
+```
+
+后续每次迭代使用 `upgrade` 同步依赖与 Hermes 配置并执行端到端冒烟测试，使用 `verify` 运行完整的非 Docker 回归门禁：
+
+```bat
+scripts\local-test.cmd upgrade
+scripts\local-test.cmd verify
+```
+
+测试数据、日志和凭据全部保存在被 Git 忽略的 `.local-test/`。详细命令、升级约定和安全边界见 [`docs/local-test-environment.md`](docs/local-test-environment.md)。
+
+### 手动测试命令
+
 移动网关：
 
 ```bash
@@ -146,6 +165,7 @@ cd android
 以下内容不得提交：
 
 - `gateway/.env`；
+- `.local-test/`；
 - `gateway/data/`；
 - Android 签名文件、`local.properties`；
 - 用户上传文件、会话导出、日志和真实服务器地址；

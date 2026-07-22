@@ -32,6 +32,15 @@ node tests/web_contract_test.js
 
 5. 提交 Pull Request，说明问题、根因、修改范围和验证结果。
 
+本机已安装 Hermes 时，推荐使用持续本地测试环境代替手工启动 Gateway：
+
+```bat
+scripts\local-test.cmd upgrade
+scripts\local-test.cmd verify
+```
+
+该流程不会调用 Docker；使用说明见 [`docs/local-test-environment.md`](docs/local-test-environment.md)。
+
 ## 代码约定
 
 - Android 使用 Kotlin、Jetpack Compose、JDK 17；
