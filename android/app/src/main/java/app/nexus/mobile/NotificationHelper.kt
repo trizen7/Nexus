@@ -25,7 +25,6 @@ object NotificationHelper {
     private const val FOREGROUND_NOTIFICATION_ID = 0x60000000
 
     fun ensureChannels(context: Context) {
-        if (Build.VERSION.SDK_INT < Build.VERSION_CODES.O) return
         val manager = context.getSystemService(NotificationManager::class.java)
         manager.createNotificationChannel(
             NotificationChannel(TRANSFER_CHANNEL, "文件传输", NotificationManager.IMPORTANCE_LOW).apply {

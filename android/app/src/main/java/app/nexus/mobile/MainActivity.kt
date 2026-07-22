@@ -8,6 +8,7 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
+import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
 import androidx.core.view.WindowCompat
@@ -60,7 +61,7 @@ import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.AddComment
 import androidx.compose.material.icons.filled.MoreVert
-import androidx.compose.material.icons.filled.Send
+import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.StopCircle
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Refresh
@@ -81,9 +82,12 @@ import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.SideEffect
 import androidx.compose.runtime.collectAsState
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.key
+import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
@@ -146,7 +150,7 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        WindowCompat.setDecorFitsSystemWindows(window, false)
+        enableEdgeToEdge()
         WindowCompat.getInsetsController(window, window.decorView).show(
             WindowInsetsCompat.Type.systemBars()
         )
@@ -162,11 +166,11 @@ class MainActivity : ComponentActivity() {
             val systemDark = (configuration.uiMode and android.content.res.Configuration.UI_MODE_NIGHT_MASK) ==
                 android.content.res.Configuration.UI_MODE_NIGHT_YES
             val darkTheme = shouldUseDarkTheme(state.themeMode, systemDark)
-            val controller = WindowCompat.getInsetsController(window, window.decorView)
-            controller.isAppearanceLightStatusBars = !darkTheme
-            controller.isAppearanceLightNavigationBars = !darkTheme
-            window.statusBarColor = android.graphics.Color.TRANSPARENT
-            window.navigationBarColor = android.graphics.Color.TRANSPARENT
+            SideEffect {
+                val controller = WindowCompat.getInsetsController(window, window.decorView)
+                controller.isAppearanceLightStatusBars = !darkTheme
+                controller.isAppearanceLightNavigationBars = !darkTheme
+            }
             MaterialTheme(colorScheme = if (darkTheme) DarkScheme else LightScheme) {
                 NexusApp(state, viewModel)
             }
@@ -501,8 +505,8 @@ private fun ChatScreen(state: MainUiState, viewModel: MainViewModel) {
             val initialIndex = latestLazyListIndex(state.messages.size)
             val listState = rememberLazyListState(initialFirstVisibleItemIndex = initialIndex)
             var userHasScrolledHistory by remember { mutableStateOf(false) }
-            var prependAnchorIndex by remember { mutableStateOf(0) }
-            var prependAnchorOffset by remember { mutableStateOf(0) }
+            var prependAnchorIndex by remember { mutableIntStateOf(0) }
+            var prependAnchorOffset by remember { mutableIntStateOf(0) }
 
             LaunchedEffect(state.initialScrollToken) {
                 userHasScrolledHistory = false
@@ -522,21 +526,24 @@ private fun ChatScreen(state: MainUiState, viewModel: MainViewModel) {
                 }
             }
 
-            LaunchedEffect(
-                listState.firstVisibleItemIndex,
+            val shouldRequestOlderMessages by remember(
                 state.hasMoreMessages,
                 state.loadingOlder,
                 state.loading,
                 userHasScrolledHistory
             ) {
-                if (shouldLoadOlderMessages(
+                derivedStateOf {
+                    shouldLoadOlderMessages(
                         listState.firstVisibleItemIndex,
                         state.hasMoreMessages,
                         state.loadingOlder,
                         state.loading,
                         userHasScrolledHistory
                     )
-                ) {
+                }
+            }
+            LaunchedEffect(shouldRequestOlderMessages) {
+                if (shouldRequestOlderMessages) {
                     prependAnchorIndex = listState.firstVisibleItemIndex
                     prependAnchorOffset = listState.firstVisibleItemScrollOffset
                     viewModel.loadOlderMessages()
@@ -786,7 +793,7 @@ private fun ChatComposer(state: MainUiState, input: String, viewModel: MainViewM
                             }
                         } else if (canSendComposition(input, state.pendingImages.map { it.id }, state.pendingFile != null)) {
                             IconButton(onClick = viewModel::send) {
-                                Icon(Icons.Filled.Send, contentDescription = "发送", tint = primaryInk())
+                                Icon(Icons.AutoMirrored.Filled.Send, contentDescription = "发送", tint = primaryInk())
                             }
                         }
                     }

@@ -40,3 +40,6 @@ gateway/logs/
 # Temporary files
 *.tmp
 *.part
+
+# Local delivery artifacts
+成品/

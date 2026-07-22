@@ -2,6 +2,7 @@ package app.nexus.mobile
 
 import android.content.Context
 import android.media.MediaRecorder
+import android.os.Build
 import java.io.File
 
 class VoiceRecorder(private val context: Context) {
@@ -12,7 +13,7 @@ class VoiceRecorder(private val context: Context) {
     fun start() {
         stop(delete = true)
         val file = File(context.cacheDir, "voice-${System.currentTimeMillis()}.m4a")
-        val mediaRecorder = MediaRecorder().apply {
+        val mediaRecorder = createMediaRecorder().apply {
             setAudioSource(MediaRecorder.AudioSource.MIC)
             setOutputFormat(MediaRecorder.OutputFormat.MPEG_4)
             setAudioEncoder(MediaRecorder.AudioEncoder.AAC)
@@ -47,6 +48,12 @@ class VoiceRecorder(private val context: Context) {
     fun cancel() {
         stop(delete = true)
     }
+
+    private fun createMediaRecorder(): MediaRecorder =
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.S) MediaRecorder(context) else legacyMediaRecorder()
+
+    @Suppress("DEPRECATION")
+    private fun legacyMediaRecorder(): MediaRecorder = MediaRecorder()
 }
 
 data class RecordedVoice(val file: File, val durationMillis: Long)
