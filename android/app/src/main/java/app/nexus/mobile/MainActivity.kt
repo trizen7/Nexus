@@ -18,6 +18,7 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
 import androidx.compose.foundation.background
+import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.border
 import androidx.compose.foundation.gestures.detectTapGestures
@@ -43,6 +44,8 @@ import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.KeyboardActions
+import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.material3.AlertDialog
@@ -60,25 +63,24 @@ import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material.icons.filled.AddComment
-import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.StopCircle
 import androidx.compose.material.icons.filled.Close
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.KeyboardArrowDown
+import androidx.compose.material.icons.filled.Visibility
+import androidx.compose.material.icons.filled.VisibilityOff
 import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.darkColorScheme
 import androidx.compose.material3.lightColorScheme
-import androidx.compose.material3.RadioButton
-import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
-import androidx.compose.material3.Switch
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
+import androidx.compose.material3.Typography
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -90,12 +92,21 @@ import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
+import androidx.compose.ui.focus.FocusRequester
+import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
+import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.input.ImeAction
+import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
+import androidx.compose.ui.text.input.VisualTransformation
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.pointer.pointerInput
@@ -113,27 +124,59 @@ import app.nexus.mobile.network.ChatRole
 import app.nexus.mobile.network.HermesSession
 
 private val LightScheme = lightColorScheme(
-    primary = Color(0xFF214F52),
+    primary = Color(0xFF4F46E5),
     onPrimary = Color.White,
-    secondary = Color(0xFF4F7477),
-    background = Color(0xFFF6F9F8),
+    primaryContainer = Color(0xFFE8E7FF),
+    onPrimaryContainer = Color(0xFF24205F),
+    secondary = Color(0xFF0F766E),
+    onSecondary = Color.White,
+    secondaryContainer = Color(0xFFD8F4EF),
+    onSecondaryContainer = Color(0xFF0C4A45),
+    tertiary = Color(0xFF2563EB),
+    background = Color(0xFFF7F7FC),
+    onBackground = Color(0xFF1A1A28),
     surface = Color(0xFFFFFFFF),
-    surfaceVariant = Color(0xFFEAF2F1),
-    outline = Color(0xFFD9E5E2),
-    error = Color(0xFF9D493E),
-    errorContainer = Color(0xFFFFECE9)
+    onSurface = Color(0xFF1C1C29),
+    surfaceVariant = Color(0xFFF0F1F8),
+    onSurfaceVariant = Color(0xFF626575),
+    outline = Color(0xFFD5D7E3),
+    outlineVariant = Color(0xFFE6E7EF),
+    error = Color(0xFFB42318),
+    errorContainer = Color(0xFFFFE9E7),
+    onErrorContainer = Color(0xFF7A271A)
 )
 
 private val DarkScheme = darkColorScheme(
-    primary = Color(0xFF9DD3CF),
-    onPrimary = Color(0xFF123638),
-    secondary = Color(0xFFABC9CC),
-    background = Color(0xFF101718),
-    surface = Color(0xFF172123),
-    surfaceVariant = Color(0xFF223033),
-    outline = Color(0xFF41575A),
+    primary = Color(0xFFC4C1FF),
+    onPrimary = Color(0xFF2B2674),
+    primaryContainer = Color(0xFF39348B),
+    onPrimaryContainer = Color(0xFFE7E5FF),
+    secondary = Color(0xFF7DD3C7),
+    onSecondary = Color(0xFF073D38),
+    secondaryContainer = Color(0xFF155F58),
+    onSecondaryContainer = Color(0xFFD0F7F1),
+    tertiary = Color(0xFF9EC1FF),
+    background = Color(0xFF111119),
+    onBackground = Color(0xFFE7E7F0),
+    surface = Color(0xFF1A1A24),
+    onSurface = Color(0xFFE8E7F1),
+    surfaceVariant = Color(0xFF272833),
+    onSurfaceVariant = Color(0xFFC7C7D4),
+    outline = Color(0xFF454653),
+    outlineVariant = Color(0xFF30313D),
     error = Color(0xFFFFB4AB),
-    errorContainer = Color(0xFF5B211C)
+    errorContainer = Color(0xFF5F211B),
+    onErrorContainer = Color(0xFFFFDAD5)
+)
+
+private val NexusTypography = Typography(
+    headlineLarge = TextStyle(fontSize = 34.sp, lineHeight = 40.sp, fontWeight = FontWeight.Bold),
+    headlineSmall = TextStyle(fontSize = 24.sp, lineHeight = 30.sp, fontWeight = FontWeight.Bold),
+    titleLarge = TextStyle(fontSize = 20.sp, lineHeight = 26.sp, fontWeight = FontWeight.SemiBold),
+    titleMedium = TextStyle(fontSize = 16.sp, lineHeight = 22.sp, fontWeight = FontWeight.SemiBold),
+    bodyLarge = TextStyle(fontSize = 16.sp, lineHeight = 24.sp),
+    bodyMedium = TextStyle(fontSize = 14.sp, lineHeight = 21.sp),
+    bodySmall = TextStyle(fontSize = 12.sp, lineHeight = 18.sp)
 )
 
 @Composable private fun appBackground() = MaterialTheme.colorScheme.background
@@ -171,7 +214,10 @@ class MainActivity : ComponentActivity() {
                 controller.isAppearanceLightStatusBars = !darkTheme
                 controller.isAppearanceLightNavigationBars = !darkTheme
             }
-            MaterialTheme(colorScheme = if (darkTheme) DarkScheme else LightScheme) {
+            MaterialTheme(
+                colorScheme = if (darkTheme) DarkScheme else LightScheme,
+                typography = NexusTypography
+            ) {
                 NexusApp(state, viewModel)
             }
         }
@@ -198,13 +244,17 @@ class MainActivity : ComponentActivity() {
 
 @Composable
 private fun NexusApp(state: MainUiState, viewModel: MainViewModel) {
-    BackHandler(enabled = state.drawerOpen) { viewModel.setDrawerOpen(false) }
+    BackHandler(enabled = state.settingsOpen) { viewModel.closeSettings() }
+    BackHandler(enabled = state.drawerOpen && !state.settingsOpen) { viewModel.setDrawerOpen(false) }
     val lifecycleOwner = LocalLifecycleOwner.current
     DisposableEffect(lifecycleOwner, state.connectionStatus) {
         val observer = LifecycleEventObserver { _, event ->
             when (event) {
                 Lifecycle.Event.ON_RESUME -> viewModel.onAppResume()
-                Lifecycle.Event.ON_PAUSE -> viewModel.stopPolling()
+                Lifecycle.Event.ON_PAUSE -> {
+                    viewModel.stopPolling()
+                    viewModel.flushDrafts()
+                }
                 else -> Unit
             }
         }
@@ -221,16 +271,16 @@ private fun NexusApp(state: MainUiState, viewModel: MainViewModel) {
     }
 
     Surface(modifier = Modifier.fillMaxSize(), color = appBackground()) {
-        if (state.connectionStatus != ConnectionStatus.CONNECTED) {
-            ConnectionScreen(state, viewModel)
-        } else {
-            Box(Modifier.fillMaxSize()) {
+        when {
+            state.connectionStatus != ConnectionStatus.CONNECTED -> ConnectionScreen(state, viewModel)
+            state.settingsOpen -> SettingsScreen(state, viewModel)
+            else -> Box(Modifier.fillMaxSize()) {
                 ChatScreen(state, viewModel)
                 if (state.drawerOpen) {
                     Box(
                         Modifier
                             .fillMaxSize()
-                            .background(Color.Black.copy(alpha = 0.25f))
+                            .background(Color.Black.copy(alpha = 0.34f))
                             .clickable { viewModel.setDrawerOpen(false) }
                     )
                     SessionDrawer(
@@ -276,9 +326,6 @@ private fun NexusApp(state: MainUiState, viewModel: MainViewModel) {
         )
     }
 
-    if (state.settingsOpen) {
-        SettingsDialog(state, viewModel)
-    }
     ManagementDialogs(state, viewModel)
     state.selectedDownload?.let { file ->
         FileDownloadDialog(file, state.downloadStates[file.id], viewModel)
@@ -324,192 +371,233 @@ private fun FileDownloadDialog(file: app.nexus.mobile.network.ChatFile, state: F
 }
 
 @Composable
-private fun SettingsDialog(state: MainUiState, viewModel: MainViewModel) {
-    AlertDialog(
-        onDismissRequest = viewModel::closeSettings,
-        title = { Text("设置") },
-        text = {
-            Column(verticalArrangement = Arrangement.spacedBy(12.dp)) {
-                Text("服务器：${state.serverUrl}", color = primaryInk())
-                Text("Hermes：${state.hermesVersion ?: "未知"}", color = MaterialTheme.colorScheme.onSurfaceVariant)
-                Text("客户端：${BuildConfig.VERSION_NAME}", color = MaterialTheme.colorScheme.onSurfaceVariant)
-                Text("人物模型：${state.selectedPersonaModelLabel}", color = MaterialTheme.colorScheme.onSurfaceVariant)
-                Text("调用模型：${state.selectedInferenceModelLabel}", color = MaterialTheme.colorScheme.onSurfaceVariant)
-                Text("推理深度：${state.selectedReasoningEffort.label}", color = MaterialTheme.colorScheme.onSurfaceVariant)
-                OutlinedButton(onClick = viewModel::openModelPicker, modifier = Modifier.fillMaxWidth()) {
-                    Text("选择人物、调用模型与推理深度")
-                }
-                OutlinedButton(onClick = viewModel::openCronManager, modifier = Modifier.fillMaxWidth()) {
-                    Text("管理定时任务")
-                }
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Text("自动刷新会话", modifier = Modifier.weight(1f))
-                    Switch(checked = state.autoRefresh, onCheckedChange = viewModel::setAutoRefresh)
-                }
-                Text("显示模式", color = primaryInk(), fontWeight = FontWeight.SemiBold)
-                ThemeMode.entries.forEach { mode ->
-                    Row(
-                        modifier = Modifier.fillMaxWidth().clickable { viewModel.setThemeMode(mode) },
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        RadioButton(selected = state.themeMode == mode, onClick = { viewModel.setThemeMode(mode) })
-                        Text(mode.label)
-                    }
-                }
-                OutlinedButton(onClick = viewModel::logout, modifier = Modifier.fillMaxWidth()) {
-                    Text("退出登录")
-                }
-            }
-        },
-        confirmButton = { TextButton(onClick = viewModel::closeSettings) { Text("完成") } }
-    )
-}
-
-@Composable
 private fun ConnectionScreen(state: MainUiState, viewModel: MainViewModel) {
-    Column(
-        modifier = Modifier.fillMaxSize().statusBarsPadding().padding(horizontal = 24.dp),
-        verticalArrangement = Arrangement.Center
+    var serverUrl by rememberSaveable { mutableStateOf(state.serverUrl) }
+    var username by rememberSaveable { mutableStateOf(state.username) }
+    var password by rememberSaveable { mutableStateOf(state.password) }
+    var passwordVisible by rememberSaveable { mutableStateOf(false) }
+    val scrollState = rememberScrollState()
+    val usernameFocusRequester = remember { FocusRequester() }
+    val passwordFocusRequester = remember { FocusRequester() }
+    val keyboardController = LocalSoftwareKeyboardController.current
+    val focusManager = LocalFocusManager.current
+    val connecting = state.connectionStatus == ConnectionStatus.CONNECTING
+    val canSubmit = serverUrl.isNotBlank() && username.isNotBlank() && password.isNotBlank() && !connecting
+
+    fun clearVisibleError() {
+        if (state.error != null) viewModel.clearError()
+    }
+
+    fun submit() {
+        if (!canSubmit) return
+        focusManager.clearFocus()
+        keyboardController?.hide()
+        viewModel.updateConnection(serverUrl, username, password)
+        viewModel.connect()
+    }
+
+    val background = Brush.verticalGradient(
+        listOf(
+            MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.7f),
+            MaterialTheme.colorScheme.background,
+            MaterialTheme.colorScheme.background
+        )
+    )
+    Box(
+        modifier = Modifier
+            .fillMaxSize()
+            .background(background)
     ) {
-        Text("Nexus", fontSize = 36.sp, fontWeight = FontWeight.SemiBold, color = primaryInk())
-        Text("把电脑上的 Hermes，安静地带到身边", color = mutedInk())
-        Spacer(Modifier.height(30.dp))
-        Card(
-            shape = RoundedCornerShape(24.dp),
-            colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-            border = androidx.compose.foundation.BorderStroke(1.dp, surfaceLine()),
-            elevation = CardDefaults.cardElevation(defaultElevation = 0.dp)
+        Column(
+            modifier = Modifier
+                .fillMaxSize()
+                .verticalScroll(scrollState)
+                .statusBarsPadding()
+                .navigationBarsPadding()
+                .imePadding()
+                .padding(horizontal = 20.dp, vertical = 28.dp),
+            verticalArrangement = Arrangement.Center
         ) {
-            Column(Modifier.padding(22.dp)) {
-                Text("连接Nexus", fontSize = 19.sp, fontWeight = FontWeight.SemiBold, color = primaryInk())
-                Text("局域网直连 HTTP，外网使用 HTTPS 反向代理", fontSize = 12.sp, color = mutedInk())
-                Spacer(Modifier.height(18.dp))
-                OutlinedTextField(
-                    value = state.serverUrl,
-                    onValueChange = { viewModel.updateConnection(it, state.username, state.password) },
-                    modifier = Modifier.fillMaxWidth(),
-                    label = { Text("Nexus API 地址") },
-                    placeholder = { Text("http://电脑局域网IP:18787") },
-                    supportingText = { Text("局域网填 http://IP:18787；外网填反向代理的 https://域名") },
-                    singleLine = true,
-                    shape = RoundedCornerShape(14.dp)
-                )
-                Spacer(Modifier.height(11.dp))
-                OutlinedTextField(
-                    value = state.username,
-                    onValueChange = { viewModel.updateConnection(state.serverUrl, it, state.password) },
-                    modifier = Modifier.fillMaxWidth(),
-                    label = { Text("账号") },
-                    singleLine = true,
-                    shape = RoundedCornerShape(14.dp)
-                )
-                Spacer(Modifier.height(11.dp))
-                OutlinedTextField(
-                    value = state.password,
-                    onValueChange = { viewModel.updateConnection(state.serverUrl, state.username, it) },
-                    modifier = Modifier.fillMaxWidth(),
-                    label = { Text("密码") },
-                    singleLine = true,
-                    visualTransformation = PasswordVisualTransformation(),
-                    shape = RoundedCornerShape(14.dp)
-                )
-                Spacer(Modifier.height(18.dp))
-                Button(
-                    onClick = viewModel::connect,
-                    enabled = state.connectionStatus != ConnectionStatus.CONNECTING,
-                    modifier = Modifier.fillMaxWidth().height(50.dp),
-                    shape = RoundedCornerShape(15.dp)
-                ) {
-                    if (state.connectionStatus == ConnectionStatus.CONNECTING) {
-                        CircularProgressIndicator(Modifier.width(18.dp), strokeWidth = 2.dp)
-                        Spacer(Modifier.width(10.dp))
-                    }
-                    Text("登录")
+            Surface(
+                modifier = Modifier.size(62.dp),
+                shape = RoundedCornerShape(21.dp),
+                color = MaterialTheme.colorScheme.primary,
+                shadowElevation = 8.dp
+            ) {
+                Box(contentAlignment = Alignment.Center) {
+                    Text("N", color = MaterialTheme.colorScheme.onPrimary, fontSize = 27.sp, fontWeight = FontWeight.Bold)
                 }
             }
-        }
-        state.error?.let {
-            Spacer(Modifier.height(14.dp))
-            Text(it, color = MaterialTheme.colorScheme.error)
+            Spacer(Modifier.height(20.dp))
+            Text("欢迎使用 Nexus", style = MaterialTheme.typography.headlineLarge)
+            Text(
+                "连接 Hermes，随时继续你的工作",
+                color = mutedInk(),
+                style = MaterialTheme.typography.bodyLarge
+            )
+            Spacer(Modifier.height(28.dp))
+
+            Card(
+                shape = RoundedCornerShape(28.dp),
+                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
+                elevation = CardDefaults.cardElevation(defaultElevation = 4.dp)
+            ) {
+                Column(Modifier.padding(horizontal = 20.dp, vertical = 22.dp)) {
+                    Text("登录", style = MaterialTheme.typography.titleLarge)
+                    Spacer(Modifier.height(4.dp))
+                    Text(
+                        "支持 HTTP 或 HTTPS，可填写 IP、域名和端口",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = mutedInk()
+                    )
+                    Spacer(Modifier.height(20.dp))
+                    OutlinedTextField(
+                        value = serverUrl,
+                        onValueChange = { serverUrl = it; clearVisibleError() },
+                        modifier = Modifier.fillMaxWidth(),
+                        label = { Text("Nexus 地址") },
+                        placeholder = { Text("http://服务器地址:18787") },
+                        supportingText = { Text("例如：http://10.0.0.123:18787") },
+                        singleLine = true,
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri, imeAction = ImeAction.Next),
+                        keyboardActions = KeyboardActions(onNext = { usernameFocusRequester.requestFocus() }),
+                        shape = RoundedCornerShape(16.dp)
+                    )
+                    Spacer(Modifier.height(10.dp))
+                    OutlinedTextField(
+                        value = username,
+                        onValueChange = { username = it; clearVisibleError() },
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .focusRequester(usernameFocusRequester),
+                        label = { Text("账号") },
+                        singleLine = true,
+                        keyboardOptions = KeyboardOptions(imeAction = ImeAction.Next),
+                        keyboardActions = KeyboardActions(onNext = { passwordFocusRequester.requestFocus() }),
+                        shape = RoundedCornerShape(16.dp)
+                    )
+                    Spacer(Modifier.height(10.dp))
+                    OutlinedTextField(
+                        value = password,
+                        onValueChange = { password = it; clearVisibleError() },
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .focusRequester(passwordFocusRequester),
+                        label = { Text("密码") },
+                        supportingText = {
+                            Text(if (password.isEmpty()) "请输入密码" else "已输入 ${password.length} 位")
+                        },
+                        singleLine = true,
+                        visualTransformation = if (passwordVisible) VisualTransformation.None else PasswordVisualTransformation(),
+                        trailingIcon = {
+                            IconButton(onClick = { passwordVisible = !passwordVisible }) {
+                                Icon(
+                                    if (passwordVisible) Icons.Filled.VisibilityOff else Icons.Filled.Visibility,
+                                    contentDescription = if (passwordVisible) "隐藏密码" else "显示密码"
+                                )
+                            }
+                        },
+                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password, imeAction = ImeAction.Done),
+                        keyboardActions = KeyboardActions(onDone = { submit() }),
+                        shape = RoundedCornerShape(16.dp)
+                    )
+                    Spacer(Modifier.height(18.dp))
+                    Button(
+                        onClick = { submit() },
+                        enabled = canSubmit,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .height(52.dp),
+                        shape = RoundedCornerShape(16.dp)
+                    ) {
+                        if (connecting) {
+                            CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp)
+                            Spacer(Modifier.width(10.dp))
+                        }
+                        Text(if (connecting) "连接中…" else "登录", fontWeight = FontWeight.SemiBold)
+                    }
+                }
+            }
+
+            state.error?.let { error ->
+                Spacer(Modifier.height(14.dp))
+                Surface(
+                    modifier = Modifier.fillMaxWidth(),
+                    color = MaterialTheme.colorScheme.errorContainer,
+                    shape = RoundedCornerShape(16.dp)
+                ) {
+                    Text(
+                        error,
+                        modifier = Modifier.padding(horizontal = 16.dp, vertical = 13.dp),
+                        color = MaterialTheme.colorScheme.onErrorContainer,
+                        style = MaterialTheme.typography.bodyMedium
+                    )
+                }
+            }
         }
     }
 }
 
 @Composable
 private fun ChatScreen(state: MainUiState, viewModel: MainViewModel) {
-    var moreOpen by remember { mutableStateOf(false) }
     Column(Modifier.fillMaxSize()) {
-        Row(
-            modifier = Modifier
-                .fillMaxWidth()
-                .background(MaterialTheme.colorScheme.surface)
-                .statusBarsPadding()
-                .height(56.dp)
-                .padding(horizontal = 6.dp),
-            verticalAlignment = Alignment.CenterVertically
+        Surface(
+            color = MaterialTheme.colorScheme.surface.copy(alpha = 0.98f),
+            tonalElevation = 2.dp,
+            shadowElevation = 1.dp
         ) {
-            IconButton(onClick = { viewModel.setDrawerOpen(true) }) {
-                Icon(Icons.Filled.Menu, contentDescription = "对话列表", tint = primaryInk())
-            }
-            Column(Modifier.weight(1f)) {
-                Text(
-                    state.activeSession?.displayTitle ?: "新对话",
-                    color = primaryInk(),
-                    fontWeight = FontWeight.SemiBold,
-                    maxLines = 1,
-                    fontSize = 16.sp
-                )
-                Row(verticalAlignment = Alignment.CenterVertically) {
-                    Box(Modifier.size(6.dp).background(Color(0xFF49A37E), RoundedCornerShape(6.dp)))
-                    Spacer(Modifier.width(5.dp))
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .statusBarsPadding()
+                    .height(68.dp)
+                    .padding(horizontal = 8.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                IconButton(onClick = { viewModel.setDrawerOpen(true) }) {
+                    Icon(Icons.Filled.Menu, contentDescription = "打开对话列表")
+                }
+                Column(Modifier.weight(1f)) {
                     Text(
-                        state.answerStatus.label ?: "${state.selectedModelSummary} · Hermes ${state.hermesVersion ?: ""}",
-                        color = when (state.answerStatus) {
-                            AnswerStatus.COMPLETED -> Color(0xFF3B8A68)
-                            AnswerStatus.FAILED -> Color(0xFF9D493E)
-                            AnswerStatus.STOPPED -> Color(0xFF8A7955)
-                            AnswerStatus.IDLE -> mutedInk()
-                            else -> primaryInk()
-                        },
-                        fontSize = 10.sp
+                        state.activeSession?.displayTitle ?: "新对话",
+                        color = MaterialTheme.colorScheme.onSurface,
+                        fontWeight = FontWeight.SemiBold,
+                        maxLines = 1,
+                        fontSize = 17.sp
                     )
-                    if (state.answerStatus in setOf(AnswerStatus.THINKING, AnswerStatus.TOOL, AnswerStatus.GENERATING)) {
-                        Spacer(Modifier.width(5.dp))
-                        CircularProgressIndicator(modifier = Modifier.size(10.dp), strokeWidth = 1.5.dp)
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Box(
+                            Modifier
+                                .size(7.dp)
+                                .background(MaterialTheme.colorScheme.secondary, RoundedCornerShape(7.dp))
+                        )
+                        Spacer(Modifier.width(6.dp))
+                        Text(
+                            state.answerStatus.label ?: state.selectedModelSummary,
+                            color = when (state.answerStatus) {
+                                AnswerStatus.COMPLETED -> MaterialTheme.colorScheme.secondary
+                                AnswerStatus.FAILED -> MaterialTheme.colorScheme.error
+                                AnswerStatus.STOPPED -> Color(0xFF9A6B19)
+                                AnswerStatus.IDLE -> mutedInk()
+                                else -> primaryInk()
+                            },
+                            fontSize = 11.sp,
+                            maxLines = 1
+                        )
+                        if (state.answerStatus in setOf(AnswerStatus.THINKING, AnswerStatus.TOOL, AnswerStatus.GENERATING)) {
+                            Spacer(Modifier.width(6.dp))
+                            CircularProgressIndicator(modifier = Modifier.size(11.dp), strokeWidth = 1.5.dp)
+                        }
                     }
                 }
-            }
-            IconButton(onClick = viewModel::createSession) {
-                Icon(Icons.Filled.AddComment, contentDescription = "新建对话", tint = primaryInk())
-            }
-            Box {
-                IconButton(onClick = { moreOpen = true }) {
-                    Icon(Icons.Filled.MoreVert, contentDescription = "更多", tint = mutedInk())
+                IconButton(onClick = viewModel::createSession) {
+                    Icon(Icons.Filled.AddComment, contentDescription = "新建对话")
                 }
-                androidx.compose.material3.DropdownMenu(
-                    expanded = moreOpen,
-                    onDismissRequest = { moreOpen = false }
-                ) {
-                    androidx.compose.material3.DropdownMenuItem(
-                        text = { Text("刷新当前对话") },
-                        onClick = { moreOpen = false; viewModel.refreshFromForeground() }
-                    )
-                    androidx.compose.material3.DropdownMenuItem(
-                        text = { Text("人物、调用模型与推理深度") },
-                        onClick = { moreOpen = false; viewModel.openModelPicker() }
-                    )
-                    androidx.compose.material3.DropdownMenuItem(
-                        text = { Text("定时任务") },
-                        onClick = { moreOpen = false; viewModel.openCronManager() }
-                    )
-                    androidx.compose.material3.DropdownMenuItem(
-                        text = { Text("设置") },
-                        onClick = { moreOpen = false; viewModel.openSettings() }
-                    )
+                IconButton(onClick = viewModel::openSettings) {
+                    Icon(Icons.Filled.Settings, contentDescription = "设置")
                 }
             }
         }
-        HorizontalDivider(color = surfaceLine())
 
         key(state.activeSessionId) {
             val initialIndex = latestLazyListIndex(state.messages.size)
@@ -619,16 +707,12 @@ private fun ChatScreen(state: MainUiState, viewModel: MainViewModel) {
             }
         }
 
-        ChatComposer(
-            state = state,
-            input = viewModel.input.collectAsState().value,
-            viewModel = viewModel
-        )
+        ChatComposer(state = state, viewModel = viewModel)
     }
 }
 
 @Composable
-private fun ChatComposer(state: MainUiState, input: String, viewModel: MainViewModel) {
+private fun ChatComposer(state: MainUiState, viewModel: MainViewModel) {
     val context = LocalContext.current
     val keyboardController = LocalSoftwareKeyboardController.current
     val focusManager = LocalFocusManager.current
@@ -683,7 +767,8 @@ private fun ChatComposer(state: MainUiState, input: String, viewModel: MainViewM
         Modifier
             .fillMaxWidth()
             .background(composerSurface())
-            .border(1.dp, surfaceLine(), RoundedCornerShape(topStart = 18.dp, topEnd = 18.dp))
+            .clip(RoundedCornerShape(topStart = 28.dp, topEnd = 28.dp))
+            .border(1.dp, MaterialTheme.colorScheme.outlineVariant, RoundedCornerShape(topStart = 28.dp, topEnd = 28.dp))
             .then(if (state.featurePanelOpen) Modifier else Modifier.imePadding())
             .navigationBarsPadding()
     ) {
@@ -726,7 +811,7 @@ private fun ChatComposer(state: MainUiState, input: String, viewModel: MainViewM
             }
         }
         Row(
-            modifier = Modifier.padding(horizontal = 10.dp, vertical = 8.dp),
+            modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
             verticalAlignment = Alignment.Bottom
         ) {
             IconButton(onClick = {
@@ -784,29 +869,10 @@ private fun ChatComposer(state: MainUiState, input: String, viewModel: MainViewM
                     )
                 }
             } else {
-                OutlinedTextField(
-                    value = input,
-                    onValueChange = viewModel::updateInput,
-                    modifier = Modifier
-                        .weight(1f)
-                        .onFocusChanged { focusState ->
-                            if (focusState.isFocused && state.featurePanelOpen) viewModel.closeFeaturePanel()
-                        },
-                    placeholder = { Text("和Nexus说点什么……", color = mutedInk()) },
-                    minLines = 1,
-                    maxLines = 4,
-                    shape = RoundedCornerShape(18.dp),
-                    trailingIcon = {
-                        if (state.streaming) {
-                            IconButton(onClick = viewModel::stopStreaming) {
-                                Icon(Icons.Filled.StopCircle, contentDescription = "停止生成", tint = primaryInk())
-                            }
-                        } else if (canSendComposition(input, state.pendingImages.map { it.id }, state.pendingFile != null)) {
-                            IconButton(onClick = viewModel::send) {
-                                Icon(Icons.AutoMirrored.Filled.Send, contentDescription = "发送", tint = primaryInk())
-                            }
-                        }
-                    }
+                ChatTextInput(
+                    modifier = Modifier.weight(1f),
+                    state = state,
+                    viewModel = viewModel
                 )
             }
             IconButton(onClick = {
@@ -844,6 +910,37 @@ private fun ChatComposer(state: MainUiState, input: String, viewModel: MainViewM
             }
         }
     }
+}
+
+@Composable
+private fun ChatTextInput(
+    modifier: Modifier,
+    state: MainUiState,
+    viewModel: MainViewModel
+) {
+    val input by viewModel.input.collectAsState()
+    OutlinedTextField(
+        value = input,
+        onValueChange = viewModel::updateInput,
+        modifier = modifier.onFocusChanged { focusState ->
+            if (focusState.isFocused && state.featurePanelOpen) viewModel.closeFeaturePanel()
+        },
+        placeholder = { Text("和 Nexus 说点什么……", color = mutedInk()) },
+        minLines = 1,
+        maxLines = 4,
+        shape = RoundedCornerShape(20.dp),
+        trailingIcon = {
+            if (state.streaming) {
+                IconButton(onClick = viewModel::stopStreaming) {
+                    Icon(Icons.Filled.StopCircle, contentDescription = "停止生成", tint = primaryInk())
+                }
+            } else if (canSendComposition(input, state.pendingImages.map { it.id }, state.pendingFile != null)) {
+                IconButton(onClick = viewModel::send) {
+                    Icon(Icons.AutoMirrored.Filled.Send, contentDescription = "发送", tint = primaryInk())
+                }
+            }
+        }
+    )
 }
 
 @Composable
@@ -1141,8 +1238,9 @@ private fun SessionDrawer(
     Column(
         Modifier
             .fillMaxHeight()
-            .fillMaxWidth(0.62f)
-            .background(appBackground())
+            .fillMaxWidth(0.88f)
+            .clip(RoundedCornerShape(topEnd = 28.dp, bottomEnd = 28.dp))
+            .background(MaterialTheme.colorScheme.surface)
             .statusBarsPadding()
             .clickable(enabled = false) {}
             .padding(horizontal = 10.dp, vertical = 8.dp)

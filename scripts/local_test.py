@@ -133,12 +133,12 @@ def build_parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(dest="command", required=True)
     descriptions = {
         "setup": "创建或修复本地测试环境，启动后执行冒烟测试",
-        "start": "按当前源码、依赖和 Hermes 配置启动；变化时自动重启",
+        "start": "按当前源码、依赖和 Nexus 上游连接副本启动；变化时自动重启",
         "stop": "仅停止本地测试 Gateway，不停止 Hermes",
-        "restart": "同步配置并重启本地测试 Gateway",
+        "restart": "只读获取 Hermes 连接信息并重启本地测试 Gateway",
         "status": "显示本地测试环境、Nexus 和 Hermes 状态",
         "smoke": "确保环境为当前迭代并验证登录和 Hermes 会话代理",
-        "upgrade": "强制同步依赖和 Hermes 配置，重启并执行冒烟测试",
+        "upgrade": "强制同步 Nexus 依赖和上游连接副本，重启并执行冒烟测试",
         "reset": "清除本地测试数据和日志，保留隔离虚拟环境",
         "credentials": "显式显示本地测试账号（会输出本地测试密码）",
         "verify": "执行 Gateway、网页和 Android 的完整非 Docker 回归测试",
@@ -417,6 +417,8 @@ def hermes_connection_from_mapping(
 
 
 def _hermes_config_candidates(environment: Mapping[str, str]) -> list[Path]:
+    # These paths are discovery inputs only. Nexus must never create, edit, move,
+    # or delete any Hermes file.
     candidates: list[Path] = []
     override = _first_nonempty(
         environment.get("NEXUS_LOCAL_HERMES_CONFIG"),
@@ -448,6 +450,7 @@ def _hermes_config_candidates(environment: Mapping[str, str]) -> list[Path]:
 
 
 def discover_hermes_connection(environment: Mapping[str, str] | None = None) -> HermesConnection:
+    """Read Hermes connection details without writing to or managing Hermes."""
     env = environment if environment is not None else os.environ
     explicit_url = _first_nonempty(env.get("NEXUS_LOCAL_HERMES_URL"), env.get("HERMES_API_URL"))
     explicit_token = _first_nonempty(env.get("NEXUS_LOCAL_HERMES_TOKEN"), env.get("HERMES_API_TOKEN"))
@@ -568,6 +571,8 @@ def _account_is_usable(account: Mapping[str, Any] | None, username: str) -> bool
 
 
 def _ensure_local_configuration(connection: HermesConnection) -> tuple[dict[str, str], bool]:
+    # This writes only Nexus-owned files under .local-test/data. The supplied
+    # Hermes connection is a copied value and is never written back to Hermes.
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     (DATA_DIR / "media").mkdir(parents=True, exist_ok=True)
     LOG_DIR.mkdir(parents=True, exist_ok=True)
@@ -1000,7 +1005,7 @@ def _prepare_connection_and_data() -> HermesConnection:
     source = str(connection.config_path) if connection.config_path else "环境变量"
     print(f"[local-test] Hermes 已发现: {connection.url}（配置来源: {source}）", flush=True)
     if changed:
-        print("[local-test] 已同步 Nexus 本地 Hermes 配置（密钥未输出）", flush=True)
+        print("[local-test] 已更新 Nexus 自有目录中的 Hermes 连接信息副本（未写入 Hermes，密钥未输出）", flush=True)
     return connection
 
 

@@ -2,9 +2,9 @@
 
 Nexus 是一个面向 Hermes Agent 的社区移动客户端与轻量移动网关。
 
-项目目标是让 Hermes 核心保持原版、可独立升级，同时把移动端所需的登录、会话、附件、缓存、下载、通知和断线续接能力放在客户端与移动网关中。
+项目目标是让 Hermes 始终保持原版并由用户独立维护，同时把移动端所需的登录、会话、附件、缓存、下载、通知和断线续接能力放在客户端与移动网关中。Nexus 不修改、更新或管理任何 Hermes 文件。
 
-当前版本：0.0.7
+当前版本：0.0.8
 
 ## 组成
 
@@ -28,7 +28,8 @@ Nexus 是一个面向 Hermes Agent 的社区移动客户端与轻量移动网关
 - 后台回答状态与通知；
 - 长会话分页与一键回到底部；
 - 移动网关账号登录，App 不保存 Hermes 主密钥；
-- Nexus Gateway 提供 HTTP 源站：可信局域网可直接访问，公网必须由 Nginx、Caddy 等反向代理提供 HTTPS。
+- Nexus Gateway 提供 HTTP 源站；Android App 接受 HTTP 或 HTTPS 地址，公网部署仍建议由 Nginx、Caddy 等反向代理提供受信任的 HTTPS。
+- Web 端定位为初始化与运维管理页，不再提供聊天；聊天、模型和定时任务由 Android App 完成。
 
 ## 架构
 
@@ -44,7 +45,16 @@ Nexus Gateway
 Hermes Agent API Server
 ```
 
-移动网关不是 Hermes 的替代品，也不会修改 Hermes 核心。它负责移动端认证、附件存储、会话代理和后台运行状态。
+移动网关不是 Hermes 的替代品。它负责移动端认证、附件存储、会话代理和后台运行状态。
+
+## Hermes 原版兼容边界
+
+- Hermes 是只读外部依赖；Nexus 禁止修改其源码、安装目录、虚拟环境、配置、模型路由、数据、日志、缓存或任何其他文件；
+- Nexus 的脚本和测试禁止安装、升级、降级、卸载、启动、停止、重启或终止 Hermes；
+- Android App 与 Gateway 只通过原版 Hermes HTTP API 工作，不依赖 fork、补丁、内部数据库或私有文件布局；
+- 本地测试工具最多只读获取 Hermes API 地址与 Key，并把连接信息副本保存到 Nexus 自有目录，绝不回写 Hermes；
+- 聊天、会话、模型查询和定时任务仍通过公开 API 正常工作；Hermes 自己如何持久化 API 状态不由 Nexus 直接操作；
+- reset、upgrade、构建和部署只允许处理 Nexus 自有目录。完整强制规则见 [AGENTS.md](AGENTS.md)。
 
 ## 要求
 
@@ -101,7 +111,6 @@ curl http://127.0.0.1:8787/health
 Nexus Gateway 不再内置 TLS 或证书管理。局域网直连只适合受信任网络；**不要把 HTTP 源站端口直接暴露到公网**。外网访问应使用反向代理提供受系统信任的 HTTPS 域名，并关闭代理缓冲以支持 SSE/流式回答。Nginx 和 Caddy 示例见 [`docs/docker-deployment.md`](docs/docker-deployment.md#6-https-反向代理)。
 
 ### 2. 构建 Android App
-### 2. 构建 Android App
 
 ```bash
 cd android
@@ -120,7 +129,7 @@ Debug APK 位于：
 android/app/build/outputs/apk/debug/app-debug.apk
 ```
 
-安装后填写移动网关地址、账号和密码即可登录。局域网成品测试环境使用 `http://电脑局域网IP:18787`；外网使用反向代理提供的 `https://域名`。App 允许私网 HTTP，但拒绝公网 HTTP；遗漏协议时，裸私网地址自动补全 `http://` 和端口 `18787`，公网域名自动补全 `https://`。旧保存的私网 `https://IP:18788` 会迁移回 `http://IP:18787`。
+安装后填写移动网关地址、账号和密码即可登录。App 接受显式 `http://` 或 `https://` 地址，不再按公网/私网强制 HTTPS，也不再显示证书或公网 HTTP 拦截提示；遗漏协议时统一补全 `http://`，裸私网地址未写端口时继续补全 `18787`。旧保存的私网 `https://IP:18788` 会迁移回 `http://IP:18787`。公网明文 HTTP 会暴露账号、消息与 Token，生产环境仍建议使用反向代理 HTTPS。
 
 ## 测试
 
@@ -132,7 +141,7 @@ android/app/build/outputs/apk/debug/app-debug.apk
 scripts\local-test.cmd setup
 ```
 
-后续每次迭代使用 `upgrade` 同步依赖与 Hermes 配置并执行端到端冒烟测试，使用 `verify` 运行完整的非 Docker 回归门禁：
+后续每次迭代使用 `upgrade` 同步 Nexus 依赖与上游连接信息副本并执行端到端冒烟测试，使用 `verify` 运行完整的非 Docker 回归门禁。该流程只读获取 Hermes 连接信息，不修改或管理 Hermes：
 
 ```bat
 scripts\local-test.cmd upgrade
@@ -174,7 +183,8 @@ cd android
 - `gateway/data/`；
 - Android 签名文件、`local.properties`；
 - 用户上传文件、会话导出、日志和真实服务器地址；
-- 任何 API Token、密码或会话密钥。
+- 任何 API Token、密码或会话密钥；
+- 任何 Hermes 源码、安装文件、配置、数据、日志或缓存副本。
 
 发现安全问题请按 `SECURITY.md` 私下报告，不要直接创建公开 Issue。
 

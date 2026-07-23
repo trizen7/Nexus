@@ -1269,15 +1269,23 @@ async def test_web_admin_requires_login_and_lists_files(gateway_client: TestClie
     assert script.status == 200
     assert script.content_type == "text/javascript"
     javascript = await script.text()
-    assert "网页聊天" in html
+    assert "网页聊天" not in html
+    assert 'data-page="chat"' not in html
+    assert 'id="chatForm"' not in html
     assert "文件管理" in html
     assert "语音管理" in html
     assert "账号安全" in html
     assert "系统状态" in html
-    assert "createSession" in javascript
-    assert "renameSession" in javascript
-    assert "deleteSession" in javascript
-    assert "uploadAttachment" in javascript
+    assert "createSession" not in javascript
+    assert "renameSession" not in javascript
+    assert "deleteSession" not in javascript
+    assert "sendChat" not in javascript
+    assert "renderMarkdown" not in javascript
+    assert "uploadAttachment" not in javascript
+    assert "/api/sessions" not in javascript
+    assert "/chat/stream" not in javascript
+    assert "uploadManagedFile" in javascript
+    assert "/api/uploads" in javascript
 
     unauthorized = await gateway_client.get("/api/admin/files")
     assert unauthorized.status == 401

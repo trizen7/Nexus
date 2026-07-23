@@ -2,6 +2,13 @@ Nexus 独立成品测试环境（HTTP 源站）
 
 本目录只运行父目录中的 Nexus Gateway 成品 ZIP，不读取仓库源码，也不运行 Docker。
 
+Hermes 原版只读边界
+- Hermes 是只读外部依赖，本环境只连接已经由用户运行的原版 Hermes HTTP API。
+- 禁止修改 Hermes 的源码、安装、虚拟环境、配置、模型路由、数据、日志、缓存或任何其他文件。
+- 本环境不会安装、升级、降级、卸载、启动、停止、重启或终止 Hermes。
+- 初始化页面保存的是 Nexus 自有 data 目录中的上游地址与 Key 副本，绝不回写 Hermes。
+- 聊天、会话、模型查询与定时任务通过公开 API 工作；Nexus 不直接操作 Hermes 的存储文件。
+
 访问地址
 - 本机：http://127.0.0.1:18787
 - 手机/局域网设备：http://当前电脑局域网IP:18787
@@ -15,30 +22,30 @@ Nexus 独立成品测试环境（HTTP 源站）
 5. HSTS、证书续期和公网访问控制由反向代理负责；Gateway 不读取或盲目信任 X-Forwarded-*，也不再管理证书。
 
 Android 连接
-- 局域网：填写 http://电脑局域网IP:18787。App 允许私网、回环、链路本地和 .local 地址使用 HTTP。
-- 外网：填写反向代理提供的 https://域名。App 会拒绝公网 HTTP，避免账号、密码、消息和 Token 明文传输。
+- App 可填写显式 http:// 或 https:// 地址，不再按公网/私网强制 HTTPS，也不要求安装证书。
+- 外网建议填写反向代理提供的 https://域名；如果明确填写公网 HTTP，App 也会连接，但账号、密码、消息和 Token 会以明文传输。
 - 旧保存的 https://私网IP:18788 会自动迁移为 http://私网IP:18787。
 
 首次/清空后流程
 1. 双击 01-打开初始化页面.cmd。
 2. 浏览器打开 http://127.0.0.1:18787。
 3. 按页面提示输入 data\bootstrap.token 中的一次性初始化令牌，并设置管理员账号、密码、Hermes API 地址和 Hermes API Server Key。
-4. 在手机安装父目录中的 Nexus-Android-0.0.7-debug.apk。
+4. 在手机安装父目录中的 Nexus-Android-0.0.8-debug.apk。
 5. App 在局域网填写 http://电脑局域网IP:18787，再输入 Nexus 管理员账号和密码。
 
 控制文件
 - 01-打开初始化页面.cmd：启动并打开本机 HTTP 页面。
 - 02-查看状态.cmd：显示成品版本、HTTP 地址和 18787/18788 端口状态；不显示密码或 Key。
-- 03-停止测试环境.cmd：只停止本目录拥有的 Gateway 进程，不停止 Hermes。
-- 04-清空并重新开始.cmd：删除账号、密码哈希、Hermes 配置、Session Secret、媒体、日志和整个 data 后按当前成品重新启动。只有明确需要全流程重测时才使用。
-- 05-升级到最新成品.cmd：部署父目录最新 Nexus-Gateway-*.zip，保留账号、Hermes 配置、媒体、历史 data\tls 和 Hermes 定时任务。
+- 03-停止测试环境.cmd：只停止本目录拥有的 Gateway 进程，不查找、停止或重启 Hermes。
+- 04-清空并重新开始.cmd：删除账号、密码哈希、Nexus 保存的 Hermes 上游连接配置副本、Session Secret、媒体、日志和整个 Nexus data 后按当前成品重新启动；不会删除任何 Hermes 文件。只有明确需要全流程重测时才使用。
+- 05-升级到最新成品.cmd：部署父目录最新 Nexus-Gateway-*.zip，保留账号、Nexus 上游连接配置副本、媒体和历史 data\tls；不会读取或修改 Hermes 定时任务文件。
 - 06-查看反向代理说明.cmd：打开本说明。
 
 升级约定
 - 每次发布新成品后，先同步控制文件，再从本运行目录执行 upgrade；不要用源码目录替代本环境。
-- upgrade 只替换 app 并同步依赖，不清理 data、媒体或历史 TLS 文件。
+- upgrade 只替换 Nexus app 并同步 Nexus 运行依赖，不清理 data、媒体或历史 TLS 文件，也不更新或管理 Hermes。
 - data\tls 是旧版本遗留数据，普通升级保留但 Gateway 不再读取；reset 会随整个 data 一并删除。
-- 管理脚本会安全接管并停止本环境记录的旧 18788 进程，不会终止无法确认归属的其他进程。
+- 管理脚本只会安全接管并停止本环境记录的 Nexus Gateway 旧 18788 进程，不会终止无法确认归属的其他进程，更不会操作 Hermes 进程。
 
 推理深度
 - App 可选择默认、none、minimal、low、medium、high、xhigh、max、ultra。
@@ -46,5 +53,6 @@ Android 连接
 
 安全边界
 - 不要把 data、日志、截图、Hermes Key、Token、密码、Session Secret、Bootstrap Token、历史 CA 私钥或反向代理证书私钥提交到 Git 或发送给他人。
+- reset、upgrade、部署与清理只允许修改本测试环境目录中的 Nexus 文件，禁止写入任何 Hermes 路径。
 - Windows 防火墙规则仅允许 LocalSubnet 访问 TCP 18787。
 - 公网只开放反向代理的 HTTPS 入口，不开放 Gateway HTTP 源站端口。

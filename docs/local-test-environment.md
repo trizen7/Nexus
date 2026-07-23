@@ -5,7 +5,15 @@ Nexus 提供两套与正式部署隔离的非 Docker 测试环境，均连接已
 - `.local-test/`：开发回归环境，直接运行当前源码；
 - `成品/本地测试环境/`：用户验收环境，只运行已经构建的 Gateway ZIP，不读取源码。
 
-两套环境默认都使用 **HTTP `18787`**，不能同时启动。旧 HTTPS `18788` 必须关闭。这些脚本不会启动、停止或清理 Hermes，Hermes 配置、会话和定时任务也不属于 Nexus reset/upgrade 的处理范围。
+两套环境默认都使用 **HTTP `18787`**，不能同时启动。旧 HTTPS `18788` 必须关闭。这些脚本只连接已经由用户运行的原版 Hermes API；不会安装、更新、回滚、卸载、启动、停止、重启或清理 Hermes，也不会写入任何 Hermes 文件。
+
+## Hermes 原版只读边界
+
+- Nexus 只能通过原版 Hermes HTTP API 工作，不依赖 fork、补丁、内部数据库或私有文件布局；
+- 开发测试环境可以只读解析已有 Hermes 配置来取得 API 地址与 Key，也可以使用显式环境变量；
+- 读取到的连接信息只会复制到 `.local-test/data/` 或成品环境 `data/` 等 Nexus 自有目录，绝不回写 Hermes；
+- reset、upgrade、依赖同步、成品部署和进程管理只处理 Nexus 自有目录与 Nexus Gateway 进程；
+- 聊天、会话、模型查询和定时任务可通过公开 API 正常调用；Hermes 自行持久化 API 状态不代表 Nexus 直接修改 Hermes 文件。
 
 ## HTTP 源站与反向代理原则
 
@@ -16,7 +24,7 @@ Nexus 提供两套与正式部署隔离的非 Docker 测试环境，均连接已
 - 反向代理应转发 `Host` 与 `X-Forwarded-Proto`、关闭响应缓冲并设置较长读取超时，以支持 SSE/流式回答。
 - Gateway 不盲目信任 `X-Forwarded-*`，源站仍必须通过监听地址、防火墙或网络拓扑隔离。
 
-Android 允许回环、私网、链路本地、CGNAT、ULA 和 `.local` 地址使用 HTTP，但拒绝公网 HTTP。局域网填写 `http://IP:18787`，外网填写反向代理的 `https://域名`。旧保存的私网 `https://IP:18788` 会自动迁移到 `http://IP:18787`。
+Android 接受显式 HTTP 或 HTTPS 地址，不再阻止公网 HTTP，也不再要求安装证书或显示 HTTPS 强制提示。遗漏协议时统一补全 `http://`；裸私网地址未写端口时补全 `18787`。旧保存的私网 `https://IP:18788` 会自动迁移到 `http://IP:18787`。公网部署仍建议由反向代理提供受信任的 HTTPS。
 
 ## 独立成品验收环境
 
@@ -32,7 +40,7 @@ scripts/product-test-environment/
 scripts\sync-product-test-environment.cmd
 ```
 
-同步命令只覆盖 `manage.ps1`、快捷方式和使用说明，并删除已经废弃的本机 CA 安装快捷方式；不会修改 `app/`、`data/`、`venv/`、`logs/` 或 `state/`。因此可以随迭代升级控制逻辑，同时保留管理员账号、密码哈希、Hermes 地址与 Key、Session Secret、媒体和历史 TLS 数据。
+同步命令只覆盖 `manage.ps1`、快捷方式和使用说明，并删除已经废弃的本机 CA 安装快捷方式；不会修改 `app/`、`data/`、`venv/`、`logs/` 或 `state/`。因此可以随迭代升级控制逻辑，同时保留管理员账号、密码哈希、Nexus 保存的 Hermes 地址与 Key 副本、Session Secret、媒体和历史 TLS 数据。
 
 运行目录中的入口：
 
@@ -66,7 +74,7 @@ scripts\local-test.cmd setup
 
 1. 在 `.local-test/venv/` 创建隔离 Python 环境；
 2. 使用 `uv pip compile` 与 `uv pip sync` 同步 `gateway/requirements-dev.txt`；
-3. 从本机 Hermes 配置自动读取 API Server 地址与 Key；
+3. 以只读方式从本机已有 Hermes 配置获取 API Server 地址与 Key，绝不回写；
 4. 在 `.local-test/` 生成独立 Nexus 测试账号、密码和 Session Secret；
 5. 在 `http://127.0.0.1:18787` 启动当前源码；
 6. 通过禁用环境代理的本机直连请求执行健康检查、登录和 Hermes 代理冒烟测试。
@@ -86,10 +94,10 @@ scripts\local-test.cmd credentials
 | `setup` | 首次创建或修复环境，启动 Gateway 并执行冒烟测试 |
 | `start` | 启动环境；发现源码、依赖或配置变化时自动重启 |
 | `stop` | 只停止 `.local-test/process.json` 记录的 Nexus Gateway |
-| `restart` | 重新读取 Hermes 配置并重启 Gateway |
+| `restart` | 只读重新获取 Hermes 连接信息，并仅重启 Nexus Gateway |
 | `status` | 检查进程、Nexus `/health` 和 Hermes `/health`，不显示密钥 |
 | `smoke` | 验证 HTTP 健康检查、账号登录和 Hermes 会话代理 |
-| `upgrade` | 强制同步依赖和 Hermes 配置，重启并执行冒烟测试 |
+| `upgrade` | 强制同步 Nexus 依赖与上游连接信息副本，仅重启 Gateway 并执行冒烟测试 |
 | `verify` | 执行冒烟、Gateway pytest、网页契约、Android 单测/Lint/Debug 构建；不调用 Docker |
 | `reset` | 清除 `.local-test` 数据、账号和日志，保留虚拟环境；不删除 Hermes 数据 |
 | `credentials` | 显式显示本地测试地址、账号和密码 |
@@ -133,17 +141,17 @@ powershell -NoProfile -ExecutionPolicy Bypass -File ".\成品\本地测试环境
 - `data/media/`；
 - 历史 `data/tls/`（如果存在）。
 
-普通升级后账号、Hermes 配置、媒体和历史 TLS 文件哈希必须保持不变，同时验证 `18787` 正在监听、`18788` 未监听、`process.json` 记录的 PID 与实际监听进程一致。
+普通升级后账号、Nexus 保存的 Hermes 上游连接配置副本、媒体和历史 TLS 文件哈希必须保持不变，同时验证 `18787` 正在监听、`18788` 未监听、`process.json` 记录的 PID 与实际监听进程一致。
 
-## 0.0.7 成品
+## 0.0.8 成品
 
 当前成品文件：
 
-- `成品/Nexus-Android-0.0.7-debug.apk`；
-- `成品/Nexus-Gateway-0.0.7.zip`；
+- `成品/Nexus-Android-0.0.8-debug.apk`；
+- `成品/Nexus-Gateway-0.0.8.zip`；
 - `成品/SHA256SUMS.txt`。
 
-Debug APK 不再内嵌本地 CA。HTTPS 访问只信任 Android 系统 CA；局域网 HTTP 是否允许由 App 的地址校验规则控制。
+Debug APK 不内嵌本地 CA。App 可连接 HTTP 或由 Android 系统信任链验证的 HTTPS；公网 HTTP 不再由客户端拦截，但仅建议用于明确可接受明文传输风险的环境。
 
 ## 推理深度
 
@@ -156,7 +164,7 @@ Nexus 只负责 UI、持久化、白名单校验和 `reasoning_effort` 字段透
 - `.local-test/`、`成品/` 与运行时 `data/` 均被 Git 忽略；
 - 普通命令不会输出 Hermes Key、Token、密码、Session Secret 或 Bootstrap Token；
 - 不提交 `*.key`、历史 CA、反向代理证书私钥、日志、截图或运行数据；
-- reset/upgrade 只处理 Nexus 自己的目录，不删除或修改 Hermes 数据；
+- reset/upgrade 只处理 Nexus 自有目录，不修改任何 Hermes 文件，也不管理 Hermes 进程；
 - 测试环境不调用 Docker；
 - Windows 防火墙仅允许 `LocalSubnet` 访问 TCP `18787`；
 - 公网只开放反向代理的 HTTPS 入口。

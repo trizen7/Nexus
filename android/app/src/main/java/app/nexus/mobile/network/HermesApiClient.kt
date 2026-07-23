@@ -59,7 +59,8 @@ class HermesApiClient(
         val root = getJson("health")
         HermesHealth(
             status = root.string("status"),
-            version = root.string("version")
+            gatewayVersion = root.string("version"),
+            hermesVersion = root.objectValue("upstream").string("version").takeIf { it.isNotBlank() }
         )
     }
 
@@ -518,7 +519,11 @@ class HermesApiClient(
             }
 }
 
-data class HermesHealth(val status: String, val version: String)
+data class HermesHealth(
+    val status: String,
+    val gatewayVersion: String,
+    val hermesVersion: String?
+)
 
 class HermesHttpException(
     val statusCode: Int,

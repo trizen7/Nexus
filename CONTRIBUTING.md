@@ -39,14 +39,25 @@ scripts\local-test.cmd upgrade
 scripts\local-test.cmd verify
 ```
 
-该流程不会调用 Docker；使用说明见 [`docs/local-test-environment.md`](docs/local-test-environment.md)。
+该流程不会调用 Docker；使用说明见 [docs/local-test-environment.md](docs/local-test-environment.md)。
+
+## Hermes 强制只读边界
+
+- Hermes 必须保持原版，并作为 Nexus 的只读外部依赖；
+- 禁止修改 Hermes 的任何源码、安装、虚拟环境、配置、模型路由、数据、日志、缓存或其他文件；
+- 禁止由 Nexus 脚本或测试安装、更新、回滚、卸载、启动、停止、重启或终止 Hermes；
+- 仅允许通过原版 Hermes HTTP API 集成；测试优先使用 mock/stub；
+- 如需获取连接信息，只能只读解析，并将副本写入 Nexus 自有目录，绝不回写 Hermes；
+- 聊天、会话和定时任务等正常 API 调用不等于 Nexus 直接操作 Hermes 文件。
+
+违反此边界的提交不会被接受。完整规则见 [AGENTS.md](AGENTS.md)。
 
 ## 代码约定
 
 - Android 使用 Kotlin、Jetpack Compose、JDK 17；
 - 网关使用 Python 3.11+ 和 aiohttp；
 - 用户界面优先使用清晰的普通语言，不显示 MIME、服务器路径等技术细节；
-- Hermes 核心保持原版，移动特性优先放在 App 或网关；
+- Hermes 保持原版且只读，移动特性必须放在 App 或 Gateway，不得通过修改 Hermes 实现；
 - 不提交生成文件、运行数据、真实配置和签名材料。
 
 ## 贡献许可

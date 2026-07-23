@@ -33,16 +33,8 @@ fun normalizeServerUrl(serverUrl: String): String {
         trimmed.startsWith("http://", ignoreCase = true) ||
             trimmed.startsWith("https://", ignoreCase = true) ||
             "://" in trimmed -> withoutTrailingSlash
-        looksLikeBareIpv6Address(withoutTrailingSlash) -> {
-            val host = withoutTrailingSlash.substringBefore('%')
-            val scheme = if (isLocalGatewayHost(host)) "http" else "https"
-            "$scheme://[$withoutTrailingSlash]"
-        }
-        else -> {
-            val probe = runCatching { URI("http://$withoutTrailingSlash") }.getOrNull()
-            val scheme = if (isLocalGatewayHost(probe?.host)) "http" else "https"
-            "$scheme://$withoutTrailingSlash"
-        }
+        looksLikeBareIpv6Address(withoutTrailingSlash) -> "http://[$withoutTrailingSlash]"
+        else -> "http://$withoutTrailingSlash"
     }
     val uri = runCatching { URI(withScheme) }.getOrNull() ?: return withScheme
     if (!uri.scheme.equals("http", ignoreCase = true) || uri.port >= 0 || !isLocalGatewayHost(uri.host)) {
@@ -81,9 +73,6 @@ fun serverUrlValidationError(serverUrl: String): String? {
         ?: return "服务器地址格式不正确，请填写例如 http://10.0.0.123:18787 或 https://你的域名"
     if (parsed.userInfo != null || parsed.rawQuery != null || parsed.rawFragment != null) {
         return "服务器地址不能包含账号、查询参数或锚点"
-    }
-    if (parsed.scheme.equals("http", ignoreCase = true) && !isLocalGatewayHost(parsed.host)) {
-        return "公网 HTTP 会明文传输账号和消息，请使用 HTTPS 反向代理地址"
     }
     return null
 }

@@ -1,55 +1,404 @@
-let token=localStorage.getItem('nexus_token')||'',files=[],audioFiles=[],sessions=[],activeSessionId=null,pendingFile=null,streamController=null,lastFailedSend=null,draftSession=true,sessionFilter='active';
-const $=id=>document.getElementById(id),auth=()=>({'Authorization':'Bearer '+token}),readSet=key=>new Set(JSON.parse(localStorage.getItem(key)||'[]')),writeSet=(key,set)=>localStorage.setItem(key,JSON.stringify([...set]));
-let pinnedSessions=readSet('nexus_pinned_sessions'),archivedSessions=readSet('nexus_archived_sessions'),collapsedGroups=readSet('nexus_collapsed_groups');
-const titles={overview:['概览','Nexus运行概况'],chat:['网页聊天','查看 Hermes 会话并直接与Nexus对话'],files:['文件管理','按日期管理普通文件'],audio:['语音管理','按日期管理语音文件'],account:['账号安全','修改网页端和 App 共用的登录账号'],system:['系统状态','网关、Hermes 与统一入口状态']};
-async function api(url,opt={}){opt.headers={...(opt.headers||{}),...auth()};const r=await fetch(url,opt);if(r.status===401){logout();throw Error('登录已失效')}return r}
-async function initializePage(){const r=await fetch('/api/setup/status'),x=await r.json();if(!x.initialized){$('setupPage').classList.remove('hidden');return}if(token)showApp();else $('loginPage').classList.remove('hidden')}
-async function submitSetup(e){e.preventDefault();$('setupError').textContent='';if($('setupPassword').value!==$('setupPasswordConfirm').value){$('setupError').textContent='两次输入的密码不一致';return}const r=await fetch('/api/setup',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({username:$('setupUsername').value.trim(),password:$('setupPassword').value,hermes_api_url:$('setupHermesUrl').value.trim(),hermes_api_token:$('setupHermesToken').value,bootstrap_token:$('setupBootstrapToken').value})}),x=await r.json();if(!r.ok){$('setupError').textContent=x.error?.message||'初始化失败';return}$('setupHermesToken').value=$('setupBootstrapToken').value='';$('setupPassword').value=$('setupPasswordConfirm').value='';$('setupPage').classList.add('hidden');$('loginPage').classList.remove('hidden');$('username').value=x.username||'';$('password').focus()}
-function toast(text){$('toast').textContent=text;$('toast').classList.remove('hidden');clearTimeout(toast.timer);toast.timer=setTimeout(()=>$('toast').classList.add('hidden'),2600)}
-async function signIn(e){e.preventDefault();$('loginError').textContent='';const r=await fetch('/api/auth/login',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({username:$('username').value,password:$('password').value})});if(!r.ok){$('loginError').textContent='账号或密码错误';return}const x=await r.json();token=x.access_token;localStorage.setItem('nexus_token',token);localStorage.setItem('nexus_username',x.username);showApp()}
-function showApp(){$('setupPage').classList.add('hidden');$('loginPage').classList.add('hidden');$('appPage').classList.remove('hidden');$('entryAddress').textContent=location.origin;$('systemEntry').textContent=location.origin;$('newUsername').value=localStorage.getItem('nexus_username')||'';loadAll()}
-function logout(){localStorage.removeItem('nexus_token');token='';location.reload()}
-function showPage(name){document.querySelectorAll('.section').forEach(x=>x.classList.toggle('active',x.id===name));document.querySelectorAll('.nav').forEach(x=>x.classList.toggle('active',x.dataset.page===name));document.querySelector('.main').classList.toggle('chat-mode',name==='chat');$('pageTitle').textContent=titles[name][0];$('pageDesc').textContent=titles[name][1];if(name==='chat')loadSessions();if(name==='files')loadFiles();if(name==='audio')loadAudio();if(name==='system')loadHealth()}
-async function loadAll(){await Promise.all([loadOverview(),loadSessions(),loadFiles(),loadAudio(),loadHealth()])}
-async function loadOverview(){const x=await(await api('/api/admin/overview')).json();$('metricSessions').textContent=x.session_count;$('metricFiles').textContent=x.file_count;$('metricAudio').textContent=x.audio_count;$('metricBytes').textContent=size(x.file_bytes+x.audio_bytes);$('gatewayVersion').textContent=x.gateway_version;$('gatewayStatus').textContent='正常';$('hermesStatus').textContent=x.status==='ok'?'正常':'连接异常'}
-async function loadHealth(){const x=await(await fetch('/health')).json();$('gatewayVersion').textContent=x.version||'—';$('hermesVersion').textContent=x.upstream?.version||'—';$('gatewayStatus').textContent=x.status==='ok'?'正常':'异常';$('hermesStatus').textContent=x.upstream?.status==='ok'?'正常':'异常'}
-async function loadSessions(){sessions=(await(await api('/api/sessions')).json()).data||[];renderSessionGroups();if(activeSessionId&&!sessions.some(s=>s.id===activeSessionId))createSession()}
-function channelOf(source=''){const s=source.toLowerCase();if(s==='api_server')return'手机 / Web';if(['desktop','cli','tui'].includes(s))return'电脑端';if(s==='cron')return'定时任务';if(['weixin','wechat'].includes(s))return'微信';if(['qqbot','qq'].includes(s))return'QQ';if(s==='telegram')return'Telegram';if(s==='discord')return'Discord';return'其他渠道'}
-function visibleSessions(){const q=$('sessionSearch').value.toLowerCase();return sessions.filter(s=>{if((s.source||'').toLowerCase()==='cron')return false;const archived=archivedSessions.has(s.id),pinned=pinnedSessions.has(s.id);if(sessionFilter==='active'&&archived)return false;if(sessionFilter==='pinned'&&!pinned)return false;if(sessionFilter==='archived'&&!archived)return false;return((s.title||'新对话')+' '+(s.source||'')).toLowerCase().includes(q)}).sort((a,b)=>(pinnedSessions.has(b.id)-pinnedSessions.has(a.id))||((b.last_active||0)-(a.last_active||0)))}
-function renderSessionGroups(){const groups=new Map();visibleSessions().forEach(s=>{const key=channelOf(s.source);if(!groups.has(key))groups.set(key,[]);groups.get(key).push(s)});$('sessionRows').innerHTML=[...groups].map(([name,items])=>`<div class="session-group"><button class="group-title" data-group="${escAttr(name)}"><span>${collapsedGroups.has(name)?'›':'⌄'} ${esc(name)}</span><small>${items.length}</small></button><div class="group-rows ${collapsedGroups.has(name)?'hidden':''}">${items.map(sessionRow).join('')}</div></div>`).join('')||'<div class="empty">暂无对话</div>';document.querySelectorAll('.conversation[data-id]').forEach(row=>row.onclick=()=>openSession(row.dataset.id));document.querySelectorAll('.group-title').forEach(row=>row.onclick=()=>toggleGroup(row.dataset.group))}
-function sessionRow(s){return`<div class="conversation ${s.id===activeSessionId?'active':''}" data-id="${escAttr(s.id)}"><div><b>${pinnedSessions.has(s.id)?'◆ ':''}${esc(s.title||'新对话')}</b><span class="muted">${s.message_count||0} 条</span></div></div>`}
-function toggleGroup(name){collapsedGroups.has(name)?collapsedGroups.delete(name):collapsedGroups.add(name);writeSet('nexus_collapsed_groups',collapsedGroups);renderSessionGroups()}
-function createSession(){stopStreaming();activeSessionId=null;draftSession=true;pendingFile=null;$('chatTitle').textContent='新对话';$('chatMeta').textContent='输入内容后首次发送时创建';$('sessionActions').classList.add('hidden');$('messages').innerHTML='<div class="empty">开始一段新的对话</div>';$('chatInput').value='';selectAttachment(null);hideFailure();renderSessionGroups();$('chatInput').focus()}
-async function ensureSessionForSend(){if(!draftSession&&activeSessionId)return activeSessionId;const r=await api('/api/sessions',{method:'POST',headers:{'Content-Type':'application/json'},body:'{}'}),x=await r.json(),s=x.session;if(!r.ok||!s?.id)throw Error('创建对话失败');sessions=[s,...sessions];activeSessionId=s.id;draftSession=false;$('sessionActions').classList.remove('hidden');$('chatTitle').textContent=s.title||'新对话';$('chatMeta').textContent=`${channelOf(s.source)} · 0 条消息`;renderSessionGroups();return s.id}
-async function openSession(id){stopStreaming();activeSessionId=id;draftSession=false;renderSessionGroups();const s=sessions.find(x=>x.id===id);$('chatTitle').textContent=s?.title||'新对话';$('chatMeta').textContent=`${channelOf(s?.source)} · ${s?.message_count||0} 条消息`;$('sessionActions').classList.remove('hidden');$('pinSessionButton').textContent=pinnedSessions.has(id)?'取消置顶':'置顶';$('archiveSessionButton').textContent=archivedSessions.has(id)?'取消归档':'归档';$('messages').innerHTML='<div class="empty">正在加载…</div>';const data=(await(await api('/api/sessions/'+encodeURIComponent(id)+'/messages')).json()).data||[];$('messages').innerHTML=data.filter(m=>m.role==='user'||m.role==='assistant').map(renderMessage).join('')||'<div class="empty">这个对话还没有消息</div>';await hydrateProtectedImages();hideFailure();scrollMessages()}
-function messageText(content){if(typeof content==='string')return content;if(Array.isArray(content))return content.filter(x=>x&&['text','input_text'].includes(x.type)).map(x=>x.text||'').join('\n');return ''}
-function renderMessage(m){const role=m.role==='user'?'user':'assistant',text=messageText(m.content),images=(m.nexus_images||[]).map(imageCard).join(''),attached=(m.nexus_files||[]).map(fileCard).join('');return`<article class="message ${role}"><button class="message-copy" onclick="copyMessage(this)" title="复制消息">复制</button><div class="markdown" data-plain="${escAttr(text)}">${renderMarkdown(text)}</div>${images}${attached}</article>`}
-function copyMessage(button){navigator.clipboard?.writeText(button.closest('.message').querySelector('.markdown').dataset.plain||'');toast('消息已复制')}
-function imageCard(image){return`<button class="image-card" onclick="openProtectedFile('${escAttr(image.url)}','${encodeURIComponent(image.name||'图片')}')"><img data-protected-src="${escAttr(image.url)}" alt="${escAttr(image.name||'图片')}" loading="lazy"><span>${esc(image.name||'图片')}</span></button>`}
-async function hydrateProtectedImages(){await Promise.all([...document.querySelectorAll('img[data-protected-src]')].map(async img=>{try{const blob=await protectedBlob(img.dataset.protectedSrc);img.src=URL.createObjectURL(blob)}catch{img.alt='图片加载失败'}}))}
-function fileCard(file){return`<button class="file-card" onclick="downloadProtectedFile('${escAttr(file.url)}','${encodeURIComponent(file.name)}')"><span class="file-icon">文</span><span><b>${esc(file.name)}</b><small>${esc(file.mime_type||'文件')} · ${size(file.size)}</small></span></button>`}
-function renderMarkdown(text=''){const escaped=esc(text),blocks=[];let value=escaped.replace(/```([\w-]*)\n([\s\S]*?)```/g,(_,lang,code)=>{const id=blocks.length;blocks.push(`<pre><div class="code-head"><span>${esc(lang||'代码')}</span><button onclick="copyCode(this)">复制</button></div><code>${code.replace(/^\n|\n$/g,'')}</code></pre>`);return`@@CODE${id}@@`});value=value.replace(/(^|\n)((?:\|.*\|(?:\n|$))+)/g,(all,prefix,table)=>{const rows=table.trim().split('\n').map(row=>row.slice(1,-1).split('|').map(cell=>cell.trim()));if(rows.length<2||!rows[1].every(cell=>/^:?-{3,}:?$/.test(cell)))return all;const head=`<thead><tr>${rows[0].map(cell=>`<th>${cell}</th>`).join('')}</tr></thead>`,body=`<tbody>${rows.slice(2).map(row=>`<tr>${row.map(cell=>`<td>${cell}</td>`).join('')}</tr>`).join('')}</tbody>`;return`${prefix}<table>${head}${body}</table>`}).replace(/^### (.+)$/gm,'<h3>$1</h3>').replace(/^## (.+)$/gm,'<h2>$1</h2>').replace(/^# (.+)$/gm,'<h1>$1</h1>').replace(/^&gt; (.+)$/gm,'<blockquote>$1</blockquote>').replace(/\*\*(.+?)\*\*/g,'<strong>$1</strong>').replace(/`([^`\n]+)`/g,'<code class="inline-code">$1</code>').replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g,'<a href="$2" target="_blank" rel="noopener noreferrer">$1</a>').replace(/^(?:- (.+)(?:\n|$))+/gm,m=>`<ul>${m.trim().split('\n').map(x=>`<li>${x.slice(2)}</li>`).join('')}</ul>`).replace(/\n/g,'<br>');return value.replace(/@@CODE(\d+)@@/g,(_,id)=>blocks[Number(id)])}
-function copyCode(button){navigator.clipboard?.writeText(button.closest('pre').querySelector('code').textContent);toast('代码已复制')}
-async function protectedBlob(url){const r=await api(url);if(!r.ok)throw Error('文件读取失败');return r.blob()}
-async function openProtectedFile(url,name){const blob=await protectedBlob(url),object=URL.createObjectURL(blob),win=window.open(object,'_blank');if(!win)downloadBlob(blob,decodeURIComponent(name));setTimeout(()=>URL.revokeObjectURL(object),60000)}
-async function downloadProtectedFile(url,name){downloadBlob(await protectedBlob(url),decodeURIComponent(name))}function downloadBlob(blob,name){const a=document.createElement('a');a.href=URL.createObjectURL(blob);a.download=name;a.click();setTimeout(()=>URL.revokeObjectURL(a.href),1000)}
-function askText(title,value=''){return new Promise(resolve=>{const d=$('textDialog');$('dialogTitle').textContent=title;$('dialogInput').value=value;d.returnValue='';d.showModal();d.onclose=()=>resolve(d.returnValue==='default'?$('dialogInput').value:null)})}
-async function renameSession(){const s=sessions.find(x=>x.id===activeSessionId);if(!s)return;const entered=await askText('重命名对话',s.title||''),title=entered?.trim();if(!title)return;const x=await(await api('/api/sessions/'+encodeURIComponent(s.id),{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({title})})).json(),updated=x.session||{...s,title};sessions=sessions.map(item=>item.id===s.id?updated:item);renderSessionGroups();$('chatTitle').textContent=title;toast('对话已重命名')}
-async function deleteSession(){const s=sessions.find(x=>x.id===activeSessionId);if(!s||!confirm(`确定永久删除“${s.title||'新对话'}”？`))return;await api('/api/sessions/'+encodeURIComponent(s.id),{method:'DELETE'});sessions=sessions.filter(x=>x.id!==s.id);pinnedSessions.delete(s.id);archivedSessions.delete(s.id);saveSessionPreferences();createSession();toast('对话已删除')}
-function togglePinned(){if(!activeSessionId)return;pinnedSessions.has(activeSessionId)?pinnedSessions.delete(activeSessionId):pinnedSessions.add(activeSessionId);saveSessionPreferences();renderSessionGroups();$('pinSessionButton').textContent=pinnedSessions.has(activeSessionId)?'取消置顶':'置顶'}
-function toggleArchived(){if(!activeSessionId)return;archivedSessions.has(activeSessionId)?archivedSessions.delete(activeSessionId):archivedSessions.add(activeSessionId);saveSessionPreferences();renderSessionGroups();$('archiveSessionButton').textContent=archivedSessions.has(activeSessionId)?'取消归档':'归档'}
-function saveSessionPreferences(){writeSet('nexus_pinned_sessions',pinnedSessions);writeSet('nexus_archived_sessions',archivedSessions)}
-function uploadAttachment(file,onProgress=()=>{}){if(!file)return Promise.resolve(null);return new Promise((resolve,reject)=>{const xhr=new XMLHttpRequest(),form=new FormData();form.append('file',file,file.name);xhr.open('POST','/api/uploads');xhr.setRequestHeader('Authorization','Bearer '+token);xhr.upload.onprogress=e=>e.lengthComputable&&onProgress(Math.round(e.loaded/e.total*100));xhr.onerror=()=>reject(Error('附件上传失败'));xhr.onload=()=>{if(xhr.status===401){logout();return reject(Error('登录已失效'))}if(xhr.status<200||xhr.status>=300)return reject(Error('附件上传失败'));try{resolve(JSON.parse(xhr.responseText).file)}catch{reject(Error('服务器返回无效'))}};xhr.send(form)})}
-function selectAttachment(file){pendingFile=file||null;$('pendingAttachment').classList.toggle('hidden',!file);$('pendingAttachmentName').textContent=file?`${file.name} · ${size(file.size)}`:'';$('uploadProgress').textContent=''}
-async function sendChat(e,payload=null){e?.preventDefault();const text=payload?.text??$('chatInput').value.trim(),file=payload?.file??pendingFile;if((!text&&!file)||streamController)return;lastFailedSend=null;hideFailure();$('chatInput').value='';selectAttachment(null);$('sendButton').classList.add('hidden');$('stopButton').classList.remove('hidden');const optimistic=document.createElement('article');optimistic.className='message user';optimistic.innerHTML=`<div class="markdown">${renderMarkdown([text,file?.name&&`附件：${file.name}`].filter(Boolean).join('\n'))}</div>`;$('messages').appendChild(optimistic);const assistant=document.createElement('article');assistant.className='message assistant';assistant.innerHTML='<div class="markdown">思考中…</div>';$('messages').appendChild(assistant);scrollMessages();try{const sessionId=await ensureSessionForSend(),uploaded=await uploadAttachment(file,p=>$('uploadProgress').textContent=`上传 ${p}%`);if(uploaded)assistant.querySelector('.markdown').textContent='思考中…';streamController=new AbortController();const r=await api('/api/sessions/'+encodeURIComponent(sessionId)+'/chat/stream',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({message:text,attachment_ids:uploaded?[uploaded.id]:[]}),signal:streamController.signal});if(!r.ok)throw Error('发送失败');const reader=r.body.getReader(),decoder=new TextDecoder();let buffer='',answer='';while(true){const {value,done}=await reader.read();if(done)break;buffer+=decoder.decode(value,{stream:true});const blocks=buffer.split('\n\n');buffer=blocks.pop()||'';for(const block of blocks){const event=(block.match(/^event:\s*(.+)$/m)||[])[1]||'',raw=(block.match(/^data:\s*(.+)$/m)||[])[1];if(!raw)continue;let data;try{data=JSON.parse(raw)}catch{continue}if(event.includes('delta')){answer+=data.delta||data.text||'';assistant.querySelector('.markdown').innerHTML=renderMarkdown(answer)}else if(event.includes('tool')&&event.includes('start'))assistant.querySelector('.markdown').textContent='正在使用工具…'}}if(!answer)assistant.querySelector('.markdown').textContent='已完成';await loadSessions()}catch(err){if(err.name==='AbortError'){assistant.querySelector('.markdown').textContent='已停止生成'}else{assistant.querySelector('.markdown').textContent='发送失败';lastFailedSend={text,file};showFailure(err.message)}}finally{streamController=null;$('stopButton').classList.add('hidden');$('sendButton').classList.remove('hidden');$('uploadProgress').textContent='';scrollMessages()}}
-function stopStreaming(){streamController?.abort()}
-function handleComposerKeydown(event){if(event.key!=='Enter'||event.isComposing)return;if(event.ctrlKey||event.metaKey)return;if(event.shiftKey)return;event.preventDefault();sendChat(event)}
-function retryLastSend(){if(!lastFailedSend)return;const payload=lastFailedSend;lastFailedSend=null;hideFailure();sendChat(null,payload)}function showFailure(text){$('sendFailureText').textContent=text||'发送失败';$('sendFailure').classList.remove('hidden')}function hideFailure(){$('sendFailure').classList.add('hidden')}
-async function loadFiles(){files=(await(await api('/api/admin/files')).json()).data||[];renderFiles()}async function loadAudio(){audioFiles=(await(await api('/api/admin/audio')).json()).data||[];renderAudio()}
-function renderFiles(){const q=$('search').value.toLowerCase(),view=files.filter(f=>(f.name+' '+f.mime_type+' '+f.date).toLowerCase().includes(q));$('fileRows').innerHTML=view.map(f=>fileRow(f,'removeFile')).join('');$('fileEmpty').classList.toggle('hidden',view.length!==0)}function renderAudio(){const q=$('audioSearch').value.toLowerCase(),view=audioFiles.filter(f=>(f.name+' '+f.date).toLowerCase().includes(q));$('audioRows').innerHTML=view.map(f=>fileRow(f,'removeAudio')).join('');$('audioEmpty').classList.toggle('hidden',view.length!==0)}
-function fileRow(f,remove){return`<tr><td><b>${esc(f.name)}</b></td><td>${size(f.size)}</td><td>${esc(f.date||'—')}</td><td>${new Date(f.created_at*1000).toLocaleString()}</td><td><button class="button secondary" onclick="downloadProtectedFile('${f.download_url}','${encodeURIComponent(f.name)}')">下载</button> <button class="button danger" onclick="${remove}('${f.id}')">删除</button></td></tr>`}
-async function uploadFile(file){if(!file)return;try{await uploadAttachment(file,p=>toast(`上传 ${p}%`));toast('文件上传成功');await Promise.all([loadFiles(),loadOverview()])}catch(e){toast(e.message)}}async function removeFile(id){if(confirm('确定删除这个文件？')){await api('/api/files/'+id,{method:'DELETE'});loadFiles();loadOverview()}}async function removeAudio(id){if(confirm('确定删除这条语音？')){await api('/api/files/'+id,{method:'DELETE'});loadAudio();loadOverview()}}
-async function changeAccount(e){e.preventDefault();$('accountMessage').textContent='';if($('newPassword').value!==$('confirmPassword').value){$('accountMessage').textContent='两次输入的新密码不一致';return}const r=await api('/api/admin/account',{method:'PUT',headers:{'Content-Type':'application/json'},body:JSON.stringify({current_password:$('currentPassword').value,username:$('newUsername').value,password:$('newPassword').value})}),x=await r.json();if(!r.ok){$('accountMessage').textContent=x.error?.message||'修改失败';return}token=x.access_token;localStorage.setItem('nexus_token',token);localStorage.setItem('nexus_username',x.username);$('currentPassword').value=$('newPassword').value=$('confirmPassword').value='';$('accountMessage').textContent='修改成功，其他设备需要重新登录'}
-function scrollMessages(){$('messages').scrollTop=$('messages').scrollHeight}function size(n){if(n>=1048576)return(n/1048576).toFixed(1)+' MB';if(n>=1024)return(n/1024).toFixed(1)+' KB';return(n||0)+' B'}function esc(s){return String(s??'').replace(/[&<>"']/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]))}function escAttr(s){return String(s??'').replace(/["']/g,c=>c==='"'?'&quot;':'&#39;')}
-$('setupForm').onsubmit=submitSetup;$('loginForm').onsubmit=signIn;$('logoutButton').onclick=logout;document.querySelectorAll('.nav').forEach(n=>n.onclick=()=>showPage(n.dataset.page));document.querySelectorAll('.filter').forEach(n=>n.onclick=()=>{sessionFilter=n.dataset.filter;document.querySelectorAll('.filter').forEach(x=>x.classList.toggle('active',x===n));renderSessionGroups()});$('refreshSessionsButton').onclick=loadSessions;$('newSessionButton').onclick=createSession;$('sessionSearch').oninput=renderSessionGroups;$('renameSessionButton').onclick=renameSession;$('deleteSessionButton').onclick=deleteSession;$('pinSessionButton').onclick=togglePinned;$('archiveSessionButton').onclick=toggleArchived;$('chatForm').onsubmit=sendChat;$('chatInput').onkeydown=handleComposerKeydown;$('stopButton').onclick=stopStreaming;$('retrySendButton').onclick=retryLastSend;$('attachButton').onclick=()=>$('attachmentInput').click();$('attachmentInput').onchange=e=>selectAttachment(e.target.files[0]);$('clearAttachmentButton').onclick=()=>selectAttachment(null);$('search').oninput=renderFiles;$('audioSearch').oninput=renderAudio;$('refreshFilesButton').onclick=loadFiles;$('refreshAudioButton').onclick=loadAudio;$('uploadFileButton').onclick=()=>$('fileUploadInput').click();$('fileUploadInput').onchange=e=>uploadFile(e.target.files[0]);$('accountForm').onsubmit=changeAccount;
+'use strict';
+
+let token = localStorage.getItem('nexus_token') || '';
+let files = [];
+let audioFiles = [];
+
+const $ = id => document.getElementById(id);
+const titles = {
+  overview: ['概览', '查看 Nexus 当前运行情况'],
+  files: ['文件管理', '上传、下载和清理普通文件'],
+  audio: ['语音管理', '集中查看 Android App 上传的语音'],
+  account: ['账号安全', '修改网页端与 App 共用的登录账号'],
+  system: ['系统状态', '检查 Gateway、Hermes 与访问入口'],
+};
+
+function authHeaders() {
+  return { Authorization: 'Bearer ' + token };
+}
+
+async function api(url, options = {}) {
+  const request = { ...options, headers: { ...(options.headers || {}), ...authHeaders() } };
+  const response = await fetch(url, request);
+  if (response.status === 401) {
+    logout();
+    throw new Error('登录已失效');
+  }
+  return response;
+}
+
+async function initializePage() {
+  try {
+    const response = await fetch('/api/setup/status');
+    const payload = await response.json();
+    if (!payload.initialized) {
+      $('setupPage').classList.remove('hidden');
+      return;
+    }
+    if (token) showApp();
+    else $('loginPage').classList.remove('hidden');
+  } catch (_error) {
+    $('loginPage').classList.remove('hidden');
+    $('loginError').textContent = '无法连接 Nexus Gateway';
+  }
+}
+
+async function submitSetup(event) {
+  event.preventDefault();
+  $('setupError').textContent = '';
+  if ($('setupPassword').value !== $('setupPasswordConfirm').value) {
+    $('setupError').textContent = '两次输入的密码不一致';
+    return;
+  }
+  try {
+    const response = await fetch('/api/setup', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        username: $('setupUsername').value.trim(),
+        password: $('setupPassword').value,
+        hermes_api_url: $('setupHermesUrl').value.trim(),
+        hermes_api_token: $('setupHermesToken').value,
+        bootstrap_token: $('setupBootstrapToken').value,
+      }),
+    });
+    const payload = await response.json();
+    if (!response.ok) {
+      $('setupError').textContent = payload.error?.message || '初始化失败';
+      return;
+    }
+    $('setupHermesToken').value = '';
+    $('setupBootstrapToken').value = '';
+    $('setupPassword').value = '';
+    $('setupPasswordConfirm').value = '';
+    $('setupPage').classList.add('hidden');
+    $('loginPage').classList.remove('hidden');
+    $('username').value = payload.username || '';
+    $('password').focus();
+  } catch (_error) {
+    $('setupError').textContent = '初始化请求失败，请检查 Gateway 状态';
+  }
+}
+
+async function signIn(event) {
+  event.preventDefault();
+  $('loginError').textContent = '';
+  try {
+    const response = await fetch('/api/auth/login', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ username: $('username').value, password: $('password').value }),
+    });
+    if (!response.ok) {
+      $('loginError').textContent = '账号或密码错误';
+      return;
+    }
+    const payload = await response.json();
+    token = payload.access_token;
+    localStorage.setItem('nexus_token', token);
+    localStorage.setItem('nexus_username', payload.username);
+    showApp();
+  } catch (_error) {
+    $('loginError').textContent = '登录请求失败，请检查网络连接';
+  }
+}
+
+function showApp() {
+  $('setupPage').classList.add('hidden');
+  $('loginPage').classList.add('hidden');
+  $('appPage').classList.remove('hidden');
+  $('entryAddress').textContent = location.origin;
+  $('systemEntry').textContent = location.origin;
+  $('newUsername').value = localStorage.getItem('nexus_username') || '';
+  loadAll();
+}
+
+function logout() {
+  localStorage.removeItem('nexus_token');
+  token = '';
+  location.reload();
+}
+
+function showPage(name) {
+  if (!titles[name]) return;
+  document.querySelectorAll('.section').forEach(section => section.classList.toggle('active', section.id === name));
+  document.querySelectorAll('.nav').forEach(item => item.classList.toggle('active', item.dataset.page === name));
+  $('pageTitle').textContent = titles[name][0];
+  $('pageDesc').textContent = titles[name][1];
+  if (name === 'files') loadFiles();
+  if (name === 'audio') loadAudio();
+  if (name === 'system') loadHealth();
+}
+
+async function loadAll() {
+  await Promise.allSettled([loadOverview(), loadFiles(), loadAudio(), loadHealth()]);
+}
+
+async function loadOverview() {
+  const response = await api('/api/admin/overview');
+  if (!response.ok) throw new Error('概览读取失败');
+  const payload = await response.json();
+  $('metricSessions').textContent = payload.session_count ?? 0;
+  $('metricFiles').textContent = payload.file_count ?? 0;
+  $('metricAudio').textContent = payload.audio_count ?? 0;
+  $('metricBytes').textContent = size((payload.file_bytes || 0) + (payload.audio_bytes || 0));
+  $('gatewayVersion').textContent = payload.gateway_version || '—';
+  $('gatewayStatus').textContent = '正常';
+  $('gatewayStatus').dataset.status = 'ok';
+  $('hermesStatus').textContent = payload.status === 'ok' ? '正常' : '连接异常';
+  $('hermesStatus').dataset.status = payload.status === 'ok' ? 'ok' : 'error';
+}
+
+async function loadHealth() {
+  try {
+    const response = await fetch('/health');
+    const payload = await response.json();
+    $('gatewayVersion').textContent = payload.version || '—';
+    $('hermesVersion').textContent = payload.upstream?.version || '—';
+    $('gatewayStatus').textContent = payload.status === 'ok' ? '正常' : '异常';
+    $('gatewayStatus').dataset.status = payload.status === 'ok' ? 'ok' : 'error';
+    $('hermesStatus').textContent = payload.upstream?.status === 'ok' ? '正常' : '异常';
+    $('hermesStatus').dataset.status = payload.upstream?.status === 'ok' ? 'ok' : 'error';
+  } catch (_error) {
+    $('gatewayStatus').textContent = '不可用';
+    $('gatewayStatus').dataset.status = 'error';
+    $('hermesStatus').textContent = '未知';
+    $('hermesStatus').dataset.status = 'error';
+  }
+}
+
+async function loadFiles() {
+  const response = await api('/api/admin/files');
+  if (!response.ok) throw new Error('文件列表读取失败');
+  files = (await response.json()).data || [];
+  renderFiles();
+}
+
+async function loadAudio() {
+  const response = await api('/api/admin/audio');
+  if (!response.ok) throw new Error('语音列表读取失败');
+  audioFiles = (await response.json()).data || [];
+  renderAudio();
+}
+
+function renderFiles() {
+  const query = $('search').value.trim().toLowerCase();
+  const visible = files.filter(file => ((file.name || '') + ' ' + (file.mime_type || '') + ' ' + (file.date || '')).toLowerCase().includes(query));
+  $('fileRows').innerHTML = visible.map(file => managedFileRow(file, 'file')).join('');
+  $('fileEmpty').classList.toggle('hidden', visible.length !== 0);
+}
+
+function renderAudio() {
+  const query = $('audioSearch').value.trim().toLowerCase();
+  const visible = audioFiles.filter(file => ((file.name || '') + ' ' + (file.date || '')).toLowerCase().includes(query));
+  $('audioRows').innerHTML = visible.map(file => managedFileRow(file, 'audio')).join('');
+  $('audioEmpty').classList.toggle('hidden', visible.length !== 0);
+}
+
+function managedFileRow(file, collection) {
+  const name = esc(file.name || '未命名文件');
+  const encodedName = encodeURIComponent(file.name || 'download');
+  return '<tr>' +
+    '<td><div class="file-name"><span class="file-badge">' + fileKind(file.name) + '</span><div><b>' + name + '</b><small>' + esc(file.mime_type || '未知类型') + '</small></div></div></td>' +
+    '<td>' + size(file.size) + '</td>' +
+    '<td>' + esc(file.date || '—') + '</td>' +
+    '<td>' + formatTimestamp(file.created_at) + '</td>' +
+    '<td><div class="row-actions">' +
+      '<button class="button compact secondary" data-action="download" data-url="' + escAttr(file.download_url || '') + '" data-name="' + escAttr(encodedName) + '" type="button">下载</button>' +
+      '<button class="button compact danger" data-action="delete" data-id="' + escAttr(file.id || '') + '" data-collection="' + collection + '" type="button">删除</button>' +
+    '</div></td>' +
+  '</tr>';
+}
+
+function fileKind(name = '') {
+  const extension = name.includes('.') ? name.split('.').pop().slice(0, 4).toUpperCase() : 'FILE';
+  return esc(extension || 'FILE');
+}
+
+async function handleManagedFileAction(event) {
+  const button = event.target.closest?.('button[data-action]');
+  if (!button) return;
+  if (button.dataset.action === 'download') {
+    try {
+      await downloadProtectedFile(button.dataset.url, button.dataset.name);
+    } catch (error) {
+      toast(error.message || '下载失败');
+    }
+    return;
+  }
+  if (button.dataset.action === 'delete') {
+    if (button.dataset.collection === 'audio') await removeAudio(button.dataset.id);
+    else await removeFile(button.dataset.id);
+  }
+}
+
+function uploadManagedFile(file, onProgress = () => {}) {
+  if (!file) return Promise.resolve(null);
+  return new Promise((resolve, reject) => {
+    const request = new XMLHttpRequest();
+    const form = new FormData();
+    form.append('file', file, file.name);
+    request.open('POST', '/api/uploads');
+    request.setRequestHeader('Authorization', 'Bearer ' + token);
+    request.upload.onprogress = event => {
+      if (event.lengthComputable) onProgress(Math.round(event.loaded / event.total * 100));
+    };
+    request.onerror = () => reject(new Error('文件上传失败'));
+    request.onload = () => {
+      if (request.status === 401) {
+        logout();
+        reject(new Error('登录已失效'));
+        return;
+      }
+      if (request.status < 200 || request.status >= 300) {
+        reject(new Error('文件上传失败'));
+        return;
+      }
+      try {
+        resolve(JSON.parse(request.responseText).file);
+      } catch (_error) {
+        reject(new Error('服务器返回无效'));
+      }
+    };
+    request.send(form);
+  });
+}
+
+async function uploadFile(file) {
+  if (!file) return;
+  const button = $('uploadFileButton');
+  button.disabled = true;
+  try {
+    await uploadManagedFile(file, progress => { button.textContent = '上传 ' + progress + '%'; });
+    toast('文件上传成功');
+    await Promise.all([loadFiles(), loadOverview()]);
+  } catch (error) {
+    toast(error.message || '上传失败');
+  } finally {
+    button.disabled = false;
+    button.textContent = '上传文件';
+    $('fileUploadInput').value = '';
+  }
+}
+
+async function removeFile(id) {
+  if (!id || !confirm('确定删除这个文件？')) return;
+  const response = await api('/api/files/' + encodeURIComponent(id), { method: 'DELETE' });
+  if (!response.ok) {
+    toast('文件删除失败');
+    return;
+  }
+  await Promise.all([loadFiles(), loadOverview()]);
+  toast('文件已删除');
+}
+
+async function removeAudio(id) {
+  if (!id || !confirm('确定删除这条语音？')) return;
+  const response = await api('/api/files/' + encodeURIComponent(id), { method: 'DELETE' });
+  if (!response.ok) {
+    toast('语音删除失败');
+    return;
+  }
+  await Promise.all([loadAudio(), loadOverview()]);
+  toast('语音已删除');
+}
+
+async function protectedBlob(url) {
+  const response = await api(url);
+  if (!response.ok) throw new Error('文件读取失败');
+  return response.blob();
+}
+
+async function downloadProtectedFile(url, encodedName) {
+  const blob = await protectedBlob(url);
+  downloadBlob(blob, decodeURIComponent(encodedName));
+}
+
+function downloadBlob(blob, name) {
+  const link = document.createElement('a');
+  link.href = URL.createObjectURL(blob);
+  link.download = name;
+  link.click();
+  setTimeout(() => URL.revokeObjectURL(link.href), 1000);
+}
+
+async function changeAccount(event) {
+  event.preventDefault();
+  $('accountMessage').textContent = '';
+  if ($('newPassword').value !== $('confirmPassword').value) {
+    $('accountMessage').textContent = '两次输入的新密码不一致';
+    $('accountMessage').className = 'form-message error';
+    return;
+  }
+  const response = await api('/api/admin/account', {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      current_password: $('currentPassword').value,
+      username: $('newUsername').value,
+      password: $('newPassword').value,
+    }),
+  });
+  const payload = await response.json();
+  if (!response.ok) {
+    $('accountMessage').textContent = payload.error?.message || '修改失败';
+    $('accountMessage').className = 'form-message error';
+    return;
+  }
+  token = payload.access_token;
+  localStorage.setItem('nexus_token', token);
+  localStorage.setItem('nexus_username', payload.username);
+  $('currentPassword').value = '';
+  $('newPassword').value = '';
+  $('confirmPassword').value = '';
+  $('accountMessage').textContent = '修改成功，其他设备需要重新登录';
+  $('accountMessage').className = 'form-message success';
+}
+
+function toast(text) {
+  $('toast').textContent = text;
+  $('toast').classList.remove('hidden');
+  clearTimeout(toast.timer);
+  toast.timer = setTimeout(() => $('toast').classList.add('hidden'), 2600);
+}
+
+function size(bytes) {
+  const value = Number(bytes) || 0;
+  if (value >= 1073741824) return (value / 1073741824).toFixed(1) + ' GB';
+  if (value >= 1048576) return (value / 1048576).toFixed(1) + ' MB';
+  if (value >= 1024) return (value / 1024).toFixed(1) + ' KB';
+  return value + ' B';
+}
+
+function formatTimestamp(timestamp) {
+  const value = Number(timestamp);
+  if (!value) return '—';
+  return new Date(value * 1000).toLocaleString();
+}
+
+function esc(value) {
+  return String(value ?? '').replace(/[&<>"']/g, char => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[char]));
+}
+
+function escAttr(value) {
+  return esc(value).split(String.fromCharCode(10)).join(' ').split(String.fromCharCode(13)).join(' ');
+}
+
+$('setupForm').onsubmit = submitSetup;
+$('loginForm').onsubmit = signIn;
+$('logoutButton').onclick = logout;
+$('accountForm').onsubmit = changeAccount;
+$('search').oninput = renderFiles;
+$('audioSearch').oninput = renderAudio;
+$('refreshFilesButton').onclick = loadFiles;
+$('refreshAudioButton').onclick = loadAudio;
+$('refreshHealthButton').onclick = loadHealth;
+$('refreshOverviewButton').onclick = () => Promise.allSettled([loadOverview(), loadHealth()]);
+$('uploadFileButton').onclick = () => $('fileUploadInput').click();
+$('fileUploadInput').onchange = event => uploadFile(event.target.files[0]);
+$('fileRows').addEventListener('click', handleManagedFileAction);
+$('audioRows').addEventListener('click', handleManagedFileAction);
+document.querySelectorAll('.nav').forEach(item => { item.onclick = () => showPage(item.dataset.page); });
+document.querySelectorAll('[data-go-page]').forEach(item => { item.onclick = () => showPage(item.dataset.goPage); });
+
 initializePage();

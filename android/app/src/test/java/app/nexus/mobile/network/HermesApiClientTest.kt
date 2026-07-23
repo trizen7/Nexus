@@ -46,16 +46,18 @@ class HermesApiClientTest {
     }
 
     @Test
-    fun `health returns Hermes version`() = runTest {
+    fun `health returns Gateway and Hermes versions`() = runTest {
         server.enqueue(
             MockResponse()
                 .setResponseCode(200)
                 .setHeader("Content-Type", "application/json")
-                .setBody("{\"status\":\"ok\",\"platform\":\"hermes-agent\",\"version\":\"0.18.2\"}")
+                .setBody("{\"status\":\"ok\",\"version\":\"0.0.8\",\"upstream\":{\"status\":\"ok\",\"version\":\"0.18.2\"}}")
         )
         val client = HermesApiClient(server.url("/").toString(), "test-token")
 
-        assertEquals("0.18.2", client.health().version)
+        val health = client.health()
+        assertEquals("0.0.8", health.gatewayVersion)
+        assertEquals("0.18.2", health.hermesVersion)
         assertEquals("Bearer test-token", server.takeRequest().getHeader("Authorization"))
     }
 

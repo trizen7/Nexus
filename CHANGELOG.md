@@ -6,6 +6,20 @@
 
 - 暂无。
 
+## 0.0.8｜移动端设置、输入体验与 Web 管理页重构
+
+- Android 新增独立全屏设置页，集中管理人物模型、实际调用模型、推理深度、定时任务、自动刷新、主题、连接信息与退出登录；模型和定时任务子页面关闭后返回设置页；
+- Android 使用 Material 3 重新设计登录、聊天、会话抽屉、输入区与设置界面，统一蓝紫/青绿色视觉、圆角卡片、层级和暗色主题；
+- 登录页支持滚动、状态栏/导航栏/IME 安全区与 `adjustResize`，键盘不再遮挡密码栏；密码支持显隐，并实时显示已输入位数；
+- 聊天输入从整页 UI 状态中拆分，草稿磁盘保存改为 350ms 防抖并在切换会话、发送及 App 进入后台前强制落盘，减少输入法弹出和连续打字时的主线程工作；
+- Android 接受显式 HTTP 或 HTTPS，裸地址默认补全 HTTP，不再拒绝公网 HTTP、不再强制 HTTPS 或显示证书提示；同源 Bearer Token 防泄漏校验继续保留；
+- Gateway 健康信息在 App 中分别展示 Nexus Gateway 与 Hermes 版本；
+- Web 端重构为现代化初始化与运维管理页，移除聊天、会话和消息输入界面，保留文件、语音、账号、安全和系统状态；移动端导航使用受约束的横向滚动，不再撑宽整页；Android 使用的聊天 API 保持不变；
+- 建立强制 Hermes 原版只读边界：Nexus 禁止修改任何 Hermes 文件，禁止安装、升级、回滚、卸载、启动、停止或重启 Hermes，只能调用原版 HTTP API；测试环境只读获取连接信息并仅写入 Nexus 自有目录；
+- 该边界自 0.0.8 起强制执行；历史版本曾对本机 Hermes 做过更新和模型路由配置，仅作为事实记录保留，后续不得复现，也不得通过再次修改 Hermes 来“恢复”；
+- 自动验证：Gateway 82 项通过、9 项按环境跳过（含 5 项 Hermes 只读边界契约），Python 编译、网页契约与 JavaScript 语法检查通过；Android 126 项单元测试全部通过，`lintDebug` 仅保留按需求允许明文 HTTP 的 1 项预期警告，Debug APK 构建通过；
+- 按要求未在本机运行 Docker。
+
 ## 0.0.7｜HTTP 源站与 HTTPS 反向代理
 
 - Gateway 改回单一 HTTP 源站监听，不再生成、读取或热更新 TLS 证书，并移除临时 CA 下载与网页证书管理入口；旧 `/api/admin/tls` 路径不再转发给 Hermes；
@@ -13,11 +27,11 @@
 - Android 允许回环、RFC 1918 私网、链路本地、CGNAT、IPv6 ULA 和 `.local` 地址使用 HTTP，拒绝公网 HTTP；裸私网地址默认补全 `http://地址:18787`，裸公网域名默认补全 `https://域名`；
 - Android 自动把旧保存的私网 `https://地址:18788` 迁移为 `http://地址:18787`，移除 Debug CA 生成、内嵌和安装依赖；反向代理 HTTPS 继续使用系统信任链；
 - 人物模型、实际调用模型、推理深度和手机端定时任务管理继续保留；普通对话列表继续隐藏定时任务执行会话；
-- 独立成品测试环境切换到 LocalSubnet TCP `18787`，升级时安全停止旧 `18788` 进程并确认旧端口关闭；普通 upgrade 继续保留账号、Hermes 配置、媒体、运行数据及历史 `data/tls`，reset 才清空数据；
+- 独立成品测试环境切换到 LocalSubnet TCP `18787`，升级时安全停止旧 `18788` 进程并确认旧端口关闭；普通 upgrade 继续保留账号、Nexus 保存的 Hermes 上游连接配置副本、媒体、运行数据及历史 `data/tls`，reset 才清空数据；
 - Docker、Compose、环境变量示例和源码本地测试脚本同步为 HTTP 源站；按要求未在本机运行 Docker；
 - 自动验证：Gateway 77 项通过、9 项按环境跳过，Python 编译、网页契约与 JavaScript 语法检查通过；Android 126 项单元测试全部通过，`lintDebug` 与 Debug APK 构建通过；
 - 已生成 `Nexus-Android-0.0.7-debug.apk` 与 `Nexus-Gateway-0.0.7.zip`，并验证 Gateway ZIP 不含运行数据、缓存、私钥、测试 CA 或 Android 构建文件；
-- 独立测试环境已从 0.0.6 无损升级到 0.0.7：本机与局域网 HTTP 健康检查通过，`18787` 监听于 `0.0.0.0`、`18788` 完全关闭，账号、Hermes 配置、媒体和历史 TLS 文件保持不变。
+- 独立测试环境已从 0.0.6 无损升级到 0.0.7：本机与局域网 HTTP 健康检查通过，`18787` 监听于 `0.0.0.0`、`18788` 完全关闭，账号、Nexus 保存的 Hermes 上游连接配置副本、媒体和历史 TLS 文件保持不变。
 
 ## 0.0.6｜推理深度与 HTTPS 证书管理
 
@@ -28,11 +42,11 @@
 - Android 拒绝明文 HTTP，裸局域网 IP 默认补全 `https://` 与端口 `18788`；
 - Android 与网页普通对话列表均隐藏 `source=cron` 的定时任务执行会话，定时任务继续通过专用管理界面操作；
 - 0.0.6 Debug APK 在构建时内嵌成品测试环境 CA，手机无需手动安装证书；Release APK 仍只信任系统 CA；
-- 独立成品测试环境只开放 LocalSubnet TCP `18788`，升级保留账号、Hermes 配置、媒体和整个 `data/tls`，只有 reset 才删除 CA；
+- 独立成品测试环境只开放 LocalSubnet TCP `18788`，升级保留账号、Nexus 保存的 Hermes 上游连接配置副本、媒体和整个 `data/tls`，只有 reset 才删除 CA；
 - Docker 与源码本地测试脚本同步改为 HTTPS-only；按要求未运行 Docker 本机测试；
 - 自动验证：Gateway 87 项通过、9 项按环境跳过，Python 编译、网页契约和 JavaScript 语法检查通过；Android 126 项单元测试、`lintDebug` 与 Debug APK 构建通过；
 - 已生成 `Nexus-Android-0.0.6-debug.apk` 与 `Nexus-Gateway-0.0.6.zip`，并验证 APK 内嵌 CA 与独立测试环境当前 CA 一致、Gateway ZIP 不含运行数据或私钥；
-- 独立测试环境已无损升级到 0.0.6：本机与 `10.0.0.123` 的 HTTPS 健康检查通过，`18788` 正常监听、`18787` 完全关闭，账号、Hermes 配置、媒体和 TLS 数据保持不变。
+- 独立测试环境已无损升级到 0.0.6：本机与 `10.0.0.123` 的 HTTPS 健康检查通过，`18788` 正常监听、`18787` 完全关闭，账号、Nexus 保存的 Hermes 上游连接配置副本、媒体和 TLS 数据保持不变。
 
 ## 0.0.5｜Android 连接兼容与登录恢复
 
@@ -43,7 +57,7 @@
 - 已保存 Token 失效时自动清除无效凭据并返回登录页，用户重新输入密码后可重新签发设备 Token，不再反复使用旧 Token；
 - 普通请求、停止回答和流式对话统一保留 HTTP 状态及 Gateway 错误信息，401 可可靠触发重新登录；
 - 自动验证：Gateway 68 项通过、9 项按环境跳过，Python 编译和网页契约通过；Android 122 项 JVM 测试通过，Lint 0 issues，Debug APK 构建成功；
-- 独立成品测试环境无损升级到 0.0.5，账号、Hermes 配置、媒体和本地 HTTPS CA 保持不变，HTTP/HTTPS 健康检查与局域网双端口监听通过。
+- 独立成品测试环境无损升级到 0.0.5，账号、Nexus 保存的 Hermes 上游连接配置副本、媒体和本地 HTTPS CA 保持不变，HTTP/HTTPS 健康检查与局域网双端口监听通过。
 
 ## 0.0.4｜人物与调用模型拆分、内置 HTTPS
 
@@ -56,7 +70,7 @@
 - 测试环境控制文件纳入 `scripts/product-test-environment/` 维护，安全同步只更新控制脚本，不修改账号、配置、媒体、虚拟环境、日志或状态；
 - Hermes 本地测试配置新增 `gpt-5.6-sol` 调用模型路由，人物模型“星禾”继续保留。
 - 自动验证：Gateway 68 项通过、9 项按环境跳过，Python 编译和网页契约通过；Android 116 项 JVM 测试通过，Lint 无 Error，Debug APK 构建成功；
-- 独立环境完成两轮无损升级，账号、Hermes 配置、媒体和 3 个 Hermes 定时任务保持不变，本地 CA 指纹在第二轮升级中保持一致；本机与局域网 HTTPS、HTTP 跳转、双端口监听和 LocalSubnet 防火墙规则均验证通过。
+- 独立环境完成两轮无损升级，账号、Nexus 保存的 Hermes 上游连接配置副本、媒体和 3 个 Hermes 定时任务保持不变，本地 CA 指纹在第二轮升级中保持一致；本机与局域网 HTTPS、HTTP 跳转、双端口监听和 LocalSubnet 防火墙规则均验证通过。
 
 ## 0.0.3｜移动模型选择与定时任务管理
 

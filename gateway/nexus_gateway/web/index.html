@@ -2,70 +2,159 @@
 <html lang="zh-CN">
 <head>
   <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+  <meta name="theme-color" content="#111827">
   <title>Nexus 管理中心</title>
   <link rel="stylesheet" href="/assets/styles.css">
 </head>
 <body>
-<section id="setupPage" class="login hidden">
-  <form class="login-card setup-card" id="setupForm">
-    <div class="logo">N</div><h1>初始化 Nexus</h1><p class="sub">创建管理员账号，并连接你的 Hermes Agent。</p>
-    <label class="field"><span>管理员账号</span><input id="setupUsername" autocomplete="username" required minlength="3" maxlength="48" value="nexus"></label>
-    <label class="field"><span>管理员密码</span><input id="setupPassword" type="password" autocomplete="new-password" required minlength="8"></label>
-    <label class="field"><span>确认密码</span><input id="setupPasswordConfirm" type="password" autocomplete="new-password" required minlength="8"></label>
-    <label class="field"><span>Hermes API 地址</span><input id="setupHermesUrl" type="url" placeholder="http://Hermes主机:8642" required></label>
-    <label class="field"><span>Hermes API Server Key</span><input id="setupHermesToken" type="password" autocomplete="off" required></label>
-    <label class="field"><span>一次性初始化令牌</span><input id="setupBootstrapToken" type="password" autocomplete="off" required></label>
-    <p class="setup-note">配置只保存在网关数据目录，不会写入 App 或浏览器。</p>
-    <button class="button wide">完成初始化</button><div id="setupError" class="error"></div>
+<section id="setupPage" class="auth-page hidden">
+  <div class="auth-backdrop" aria-hidden="true"></div>
+  <form class="auth-card setup-card" id="setupForm">
+    <div class="auth-brand"><span class="logo">N</span><span>Nexus</span></div>
+    <div class="auth-heading">
+      <span class="eyebrow">首次使用</span>
+      <h1>初始化 Nexus</h1>
+      <p>创建管理员账号，并连接已有的 Hermes Agent。</p>
+    </div>
+    <div class="form-grid two-columns">
+      <label class="field"><span>管理员账号</span><input id="setupUsername" autocomplete="username" required minlength="3" maxlength="48" value="nexus"></label>
+      <label class="field"><span>Hermes API 地址</span><input id="setupHermesUrl" type="url" placeholder="http://Hermes主机:8642" required></label>
+      <label class="field"><span>管理员密码</span><input id="setupPassword" type="password" autocomplete="new-password" required minlength="8"></label>
+      <label class="field"><span>确认密码</span><input id="setupPasswordConfirm" type="password" autocomplete="new-password" required minlength="8"></label>
+      <label class="field span-two"><span>Hermes API Server Key</span><input id="setupHermesToken" type="password" autocomplete="off" required></label>
+      <label class="field span-two"><span>一次性初始化令牌</span><input id="setupBootstrapToken" type="password" autocomplete="off" required></label>
+    </div>
+    <div class="info-note">配置仅保存在 Gateway 数据目录，不会写入 App、网页源码或浏览器本地存储。</div>
+    <button class="button primary wide" type="submit">完成初始化</button>
+    <div id="setupError" class="form-message error" role="alert"></div>
   </form>
 </section>
-<section id="loginPage" class="login hidden">
-  <form class="login-card" id="loginForm">
-    <div class="logo">禾</div><h1>Nexus 管理中心</h1><p class="sub">网页聊天、文件管理和账号安全</p>
+
+<section id="loginPage" class="auth-page hidden">
+  <div class="auth-backdrop" aria-hidden="true"></div>
+  <form class="auth-card login-card" id="loginForm">
+    <div class="auth-brand"><span class="logo">N</span><span>Nexus</span></div>
+    <div class="auth-heading">
+      <span class="eyebrow">管理控制台</span>
+      <h1>欢迎回来</h1>
+      <p>管理文件、语音、系统状态与账号安全。</p>
+    </div>
     <label class="field"><span>账号</span><input id="username" autocomplete="username" required></label>
     <label class="field"><span>密码</span><input id="password" type="password" autocomplete="current-password" required></label>
-    <button class="button wide">登录</button><div id="loginError" class="error"></div>
+    <button class="button primary wide" type="submit">登录</button>
+    <div id="loginError" class="form-message error" role="alert"></div>
   </form>
 </section>
-<section id="appPage" class="shell hidden">
+
+<section id="appPage" class="app-shell hidden">
   <aside class="sidebar">
-    <div class="brand"><span class="brand-mark">禾</span><div>Nexus<small>移动管理中心</small></div></div>
-    <nav class="navs">
-      <button class="nav active" data-page="overview">概览</button><button class="nav" data-page="chat">网页聊天</button>
-      <button class="nav" data-page="files">文件管理</button><button class="nav" data-page="audio">语音管理</button>
-      <button class="nav" data-page="account">账号安全</button><button class="nav" data-page="system">系统状态</button>
+    <div class="brand"><span class="brand-mark">N</span><div><strong>Nexus</strong><small>Gateway 管理中心</small></div></div>
+    <nav class="nav-list" aria-label="管理功能">
+      <button class="nav active" data-page="overview"><span class="nav-icon">⌂</span><span>概览</span></button>
+      <button class="nav" data-page="files"><span class="nav-icon">▤</span><span>文件管理</span></button>
+      <button class="nav" data-page="audio"><span class="nav-icon">◉</span><span>语音管理</span></button>
+      <button class="nav" data-page="account"><span class="nav-icon">◎</span><span>账号安全</span></button>
+      <button class="nav" data-page="system"><span class="nav-icon">◇</span><span>系统状态</span></button>
     </nav>
+    <div class="sidebar-note"><span class="status-dot"></span><span>HTTP 源站模式</span></div>
   </aside>
+
   <main class="main">
-    <header class="page-head"><div><h1 id="pageTitle">概览</h1><p id="pageDesc" class="sub">Nexus运行概况</p></div><button class="button secondary" id="logoutButton">退出</button></header>
-    <div id="toast" class="toast hidden"></div>
-    <section id="overview" class="section active"><div class="grid"><div class="metric"><span>对话</span><b id="metricSessions">—</b></div><div class="metric"><span>文件</span><b id="metricFiles">—</b></div><div class="metric"><span>语音</span><b id="metricAudio">—</b></div><div class="metric"><span>总空间</span><b id="metricBytes">—</b></div></div><div class="panel top-gap"><div class="panel-title">连接状态</div><div class="status-list"><div class="status-row"><span>移动网关</span><span id="gatewayStatus">检查中</span></div><div class="status-row"><span>Hermes 核心</span><span id="hermesStatus">检查中</span></div><div class="status-row"><span>当前入口</span><span id="entryAddress"></span></div></div></div></section>
-    <section id="chat" class="section"><div class="chat-layout"><div class="conversation-list"><div class="conversation-head"><input id="sessionSearch" placeholder="搜索对话"><button class="icon-button" id="newSessionButton" title="新建对话">＋</button><button class="icon-button" id="refreshSessionsButton" title="刷新">↻</button></div><div class="conversation-filters"><button class="filter active" data-filter="active">对话</button><button class="filter" data-filter="pinned">置顶</button><button class="filter" data-filter="archived">归档</button></div><div id="sessionRows" class="conversation-rows"></div></div><div class="chat-pane"><div class="chat-title"><div><b id="chatTitle">新对话</b><span id="chatMeta">输入内容后首次发送时创建</span></div><div id="sessionActions" class="hidden"><button class="text-button" id="pinSessionButton">置顶</button><button class="text-button" id="archiveSessionButton">归档</button><button class="text-button" id="renameSessionButton">重命名</button><button class="text-button danger-text" id="deleteSessionButton">删除</button></div></div><div id="messages" class="messages"><div class="empty">开始一段新的对话</div></div><div id="sendFailure" class="send-failure hidden"><span id="sendFailureText">发送失败</span><button id="retrySendButton">重试</button></div><div id="pendingAttachment" class="pending hidden"><div><span id="pendingAttachmentName"></span><small id="uploadProgress"></small></div><button id="clearAttachmentButton">×</button></div><form class="composer" id="chatForm"><button type="button" class="icon-button" id="attachButton" title="选择附件">＋</button><input id="attachmentInput" type="file" accept="image/*,.pdf,.txt,.md,.doc,.docx,.xls,.xlsx,.zip,.apk" hidden><textarea id="chatInput" placeholder="和Nexus说点什么……"></textarea><button type="button" id="stopButton" class="button danger hidden">停止</button><button id="sendButton" class="button">发送</button></form></div></div></section>
-    <section id="files" class="section"><div class="toolbar"><input id="search" placeholder="搜索文件名、类型或日期"><input id="fileUploadInput" type="file" hidden><button class="button" id="uploadFileButton">上传文件</button><button class="button secondary" id="refreshFilesButton">刷新</button></div><div class="panel table-wrap"><table><thead><tr><th>文件</th><th>大小</th><th>日期</th><th>上传时间</th><th>操作</th></tr></thead><tbody id="fileRows"></tbody></table><div id="fileEmpty" class="empty hidden">暂无普通文件</div></div></section>
-    <section id="audio" class="section"><div class="toolbar"><input id="audioSearch" placeholder="搜索语音或日期"><button class="button secondary" id="refreshAudioButton">刷新</button></div><div class="panel table-wrap"><table><thead><tr><th>语音</th><th>大小</th><th>日期</th><th>上传时间</th><th>操作</th></tr></thead><tbody id="audioRows"></tbody></table><div id="audioEmpty" class="empty hidden">暂无语音文件</div></div></section>
-    <section id="account" class="section"><div class="panel account-card"><h2>账号安全</h2><div class="notice">修改后，App 和其他浏览器中的旧登录状态会立即失效。</div><form id="accountForm"><label class="field"><span>当前密码</span><input id="currentPassword" type="password" required></label><label class="field"><span>新账号</span><input id="newUsername" required minlength="3" maxlength="48"></label><label class="field"><span>新密码</span><input id="newPassword" type="password" required minlength="8"></label><label class="field"><span>确认新密码</span><input id="confirmPassword" type="password" required minlength="8"></label><button class="button">保存账号设置</button><div id="accountMessage" class="success"></div></form></div></section>
-    <section id="system" class="section">
-      <div class="panel">
-        <div class="panel-title">系统状态</div>
-        <div class="status-list">
-          <div class="status-row"><span>Gateway 版本</span><span id="gatewayVersion">—</span></div>
-          <div class="status-row"><span>Hermes 版本</span><span id="hermesVersion">—</span></div>
-          <div class="status-row"><span>登录有效期</span><span>30 天</span></div>
-          <div class="status-row"><span>当前入口</span><span id="systemEntry"></span></div>
-          <div class="status-row"><span>Gateway 模式</span><span>HTTP 源站</span></div>
-        </div>
+    <header class="page-head">
+      <div><span class="eyebrow">Nexus Console</span><h1 id="pageTitle">概览</h1><p id="pageDesc">查看 Nexus 当前运行情况</p></div>
+      <button class="button ghost" id="logoutButton" type="button">退出登录</button>
+    </header>
+    <div id="toast" class="toast hidden" role="status"></div>
+
+    <section id="overview" class="section active">
+      <div class="metrics-grid">
+        <article class="metric"><span class="metric-label">Hermes 会话</span><b id="metricSessions">—</b><small>由 Android App 与其他客户端使用</small></article>
+        <article class="metric"><span class="metric-label">普通文件</span><b id="metricFiles">—</b><small>可在文件管理中下载或删除</small></article>
+        <article class="metric"><span class="metric-label">语音文件</span><b id="metricAudio">—</b><small>按日期集中管理</small></article>
+        <article class="metric accent"><span class="metric-label">存储占用</span><b id="metricBytes">—</b><small>文件与语音合计</small></article>
       </div>
-      <div class="panel top-gap proxy-panel">
-        <div class="panel-title">反向代理</div>
-        <div class="proxy-content">
-          <div class="notice">Gateway 只提供 HTTP 源站。局域网可以直接访问；外网请使用 Nginx、Caddy 等反向代理提供受信任的 HTTPS 域名。</div>
-          <p class="muted">不要把 HTTP 源站端口直接暴露到公网。反向代理应转发 Host 和 X-Forwarded-Proto，并关闭响应缓冲以支持流式输出。</p>
-        </div>
+      <div class="overview-grid">
+        <article class="panel">
+          <div class="panel-head"><div><span class="eyebrow">Connectivity</span><h2>连接状态</h2></div><button class="button compact secondary" id="refreshOverviewButton" type="button">刷新</button></div>
+          <div class="status-list">
+            <div class="status-row"><span>Gateway</span><strong id="gatewayStatus" class="status-value">检查中</strong></div>
+            <div class="status-row"><span>Hermes</span><strong id="hermesStatus" class="status-value">检查中</strong></div>
+            <div class="status-row"><span>当前入口</span><strong id="entryAddress" class="address-value"></strong></div>
+          </div>
+        </article>
+        <article class="panel welcome-panel">
+          <span class="eyebrow">管理边界</span>
+          <h2>网页专注于运维管理</h2>
+          <p>聊天、模型选择和定时任务由 Android App 完成；网页保留初始化、文件、语音、账号与系统管理。</p>
+          <div class="quick-actions"><button class="button secondary" data-go-page="files" type="button">管理文件</button><button class="button ghost" data-go-page="system" type="button">查看部署说明</button></div>
+        </article>
+      </div>
+    </section>
+
+    <section id="files" class="section">
+      <div class="toolbar">
+        <div class="search-box"><span>⌕</span><input id="search" placeholder="搜索文件名、类型或日期"></div>
+        <input id="fileUploadInput" type="file" hidden>
+        <button class="button primary" id="uploadFileButton" type="button">上传文件</button>
+        <button class="button secondary" id="refreshFilesButton" type="button">刷新</button>
+      </div>
+      <div class="panel table-panel">
+        <div class="table-wrap"><table><thead><tr><th>文件</th><th>大小</th><th>日期</th><th>上传时间</th><th>操作</th></tr></thead><tbody id="fileRows"></tbody></table></div>
+        <div id="fileEmpty" class="empty hidden"><b>暂无普通文件</b><span>上传后的文件会显示在这里。</span></div>
+      </div>
+    </section>
+
+    <section id="audio" class="section">
+      <div class="toolbar">
+        <div class="search-box"><span>⌕</span><input id="audioSearch" placeholder="搜索语音名称或日期"></div>
+        <button class="button secondary" id="refreshAudioButton" type="button">刷新</button>
+      </div>
+      <div class="panel table-panel">
+        <div class="table-wrap"><table><thead><tr><th>语音</th><th>大小</th><th>日期</th><th>上传时间</th><th>操作</th></tr></thead><tbody id="audioRows"></tbody></table></div>
+        <div id="audioEmpty" class="empty hidden"><b>暂无语音文件</b><span>Android App 上传的语音会显示在这里。</span></div>
+      </div>
+    </section>
+
+    <section id="account" class="section">
+      <div class="panel account-panel">
+        <div class="panel-head"><div><span class="eyebrow">Security</span><h2>账号安全</h2></div></div>
+        <div class="warning-note">保存后，其他设备上的旧登录状态会立即失效，需要使用新账号重新登录。</div>
+        <form id="accountForm" class="account-form">
+          <label class="field"><span>当前密码</span><input id="currentPassword" type="password" autocomplete="current-password" required></label>
+          <label class="field"><span>新账号</span><input id="newUsername" autocomplete="username" required minlength="3" maxlength="48"></label>
+          <label class="field"><span>新密码</span><input id="newPassword" type="password" autocomplete="new-password" required minlength="8"></label>
+          <label class="field"><span>确认新密码</span><input id="confirmPassword" type="password" autocomplete="new-password" required minlength="8"></label>
+          <div class="form-actions"><button class="button primary" type="submit">保存账号设置</button><div id="accountMessage" class="form-message success" role="status"></div></div>
+        </form>
+      </div>
+    </section>
+
+    <section id="system" class="section">
+      <div class="system-grid">
+        <article class="panel">
+          <div class="panel-head"><div><span class="eyebrow">Runtime</span><h2>系统状态</h2></div><button class="button compact secondary" id="refreshHealthButton" type="button">刷新</button></div>
+          <div class="status-list">
+            <div class="status-row"><span>Gateway 版本</span><strong id="gatewayVersion">—</strong></div>
+            <div class="status-row"><span>Hermes 版本</span><strong id="hermesVersion">—</strong></div>
+            <div class="status-row"><span>登录有效期</span><strong>30 天</strong></div>
+            <div class="status-row"><span>当前入口</span><strong id="systemEntry" class="address-value"></strong></div>
+            <div class="status-row"><span>Gateway 模式</span><strong>HTTP 源站</strong></div>
+          </div>
+        </article>
+        <article class="panel proxy-panel">
+          <div class="panel-head"><div><span class="eyebrow">Deployment</span><h2>反向代理说明</h2></div></div>
+          <div class="proxy-content">
+            <p>Nexus Gateway 提供 HTTP 源站，不会强制跳转 HTTPS，也不要求 App 安装证书。</p>
+            <p>局域网可直接访问；外网部署建议由 Nginx、Caddy 或其他反向代理提供 HTTPS 域名，并转发到当前 HTTP 端口。</p>
+            <div class="code-note"><span>建议转发</span><code>http://127.0.0.1:18787</code></div>
+            <p class="muted">请根据你的网络边界自行做好访问控制。需要流式响应时，应关闭代理响应缓冲。</p>
+          </div>
+        </article>
       </div>
     </section>
   </main>
 </section>
-<dialog id="textDialog"><form method="dialog" class="dialog-card"><h2 id="dialogTitle"></h2><input id="dialogInput"><div class="dialog-actions"><button class="button secondary" value="cancel">取消</button><button class="button" id="dialogConfirm" value="default">确定</button></div></form></dialog>
 <script src="/assets/app.js" defer></script>
-</body></html>
+</body>
+</html>

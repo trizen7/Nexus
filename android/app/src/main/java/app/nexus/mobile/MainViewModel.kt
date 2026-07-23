@@ -32,6 +32,7 @@ data class MainUiState(
     val password: String = "",
     val token: String = "",
     val connectionStatus: ConnectionStatus = ConnectionStatus.NOT_CONFIGURED,
+    val gatewayVersion: String? = null,
     val hermesVersion: String? = null,
     val sessions: List<HermesSession> = emptyList(),
     val activeSessionId: String? = null,
@@ -50,7 +51,6 @@ data class MainUiState(
     val cronJobToDelete: HermesCronJob? = null,
     val cronNotice: String? = null,
     val messages: List<ChatMessage> = emptyList(),
-    val input: String = "",
     val pendingImages: List<ChatImage> = emptyList(),
     val pendingFile: ChatFile? = null,
     val uploadProgress: Int? = null,
@@ -106,6 +106,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private companion object {
         const val MESSAGE_PAGE_SIZE = 10
         const val OLDER_MESSAGE_PAGE_SIZE = 20
+        const val DRAFT_PERSIST_DEBOUNCE_MILLIS = 350L
     }
     private val connectionStore = ConnectionStore(application)
     private val savedConnection = connectionStore.load()
@@ -139,6 +140,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private var pollingJob: Job? = null
     private var sessionLoadJob: Job? = null
     private var runStatusJob: Job? = null
+    private var draftPersistJob: Job? = null
     private var liveAssistantMessageId: String? = null
     private var stopRequestedSessionId: String? = null
     private var sessionLoadGeneration = 0L
@@ -205,7 +207,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         password = "",
                         token = accessToken,
                         connectionStatus = ConnectionStatus.CONNECTED,
-                        hermesVersion = health.version,
+                        gatewayVersion = health.gatewayVersion,
+                        hermesVersion = health.hermesVersion,
                         sessions = sessions,
                         activeSessionId = selected,
                         loading = false,
@@ -435,7 +438,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             it.copy(
                 activeSessionId = null,
                 messages = emptyList(),
-                input = "",
                 pendingImages = emptyList(),
                 pendingFile = null,
                 drawerOpen = false,
@@ -637,18 +639,32 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun updateInput(value: String) {
         _input.value = value
-        _uiState.update { it.copy(input = value) }
-        saveCurrentDraft()
+        saveCurrentDraft(persistImmediately = false)
     }
 
     private fun draftKey(sessionId: String? = _uiState.value.activeSessionId): String = sessionId ?: localDraftKey
 
-    private fun saveCurrentDraft() {
+    private fun saveCurrentDraft(persistImmediately: Boolean = true) {
         val state = _uiState.value
         val key = draftKey()
         drafts = drafts.save(key, ComposerDraft(_input.value, state.pendingImages.map { it.id }, state.pendingFile?.id))
         draftImages[key] = state.pendingImages
         draftFiles[key] = state.pendingFile
+        if (persistImmediately) flushDrafts() else scheduleDraftPersistence()
+    }
+
+    private fun scheduleDraftPersistence() {
+        draftPersistJob?.cancel()
+        draftPersistJob = viewModelScope.launch {
+            delay(DRAFT_PERSIST_DEBOUNCE_MILLIS)
+            persistAllDrafts()
+            draftPersistJob = null
+        }
+    }
+
+    fun flushDrafts() {
+        draftPersistJob?.cancel()
+        draftPersistJob = null
         persistAllDrafts()
     }
 
@@ -660,7 +676,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val file = draftFiles[key]
         _uiState.update {
             it.copy(
-                input = draft.text,
                 pendingImages = images,
                 pendingFile = file,
                 preparingImage = false
@@ -881,7 +896,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         _input.value = ""
         _uiState.update {
             it.copy(
-                input = "",
                 pendingImages = emptyList(),
                 pendingFile = null,
                 streaming = true,
@@ -963,7 +977,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         val restoredInput = draftTextAfterRunFailure(_input.value, originalInput, restore)
                         _input.value = restoredInput
                         current.copy(
-                            input = restoredInput,
                             messages = messagesAfterSendTermination(
                                 current.messages,
                                 optimisticUserId,
@@ -1177,7 +1190,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun openModelPicker() {
-        _uiState.update { it.copy(modelPickerOpen = true, settingsOpen = false, error = null) }
+        _uiState.update { it.copy(modelPickerOpen = true, error = null) }
         val state = _uiState.value
         if (state.personaModels.isEmpty() && state.inferenceModels.isEmpty() && !state.modelsLoading) refreshModels()
     }
@@ -1243,7 +1256,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         _uiState.update {
             it.copy(
                 cronManagerOpen = true,
-                settingsOpen = false,
                 cronNotice = null,
                 error = null
             )
@@ -1474,6 +1486,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun logout() {
         stopPolling()
+        draftPersistJob?.cancel()
+        draftPersistJob = null
         performLocalLogoutCleanup(
             cancelStream = {
                 streamJob?.cancel()
@@ -1501,6 +1515,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         )
         connectionStore.clear()
         client = null
+        drafts = ConversationDrafts()
+        draftImages.clear()
+        draftFiles.clear()
+        localDraftKey = "local-draft-${UUID.randomUUID()}"
+        _input.value = ""
         _uiState.value = MainUiState()
     }
 
