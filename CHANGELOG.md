@@ -6,6 +6,21 @@
 
 - 暂无。
 
+## 0.0.6｜推理深度与 HTTPS 证书管理
+
+- Android 在人物模型和实际调用模型之外新增独立推理深度选择，支持默认、`none`、`minimal`、`low`、`medium`、`high`、`xhigh`、`max`、`ultra` 并持久保存；
+- Gateway 对 `reasoning_effort` 做白名单校验并透传；Nexus 不保证 Hermes 或所选调用模型一定支持、采用该字段；
+- Gateway 改为单一 HTTPS 监听，禁止 HTTP，自动生成并持久化临时 CA/服务器证书，TLS 最低版本为 1.2；当前无需提供正式证书，后续可在网页上传正式证书；
+- 管理网页新增 HTTPS 证书状态与上传入口，可校验并热切换正式 PEM 证书链和未加密 PEM 私钥，失败自动回滚；
+- Android 拒绝明文 HTTP，裸局域网 IP 默认补全 `https://` 与端口 `18788`；
+- Android 与网页普通对话列表均隐藏 `source=cron` 的定时任务执行会话，定时任务继续通过专用管理界面操作；
+- 0.0.6 Debug APK 在构建时内嵌成品测试环境 CA，手机无需手动安装证书；Release APK 仍只信任系统 CA；
+- 独立成品测试环境只开放 LocalSubnet TCP `18788`，升级保留账号、Hermes 配置、媒体和整个 `data/tls`，只有 reset 才删除 CA；
+- Docker 与源码本地测试脚本同步改为 HTTPS-only；按要求未运行 Docker 本机测试；
+- 自动验证：Gateway 87 项通过、9 项按环境跳过，Python 编译、网页契约和 JavaScript 语法检查通过；Android 126 项单元测试、`lintDebug` 与 Debug APK 构建通过；
+- 已生成 `Nexus-Android-0.0.6-debug.apk` 与 `Nexus-Gateway-0.0.6.zip`，并验证 APK 内嵌 CA 与独立测试环境当前 CA 一致、Gateway ZIP 不含运行数据或私钥；
+- 独立测试环境已无损升级到 0.0.6：本机与 `10.0.0.123` 的 HTTPS 健康检查通过，`18788` 正常监听、`18787` 完全关闭，账号、Hermes 配置、媒体和 TLS 数据保持不变。
+
 ## 0.0.5｜Android 连接兼容与登录恢复
 
 - 修复 Android Debug APK 连接本地 HTTPS 时不信任用户手动安装 CA 的问题；Release 构建仍只信任系统 CA；

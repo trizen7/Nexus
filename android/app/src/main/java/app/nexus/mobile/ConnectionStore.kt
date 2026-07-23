@@ -21,17 +21,27 @@ class ConnectionStore(context: Context) {
     private val preferences = context.getSharedPreferences("nexus_connection", Context.MODE_PRIVATE)
     private val tokenCipher = TokenCipher()
 
-    fun load(): SavedConnection = SavedConnection(
-        serverUrl = preferences.getString(KEY_SERVER_URL, "").orEmpty(),
-        username = preferences.getString(KEY_USERNAME, "").orEmpty(),
-        token = tokenCipher.decrypt(preferences.getString(KEY_TOKEN, "").orEmpty()),
-        activeSessionId = preferences.getString(KEY_ACTIVE_SESSION, null),
-        autoRefresh = preferences.getBoolean(KEY_AUTO_REFRESH, true),
-        themeMode = ThemeMode.fromStored(preferences.getString(KEY_THEME_MODE, null)),
-        selectedPersonaModelId = preferences.getString(KEY_SELECTED_PERSONA_MODEL, null)
-            ?: preferences.getString(KEY_LEGACY_SELECTED_MODEL, null),
-        selectedInferenceModelId = preferences.getString(KEY_SELECTED_INFERENCE_MODEL, null)
-    )
+    fun load(): SavedConnection {
+        val storedServerUrl = preferences.getString(KEY_SERVER_URL, "").orEmpty()
+        val migratedServerUrl = migrateStoredServerUrl(storedServerUrl)
+        if (migratedServerUrl != storedServerUrl) {
+            preferences.edit().putString(KEY_SERVER_URL, migratedServerUrl).apply()
+        }
+        return SavedConnection(
+            serverUrl = migratedServerUrl,
+            username = preferences.getString(KEY_USERNAME, "").orEmpty(),
+            token = tokenCipher.decrypt(preferences.getString(KEY_TOKEN, "").orEmpty()),
+            activeSessionId = preferences.getString(KEY_ACTIVE_SESSION, null),
+            autoRefresh = preferences.getBoolean(KEY_AUTO_REFRESH, true),
+            themeMode = ThemeMode.fromStored(preferences.getString(KEY_THEME_MODE, null)),
+            selectedPersonaModelId = preferences.getString(KEY_SELECTED_PERSONA_MODEL, null)
+                ?: preferences.getString(KEY_LEGACY_SELECTED_MODEL, null),
+            selectedInferenceModelId = preferences.getString(KEY_SELECTED_INFERENCE_MODEL, null),
+            selectedReasoningEffort = ReasoningEffort.fromStored(
+                preferences.getString(KEY_SELECTED_REASONING_EFFORT, null)
+            )
+        )
+    }
 
     fun saveLogin(serverUrl: String, username: String, token: String, activeSessionId: String?) {
         preferences.edit()
@@ -84,6 +94,16 @@ class ConnectionStore(context: Context) {
         editor.apply()
     }
 
+    fun saveSelectedReasoningEffort(effort: ReasoningEffort) {
+        val editor = preferences.edit()
+        if (effort == ReasoningEffort.DEFAULT) {
+            editor.remove(KEY_SELECTED_REASONING_EFFORT)
+        } else {
+            editor.putString(KEY_SELECTED_REASONING_EFFORT, effort.name)
+        }
+        editor.apply()
+    }
+
     fun loadDrafts(): PersistedDraftBundle {
         val json = preferences.getString(KEY_DRAFTS, null) ?: return PersistedDraftBundle()
         return decodeDraftBundle(json)
@@ -125,6 +145,7 @@ class ConnectionStore(context: Context) {
         const val KEY_LEGACY_SELECTED_MODEL = "selected_model_id"
         const val KEY_SELECTED_PERSONA_MODEL = "selected_persona_model_id"
         const val KEY_SELECTED_INFERENCE_MODEL = "selected_inference_model_id"
+        const val KEY_SELECTED_REASONING_EFFORT = "selected_reasoning_effort"
         const val KEY_DRAFTS = "composer_drafts_v1"
     }
 }

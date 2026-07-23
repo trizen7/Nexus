@@ -1,38 +1,45 @@
-Nexus 独立本地测试环境
+Nexus 独立成品测试环境（HTTPS-only）
 
-网页（HTTPS）：
+本目录只运行父目录中的 Nexus Gateway 成品 ZIP，不读取仓库源码，也不运行 Docker。
+
+访问地址
 - 本机：https://127.0.0.1:18788
-- 局域网：https://当前电脑局域网IP:18788
+- 手机/局域网设备：https://当前电脑局域网IP:18788
+- HTTP 18787 已禁用；管理脚本会检查该端口必须关闭。
 
-Android / 兼容 API：
-- 推荐 HTTP：http://当前电脑局域网IP:18787
-- 安装并信任本地 CA 后可用 HTTPS：https://当前电脑局域网IP:18788
+证书说明
+1. HTTPS 始终需要服务器证书，但你现在不需要购买、申请或手动安装证书。Gateway 首次启动会在 data\tls 中自动生成并持久保存临时 CA 与服务器证书。
+2. Nexus Android 0.0.6 Debug APK 已内嵌本测试环境当前 CA，手机无需另外安装证书，直接填写 https://电脑局域网IP:18788。
+3. Release APK 只信任 Android 系统 CA。以后取得正式证书后，可登录网页，在“系统状态 → HTTPS 证书”上传完整 PEM 证书链和未加密 PEM 私钥；Gateway 会校验、备份、热切换，失败会自动回滚。
+4. 正式证书能否被 Release APK 和普通浏览器直接信任，取决于签发 CA 是否被系统信任，以及访问域名是否与证书 SAN 匹配。直接用局域网 IP 访问时，正式证书也必须包含该 IP。
+5. Windows 浏览器若要消除临时 CA 警告，可主动双击 06-安装本机HTTPS证书.cmd。该操作只写入当前 Windows 用户信任库。
+6. 其他非 App 设备如需信任临时 CA，请通过 U 盘、受信任文件共享等方式取得 data\tls\ca.crt；不要通过明文 HTTP 传输证书。
 
-首次测试：
-1. 双击“01-打开初始化页面.cmd”启动环境。
-2. Windows 第一次使用 HTTPS 时，主动双击“06-安装本机HTTPS证书.cmd”，安装后关闭并重新打开浏览器。
-3. 其他设备先从 http://当前电脑局域网IP:18787/nexus-local-ca.crt 下载本地 CA，再按设备系统提示把它作为 CA 证书手动安装并信任；只在可信局域网和测试设备上安装。Android 0.0.5 Debug APK 及以上测试包会信任该用户安装的 CA。
-4. 双击“02-查看状态.cmd”可查看当前局域网 HTTP/HTTPS 地址、CA 文件和证书 SHA-256 指纹。
-5. 如果页面尚未初始化，一次性初始化令牌位于 data\bootstrap.token；不要发送、提交或截图泄露。
-6. 在网页中设置测试管理员账号和密码，填写 Hermes API Server 地址及 Key，然后走完整流程。
-7. Android 默认填写 HTTP API 地址（例如 http://当前电脑局域网IP:18787）；安装并信任本地 CA 后也可填写完整的 https://当前电脑局域网IP:18788。网页管理使用 HTTPS 18788。
+首次/清空后流程
+1. 双击 01-打开初始化页面.cmd。
+2. 浏览器打开 https://127.0.0.1:18788。未安装临时 CA 时浏览器可能提示证书不受信任；可先运行 06-安装本机HTTPS证书.cmd，再关闭并重新打开浏览器。
+3. 按页面提示输入 data\bootstrap.token 中的一次性初始化令牌，并设置管理员账号、密码、Hermes API 地址和 Hermes API Server Key。
+4. 在手机安装父目录中的 Nexus-Android-0.0.6-debug.apk。
+5. App 网关地址填写 https://电脑局域网IP:18788，再输入 Nexus 管理员账号和密码。
 
-模型说明：
-- “人物模型”保留角色设定，例如“星禾”。
-- “调用模型”决定实际推理模型，例如“gpt-5.6-sol”。
-- 两者独立选择；调用模型可选择“使用 Hermes 默认”。
+控制文件
+- 01-打开初始化页面.cmd：启动并打开本机 HTTPS 页面。
+- 02-查看状态.cmd：显示成品版本、HTTPS 地址、端口状态、CA 路径与指纹；不显示密码或 Key。
+- 03-停止测试环境.cmd：只停止本目录拥有的 Gateway 进程，不停止 Hermes。
+- 04-清空并重新开始.cmd：删除账号、密码哈希、Hermes 配置、Session Secret、媒体、日志和本地 CA，然后按当前成品重新启动。只有明确需要全流程重测时才使用。
+- 05-升级到最新成品.cmd：部署父目录最新 Nexus-Gateway-*.zip，保留账号、Hermes 配置、媒体、data\tls 中的 CA/正式证书和 Hermes 定时任务。
+- 06-安装本机HTTPS证书.cmd：用户主动信任临时 CA，仅供本机浏览器测试。
 
-管理：
-- 02-查看状态.cmd：查看运行状态、初始化状态、当前地址和 HTTPS CA 指纹。
-- 03-停止测试环境.cmd：只停止此独立 Gateway，不停止 Hermes。
-- 04-清空并重新开始.cmd：删除测试账号、密码、配置、媒体、HTTPS CA 和日志，再进入首次初始化。仅在明确要重走全流程时使用。
-- 05-升级到最新成品.cmd：部署父目录中最新的 Nexus-Gateway-*.zip，保留账号、密码、Hermes 配置、媒体、本地 HTTPS CA 和 Hermes 定时任务。
-- 06-安装本机HTTPS证书.cmd：仅在用户主动双击时，把 data\tls\ca.crt 加入当前 Windows 用户的受信任根证书库。
+升级约定
+- 每次发布新成品后，先同步控制文件，再从本运行目录执行 upgrade；不要用源码目录替代本环境。
+- upgrade 只替换 app 并同步依赖，不清理 data、媒体或 TLS 状态。
+- Gateway 会在局域网 IP/SAN 变化时使用同一临时 CA 重签服务器证书，因此已内嵌或已安装的 CA 保持有效。
+- reset 才会删除 data\tls，并生成新的 CA；重置后旧 Debug APK 内嵌的 CA 将不再匹配，需重新构建 Debug APK。
 
-网络与安全：
-- Gateway 监听 0.0.0.0:18787（HTTP API）和 0.0.0.0:18788（HTTPS Web）。
-- 管理脚本维护仅允许 LocalSubnet 访问 18787、18788 的 Windows 防火墙规则。
-- HTTP 网页入口会跳转到 HTTPS；HTTP API 保留给 Android 和兼容客户端。
-- 本环境不读取源码目录中的 Gateway 代码，不调用 Docker。
-- 密码、Hermes Key、Session Secret、TLS 私钥和初始化令牌仅保存在本目录 data 下，不进入 Git。
-- 不要把 data、logs、state、证书私钥或任何密钥发送到 Issue、聊天、提交或截图中。
+推理深度
+- App 可选择默认、none、minimal、low、medium、high、xhigh、max、ultra。
+- Nexus 只校验、保存并把 reasoning_effort 透传给 Hermes；Hermes 及所选调用模型是否支持、是否实际应用该字段，以它们的实现为准。
+
+安全边界
+- 不要把 data、日志、截图、Hermes Key、Token、密码、Session Secret、Bootstrap Token、CA 私钥或正式证书私钥提交到 Git 或发送给他人。
+- Windows 防火墙规则仅允许 LocalSubnet 访问 TCP 18788。

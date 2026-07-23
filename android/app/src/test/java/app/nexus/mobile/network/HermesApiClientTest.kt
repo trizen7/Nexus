@@ -320,15 +320,15 @@ class HermesApiClientTest {
             "https://10.0.0.123:18788"
         )
 
-        assertTrue(message.contains("nexus-local-ca.crt"))
-        assertTrue(message.contains("http://10.0.0.123:18787"))
+        assertTrue(message.contains("Debug APK"))
+        assertFalse(message.contains("http://"))
     }
 
     @Test
     fun `unknown host points local users to app api port`() {
         val message = friendlyNetworkError(java.net.UnknownHostException("nexus.local"))
 
-        assertTrue(message.contains("18787"))
+        assertTrue(message.contains("18788"))
     }
 
     @Test
@@ -621,13 +621,31 @@ class HermesApiClientTest {
             "mobile-session",
             "hello",
             personaModel = "profile-a",
-            inferenceModel = "gpt-5.6-sol"
+            inferenceModel = "gpt-5.6-sol",
+            reasoningEffort = "high"
         )
 
         val body = com.google.gson.JsonParser.parseString(server.takeRequest().body.readUtf8()).asJsonObject
         assertEquals("profile-a", body.get("persona_model").asString)
         assertEquals("gpt-5.6-sol", body.get("inference_model").asString)
+        assertEquals("high", body.get("reasoning_effort").asString)
         assertEquals(false, body.has("model"))
+    }
+
+    @Test
+    fun `streamChat omits reasoning depth by default`() = runTest {
+        server.enqueue(
+            MockResponse()
+                .setResponseCode(200)
+                .setHeader("Content-Type", "text/event-stream")
+                .setBody("event: run.completed\ndata: {\"completed\":true}\n\n")
+        )
+        val client = HermesApiClient(server.url("/").toString(), "test-token")
+
+        client.streamChat("mobile-session", "hello")
+
+        val body = com.google.gson.JsonParser.parseString(server.takeRequest().body.readUtf8()).asJsonObject
+        assertFalse(body.has("reasoning_effort"))
     }
 
     private fun requestSignature(request: okhttp3.mockwebserver.RecordedRequest): String =

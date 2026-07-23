@@ -393,6 +393,7 @@ class HermesApiClient(
         attachmentKinds: Map<String, String> = emptyMap(),
         personaModel: String? = null,
         inferenceModel: String? = null,
+        reasoningEffort: String? = null,
         onEvent: (HermesStreamEvent) -> Unit = {}
     ): List<HermesStreamEvent> = withContext(Dispatchers.IO) {
         val userContent: Any = if (images.isEmpty()) {
@@ -415,6 +416,7 @@ class HermesApiClient(
         if (attachmentKinds.isNotEmpty()) body["attachment_kinds"] = attachmentKinds
         personaModel?.trim()?.takeIf { it.isNotEmpty() }?.let { body["persona_model"] = it }
         inferenceModel?.trim()?.takeIf { it.isNotEmpty() }?.let { body["inference_model"] = it }
+        reasoningEffort?.trim()?.takeIf { it.isNotEmpty() }?.let { body["reasoning_effort"] = it }
         val payload = gson.toJson(body)
         val request = authorizedRequest(
             baseUrl + "api/sessions/${encodePathSegment(sessionId)}/chat/stream"
@@ -543,8 +545,7 @@ private fun isConnectionAbort(error: Throwable): Boolean =
 private fun certificateConnectionMessage(serverUrl: String?): String {
     val uri = serverUrl?.let { runCatching { URI(it) }.getOrNull() }
     if (uri?.scheme.equals("https", ignoreCase = true) && uri?.port == 18788 && !uri.host.isNullOrBlank()) {
-        val host = uri.host.let { if (':' in it) "[$it]" else it }
-        return "HTTPS 证书校验失败。请先在手机安装 Nexus 本地 CA（http://$host:18787/nexus-local-ca.crt），或仅在可信局域网把 App 地址改为 http://$host:18787"
+        return "HTTPS 证书校验失败。请确认已安装与当前测试环境 CA 匹配的 Debug APK；使用正式证书时，请确认完整证书链有效且域名匹配"
     }
     return "HTTPS 安全连接失败，请检查证书是否有效、受信任且与服务器地址匹配"
 }
@@ -561,14 +562,14 @@ fun friendlyNetworkError(error: Throwable, serverUrl: String? = null): String {
         causes.any { it is SSLHandshakeException || it is SSLPeerUnverifiedException ||
             it is CertPathValidatorException || it is CertificateException } -> certificateConnectionMessage(serverUrl)
         causes.any { it is UnknownHostException } ->
-            "找不到服务器，请检查地址；本地测试 App 地址通常为 http://电脑局域网IP:18787"
+            "找不到服务器，请检查地址；本地测试 App 地址通常为 https://电脑局域网IP:18788"
         causes.any { it is ConnectException || it is NoRouteToHostException } ->
             "无法连接服务器，请确认电脑和手机在同一网络，并检查 IP、端口及 Gateway 是否运行"
         causes.any { it is SocketTimeoutException } ->
             "连接服务器超时，请检查局域网、IP 地址和端口"
         isConnectionAbort(error) -> app.nexus.mobile.genericConnectionInterruptedMessage()
         error is IllegalArgumentException ->
-            "服务器地址格式不正确，请填写例如 http://10.0.0.123:18787"
+            "服务器地址格式不正确，请填写例如 https://10.0.0.123:18788"
         error is IOException -> "网络连接异常，请稍后重试"
         else -> error.message ?: "发生未知错误"
     }

@@ -551,6 +551,14 @@ class SessionStateTest {
     }
 
     @Test
+    fun `reasoning effort restores stored names and wire values`() {
+        assertEquals(ReasoningEffort.DEFAULT, ReasoningEffort.fromStored(null))
+        assertEquals(ReasoningEffort.HIGH, ReasoningEffort.fromStored("HIGH"))
+        assertEquals(ReasoningEffort.XHIGH, ReasoningEffort.fromStored("xhigh"))
+        assertEquals(null, ReasoningEffort.DEFAULT.wireValue)
+    }
+
+    @Test
     fun `repeat input accepts blank or positive integers only`() {
         assertEquals(true, isValidRepeatInput(""))
         assertEquals(true, isValidRepeatInput("3"))

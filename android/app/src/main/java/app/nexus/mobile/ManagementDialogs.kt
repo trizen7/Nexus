@@ -74,7 +74,7 @@ internal fun ManagementDialogs(state: MainUiState, viewModel: MainViewModel) {
 private fun ModelPickerDialog(state: MainUiState, viewModel: MainViewModel) {
     AlertDialog(
         onDismissRequest = viewModel::closeModelPicker,
-        title = { Text("人物与调用模型") },
+        title = { Text("人物、调用模型与推理深度") },
         text = {
             Column(
                 Modifier
@@ -84,7 +84,7 @@ private fun ModelPickerDialog(state: MainUiState, viewModel: MainViewModel) {
                 verticalArrangement = Arrangement.spacedBy(8.dp)
             ) {
                 Text(
-                    "人物模型保留角色设定、记忆和工具；调用模型决定实际使用的推理模型。",
+                    "人物模型保留角色设定、记忆和工具；调用模型决定实际推理模型；推理深度控制支持该参数的模型投入的推理量。",
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     fontSize = 13.sp
                 )
@@ -180,6 +180,38 @@ private fun ModelPickerDialog(state: MainUiState, viewModel: MainViewModel) {
                                             fontSize = 12.sp
                                         )
                                     }
+                                }
+                            }
+                        }
+                    }
+
+                    HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.45f))
+                    Text("推理深度", fontWeight = FontWeight.SemiBold)
+                    Text(
+                        "Nexus 会把该值透传给 Hermes；是否生效取决于当前 Hermes 和调用模型是否支持。",
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        fontSize = 12.sp
+                    )
+                    ReasoningEffort.entries.forEach { effort ->
+                        Row(
+                            modifier = Modifier
+                                .fillMaxWidth()
+                                .clickable { viewModel.selectReasoningEffort(effort) }
+                                .padding(vertical = 4.dp),
+                            verticalAlignment = Alignment.CenterVertically
+                        ) {
+                            RadioButton(
+                                selected = state.selectedReasoningEffort == effort,
+                                onClick = { viewModel.selectReasoningEffort(effort) }
+                            )
+                            Column(Modifier.weight(1f)) {
+                                Text(effort.label, fontWeight = FontWeight.SemiBold)
+                                if (effort == ReasoningEffort.DEFAULT) {
+                                    Text(
+                                        "不发送 reasoning_effort，由 Hermes 使用默认行为",
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        fontSize = 12.sp
+                                    )
                                 }
                             }
                         }

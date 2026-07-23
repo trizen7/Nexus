@@ -18,7 +18,8 @@ Nexus Gateway 推荐使用 Docker Compose 部署。容器只包含移动网关�
    ├─ bootstrap.token  # 仅首次初始化前存在
    ├─ config.json
    ├─ account.json
-   └─ media/
+   ├─ media/
+   └─ tls/
 ```
 
 `data/` 是唯一需要长期保留和备份的运行数据目录。
@@ -28,7 +29,7 @@ Nexus Gateway 推荐使用 Docker Compose 部署。容器只包含移动网关�
 首次部署不需要创建 `.env`。启动容器后，在浏览器访问：
 
 ```text
-http://NAS地址:8787
+https://NAS地址:8787
 ```
 
 初始化页面需要填写：
@@ -57,7 +58,7 @@ cat data/bootstrap.token
 容器使用固定 UID/GID `10001:10001`，避免每次重建后权限漂移：
 
 ```bash
-mkdir -p data/media
+mkdir -p data/media data/tls
 chown -R 10001:10001 data
 ```
 
@@ -81,7 +82,7 @@ docker compose logs -f --tail=100 nexus-gateway
 健康检查：
 
 ```bash
-curl http://NAS地址:8787/health
+curl --insecure https://NAS地址:8787/health
 ```
 
 正常返回中应同时包含：
@@ -124,9 +125,9 @@ docker compose up -d
 
 ## 6. 反向代理
 
-局域网测试可直接使用 `http://NAS地址:8787`。Nexus Gateway 也支持通过 `NEXUS_HTTPS_PORT`、证书和私钥文件启用内置 HTTPS；容器部署时需要额外映射 HTTPS 端口并只读挂载证书文件。
+Nexus Gateway 只监听 HTTPS。首次启动会在 `/data/tls` 自动生成临时 CA 和服务器证书；可通过 `NEXUS_TLS_HOSTS` 把 NAS 局域网 IP 或域名加入临时证书 SAN。初始化后可在网页“系统状态 → HTTPS 证书”上传正式 PEM 证书链和未加密 PEM 私钥，Gateway 会热切换并在失败时回滚。
 
-公网仍应使用受维护的域名证书和 HTTPS 反向代理，不要直接使用本地测试 CA。SSE 流式回答要求代理不要缓存响应，并允许较长连接时间。反向代理由部署者维护，Nexus 仓库不绑定 Caddy、Nginx 或特定域名。
+公网应使用受系统信任 CA 签发且域名匹配的证书，可以直接上传到 Gateway，也可以由 HTTPS 反向代理终止外层 TLS；反向代理连接 Gateway 上游时仍需使用 HTTPS。不要在公网使用自动生成的临时 CA。SSE 流式回答要求代理不要缓存响应，并允许较长连接时间。反向代理由部署者维护，Nexus 仓库不绑定 Caddy、Nginx 或特定域名。
 
 ## 7. 日志与资源
 
@@ -161,6 +162,6 @@ Android 的 Nexus 包名为 `app.nexus.mobile`，它会与旧星禾版并存，�
 - Hermes 主 Token 只保存在网关；
 - 首次初始化必须使用 `/data/bootstrap.token` 中的一次性令牌，且令牌不由公开 API 返回；
 - App 只持有 Nexus 登录后签发的设备令牌；
-- 公网必须使用 HTTPS；
+- Gateway 和公网入口都必须使用 HTTPS，HTTP 访问不受支持；
 - 定期轮换网关密码、Session Secret 和 Hermes API Token；
 - 不把 8787 管理入口直接暴露到公网且不设访问控制。

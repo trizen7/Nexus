@@ -64,6 +64,25 @@ fun toggleChannel(expanded: Set<SessionChannel>, channel: SessionChannel): Set<S
 
 fun defaultServerUrl(): String = ""
 
+enum class ReasoningEffort(val wireValue: String?, val label: String) {
+    DEFAULT(null, "Hermes 默认"),
+    NONE("none", "关闭"),
+    MINIMAL("minimal", "极低（minimal）"),
+    LOW("low", "低（low）"),
+    MEDIUM("medium", "中（medium）"),
+    HIGH("high", "高（high）"),
+    XHIGH("xhigh", "很高（xhigh）"),
+    MAX("max", "最大（max）"),
+    ULTRA("ultra", "极致（ultra）");
+
+    companion object {
+        fun fromStored(value: String?): ReasoningEffort = entries.firstOrNull { effort ->
+            effort.name.equals(value, ignoreCase = true) ||
+                effort.wireValue?.equals(value, ignoreCase = true) == true
+        } ?: DEFAULT
+    }
+}
+
 data class SavedConnection(
     val serverUrl: String,
     val username: String,
@@ -72,7 +91,8 @@ data class SavedConnection(
     val autoRefresh: Boolean = true,
     val themeMode: ThemeMode = ThemeMode.SYSTEM,
     val selectedPersonaModelId: String? = null,
-    val selectedInferenceModelId: String? = null
+    val selectedInferenceModelId: String? = null,
+    val selectedReasoningEffort: ReasoningEffort = ReasoningEffort.DEFAULT
 ) {
     val isUsable: Boolean
         get() = serverUrl.isNotBlank() && username.isNotBlank() && token.isNotBlank()

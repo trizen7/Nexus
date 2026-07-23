@@ -39,6 +39,7 @@ data class MainUiState(
     val selectedPersonaModelId: String? = null,
     val inferenceModels: List<HermesModel> = emptyList(),
     val selectedInferenceModelId: String? = null,
+    val selectedReasoningEffort: ReasoningEffort = ReasoningEffort.DEFAULT,
     val modelsLoading: Boolean = false,
     val modelPickerOpen: Boolean = false,
     val cronManagerOpen: Boolean = false,
@@ -77,7 +78,6 @@ data class MainUiState(
     val sessionToDelete: HermesSession? = null,
     val selectedDownload: ChatFile? = null,
     val downloadStates: Map<String, FileDownloadState> = emptyMap(),
-    val insecureHttpConfirmationPending: Boolean = false,
     val error: String? = null
 ) {
     val activeSession: HermesSession?
@@ -96,7 +96,7 @@ data class MainUiState(
         get() = selectedInferenceModel?.displayName ?: selectedInferenceModelId ?: "Hermes 默认"
 
     val selectedModelSummary: String
-        get() = "$selectedPersonaModelLabel / $selectedInferenceModelLabel"
+        get() = "$selectedPersonaModelLabel / $selectedInferenceModelLabel · 推理 ${selectedReasoningEffort.label}"
 
 }
 
@@ -121,6 +121,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             activeSessionId = savedConnection.activeSessionId,
             selectedPersonaModelId = savedConnection.selectedPersonaModelId,
             selectedInferenceModelId = savedConnection.selectedInferenceModelId,
+            selectedReasoningEffort = savedConnection.selectedReasoningEffort,
             autoRefresh = savedConnection.autoRefresh,
             themeMode = savedConnection.themeMode,
             connectionStatus = if (savedConnection.isUsable) ConnectionStatus.CONNECTING else ConnectionStatus.NOT_CONFIGURED
@@ -166,20 +167,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             return
         }
         _uiState.update { it.copy(serverUrl = normalizedUrl, error = null) }
-        if (requiresInsecureHttpConfirmation(normalizedUrl)) {
-            _uiState.update { it.copy(insecureHttpConfirmationPending = true) }
-            return
-        }
         connectConfirmed()
-    }
-
-    fun confirmInsecureHttpConnection() {
-        _uiState.update { it.copy(insecureHttpConfirmationPending = false) }
-        connectConfirmed()
-    }
-
-    fun cancelInsecureHttpConnection() {
-        _uiState.update { it.copy(insecureHttpConfirmationPending = false) }
     }
 
     private fun connectConfirmed() {
@@ -948,7 +936,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     attachmentIds = uploadedImageIds + uploadedFileId?.let(::listOf).orEmpty(),
                     attachmentKinds = uploadedFileId?.let { mapOf(it to "file") }.orEmpty(),
                     personaModel = state.selectedPersonaModelId,
-                    inferenceModel = state.selectedInferenceModelId
+                    inferenceModel = state.selectedInferenceModelId,
+                    reasoningEffort = state.selectedReasoningEffort.wireValue
                 ) { event -> handleStreamEvent(sessionId, assistantId, event) }
                 connectionStore.saveMessageCache(sessionId, _uiState.value.messages)
             }.onSuccess {
@@ -1243,6 +1232,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         if (modelId != null && _uiState.value.inferenceModels.none { it.id == modelId }) return
         connectionStore.saveSelectedInferenceModel(modelId)
         _uiState.update { it.copy(selectedInferenceModelId = modelId, error = null) }
+    }
+
+    fun selectReasoningEffort(effort: ReasoningEffort) {
+        connectionStore.saveSelectedReasoningEffort(effort)
+        _uiState.update { it.copy(selectedReasoningEffort = effort, error = null) }
     }
 
     fun openCronManager() {

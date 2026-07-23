@@ -25,6 +25,20 @@ def test_local_test_runtime_is_git_ignored():
     assert ".local-test/" in patterns
 
 
+def test_product_test_controller_has_valid_paths_and_safe_process_recovery():
+    script_path = ROOT / "scripts" / "product-test-environment" / "manage.ps1"
+    payload = script_path.read_bytes()
+    script = payload.decode("utf-8")
+
+    assert b"\r" not in payload.replace(b"\r\n", b"")
+    assert r'"gateway\nexus_gateway\__main__.py"' in script
+    assert r'"gateway\requirements.txt"' in script
+    assert "ParentProcessId = {0}" in script
+    assert "$ProcessRecoveryWindowSeconds = 10" in script
+    assert "Multiple possible Nexus Gateway child processes" in script
+    assert "Wait-ForManagedPortsClosed" in script
+
+
 def test_local_test_cli_exposes_full_lifecycle():
     module = load_local_test_module()
     expected = {
@@ -43,6 +57,26 @@ def test_local_test_cli_exposes_full_lifecycle():
     parser = module.build_parser()
     for command in expected:
         assert parser.parse_args([command]).command == command
+
+
+def test_local_test_defaults_to_https_and_persistent_tls_directory():
+    module = load_local_test_module()
+    assert module.DEFAULT_GATEWAY_PORT == 18788
+    assert module.gateway_url() == "https://127.0.0.1:18788"
+    assert module.TLS_DIR == module.DATA_DIR / "tls"
+
+
+def test_local_management_opener_uses_an_isolated_unverified_tls_context():
+    module = load_local_test_module()
+    opener = module._direct_url_opener()
+    https_handlers = [
+        handler for handler in opener.handlers
+        if isinstance(handler, module.urllib.request.HTTPSHandler)
+    ]
+    assert len(https_handlers) == 1
+    context = https_handlers[0]._context
+    assert context.check_hostname is False
+    assert context.verify_mode == module.ssl.CERT_NONE
 
 
 def test_hermes_desktop_root_key_wins_over_stale_nested_key(tmp_path: Path):

@@ -280,15 +280,6 @@ private fun NexusApp(state: MainUiState, viewModel: MainViewModel) {
         SettingsDialog(state, viewModel)
     }
     ManagementDialogs(state, viewModel)
-    if (state.insecureHttpConfirmationPending) {
-        AlertDialog(
-            onDismissRequest = viewModel::cancelInsecureHttpConnection,
-            title = { Text("使用不安全的 HTTP 连接？") },
-            text = { Text("HTTP 会以明文传输账号、密码和消息。请只在可信局域网中使用；公网连接应使用 HTTPS。") },
-            confirmButton = { TextButton(onClick = viewModel::confirmInsecureHttpConnection) { Text("仍然登录") } },
-            dismissButton = { TextButton(onClick = viewModel::cancelInsecureHttpConnection) { Text("取消") } }
-        )
-    }
     state.selectedDownload?.let { file ->
         FileDownloadDialog(file, state.downloadStates[file.id], viewModel)
     }
@@ -344,8 +335,9 @@ private fun SettingsDialog(state: MainUiState, viewModel: MainViewModel) {
                 Text("客户端：${BuildConfig.VERSION_NAME}", color = MaterialTheme.colorScheme.onSurfaceVariant)
                 Text("人物模型：${state.selectedPersonaModelLabel}", color = MaterialTheme.colorScheme.onSurfaceVariant)
                 Text("调用模型：${state.selectedInferenceModelLabel}", color = MaterialTheme.colorScheme.onSurfaceVariant)
+                Text("推理深度：${state.selectedReasoningEffort.label}", color = MaterialTheme.colorScheme.onSurfaceVariant)
                 OutlinedButton(onClick = viewModel::openModelPicker, modifier = Modifier.fillMaxWidth()) {
-                    Text("选择人物与调用模型")
+                    Text("选择人物、调用模型与推理深度")
                 }
                 OutlinedButton(onClick = viewModel::openCronManager, modifier = Modifier.fillMaxWidth()) {
                     Text("管理定时任务")
@@ -390,15 +382,15 @@ private fun ConnectionScreen(state: MainUiState, viewModel: MainViewModel) {
         ) {
             Column(Modifier.padding(22.dp)) {
                 Text("连接Nexus", fontSize = 19.sp, fontWeight = FontWeight.SemiBold, color = primaryInk())
-                Text("App 与 HTTPS 网页使用同一账号，但本地测试端口不同", fontSize = 12.sp, color = mutedInk())
+                Text("App 与网页统一通过 HTTPS 连接", fontSize = 12.sp, color = mutedInk())
                 Spacer(Modifier.height(18.dp))
                 OutlinedTextField(
                     value = state.serverUrl,
                     onValueChange = { viewModel.updateConnection(it, state.username, state.password) },
                     modifier = Modifier.fillMaxWidth(),
                     label = { Text("Nexus API 地址") },
-                    placeholder = { Text("http://电脑局域网IP:18787") },
-                    supportingText = { Text("推荐 App 用 HTTP 18787；网页用 HTTPS 18788，安装 CA 后 App 也可用 HTTPS") },
+                    placeholder = { Text("https://电脑局域网IP:18788") },
+                    supportingText = { Text("仅支持 HTTPS；本地测试 Debug APK 已内嵌当前环境 CA") },
                     singleLine = true,
                     shape = RoundedCornerShape(14.dp)
                 )
@@ -503,7 +495,7 @@ private fun ChatScreen(state: MainUiState, viewModel: MainViewModel) {
                         onClick = { moreOpen = false; viewModel.refreshFromForeground() }
                     )
                     androidx.compose.material3.DropdownMenuItem(
-                        text = { Text("人物与调用模型") },
+                        text = { Text("人物、调用模型与推理深度") },
                         onClick = { moreOpen = false; viewModel.openModelPicker() }
                     )
                     androidx.compose.material3.DropdownMenuItem(

@@ -45,7 +45,44 @@
     <section id="files" class="section"><div class="toolbar"><input id="search" placeholder="搜索文件名、类型或日期"><input id="fileUploadInput" type="file" hidden><button class="button" id="uploadFileButton">上传文件</button><button class="button secondary" id="refreshFilesButton">刷新</button></div><div class="panel table-wrap"><table><thead><tr><th>文件</th><th>大小</th><th>日期</th><th>上传时间</th><th>操作</th></tr></thead><tbody id="fileRows"></tbody></table><div id="fileEmpty" class="empty hidden">暂无普通文件</div></div></section>
     <section id="audio" class="section"><div class="toolbar"><input id="audioSearch" placeholder="搜索语音或日期"><button class="button secondary" id="refreshAudioButton">刷新</button></div><div class="panel table-wrap"><table><thead><tr><th>语音</th><th>大小</th><th>日期</th><th>上传时间</th><th>操作</th></tr></thead><tbody id="audioRows"></tbody></table><div id="audioEmpty" class="empty hidden">暂无语音文件</div></div></section>
     <section id="account" class="section"><div class="panel account-card"><h2>账号安全</h2><div class="notice">修改后，App 和其他浏览器中的旧登录状态会立即失效。</div><form id="accountForm"><label class="field"><span>当前密码</span><input id="currentPassword" type="password" required></label><label class="field"><span>新账号</span><input id="newUsername" required minlength="3" maxlength="48"></label><label class="field"><span>新密码</span><input id="newPassword" type="password" required minlength="8"></label><label class="field"><span>确认新密码</span><input id="confirmPassword" type="password" required minlength="8"></label><button class="button">保存账号设置</button><div id="accountMessage" class="success"></div></form></div></section>
-    <section id="system" class="section"><div class="panel"><div class="panel-title">系统状态</div><div class="status-list"><div class="status-row"><span>网关版本</span><span id="gatewayVersion">—</span></div><div class="status-row"><span>Hermes 版本</span><span id="hermesVersion">—</span></div><div class="status-row"><span>登录有效期</span><span>30 天</span></div><div class="status-row"><span>服务入口</span><span id="systemEntry"></span></div><div class="status-row"><span>服务模式</span><span>Nexus 网关直连 8787</span></div></div></div></section>
+    <section id="system" class="section">
+      <div class="panel">
+        <div class="panel-title">系统状态</div>
+        <div class="status-list">
+          <div class="status-row"><span>网关版本</span><span id="gatewayVersion">—</span></div>
+          <div class="status-row"><span>Hermes 版本</span><span id="hermesVersion">—</span></div>
+          <div class="status-row"><span>登录有效期</span><span>30 天</span></div>
+          <div class="status-row"><span>服务入口</span><span id="systemEntry"></span></div>
+          <div class="status-row"><span>服务模式</span><span>HTTPS only · 18788</span></div>
+        </div>
+      </div>
+      <div class="panel top-gap tls-panel">
+        <div class="panel-title">HTTPS 证书</div>
+        <div class="tls-grid">
+          <div class="status-list">
+            <div class="status-row"><span>当前模式</span><span id="tlsMode">检查中</span></div>
+            <div class="status-row"><span>Subject</span><span id="tlsSubject" class="tls-value">—</span></div>
+            <div class="status-row"><span>Issuer</span><span id="tlsIssuer" class="tls-value">—</span></div>
+            <div class="status-row"><span>生效时间</span><span id="tlsNotBefore">—</span></div>
+            <div class="status-row"><span>到期时间</span><span id="tlsNotAfter">—</span></div>
+            <div class="status-row"><span>SHA-256 指纹</span><code id="tlsFingerprint" class="tls-value">—</code></div>
+            <div class="status-row"><span>DNS SAN</span><span id="tlsDnsNames" class="tls-value">—</span></div>
+            <div class="status-row"><span>IP SAN</span><span id="tlsIpAddresses" class="tls-value">—</span></div>
+            <div class="status-row"><span>证书链长度</span><span id="tlsChainLength">—</span></div>
+            <div class="status-row"><span>临时 CA</span><a id="tlsCaDownload" href="/nexus-local-ca.crt" download>下载临时 CA</a></div>
+          </div>
+          <form id="tlsForm" class="tls-form">
+            <h2>上传正式证书</h2>
+            <p class="muted">现在无需提供正式证书，Gateway 会自动生成并持久化临时本地证书；获得正式证书后，可在此校验并热替换。</p>
+            <label class="field"><span>完整证书链 PEM</span><input id="tlsCertificateFile" type="file" accept=".pem,.crt,.cer,application/x-pem-file,application/x-x509-ca-cert" required></label>
+            <label class="field"><span>私钥 PEM</span><input id="tlsPrivateKeyFile" type="file" accept=".pem,.key,application/x-pem-file" required></label>
+            <div class="notice tls-private-note">私钥只会通过当前 HTTPS 连接发送给 Gateway，不会回显、写入日志或保存到浏览器。</div>
+            <button class="button" id="tlsUploadButton">验证并替换证书</button>
+            <div id="tlsMessage" class="success"></div>
+          </form>
+        </div>
+      </div>
+    </section>
   </main>
 </section>
 <dialog id="textDialog"><form method="dialog" class="dialog-card"><h2 id="dialogTitle"></h2><input id="dialogInput"><div class="dialog-actions"><button class="button secondary" value="cancel">取消</button><button class="button" id="dialogConfirm" value="default">确定</button></div></form></dialog>

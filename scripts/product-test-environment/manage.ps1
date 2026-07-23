@@ -19,14 +19,15 @@ $ProcessFile = Join-Path $StateDir "process.json"
 $DeploymentFile = Join-Path $StateDir "deployment.json"
 $BindAddress = "0.0.0.0"
 $HealthAddress = "127.0.0.1"
-$Port = 18787
-$HttpsPort = 18788
-$BaseUrl = "http://${HealthAddress}:$Port"
-$HttpsBaseUrl = "https://${HealthAddress}:$HttpsPort"
+$Port = 18788
+$BaseUrl = "https://${HealthAddress}:$Port"
 $TlsDir = Join-Path $DataDir "tls"
+$ManagedPorts = @($Port, 18787)
+$ProcessRecoveryWindowSeconds = 10
 $FirewallRuleNames = @(
     "Nexus Local Product Test Gateway 18787",
-    "Nexus Local Product Test Gateway 18787-18788"
+    "Nexus Local Product Test Gateway 18787-18788",
+    "Nexus Local Product Test Gateway 18788"
 )
 
 function Assert-ManagedPath([string]$Path) {
@@ -63,28 +64,145 @@ function Write-JsonFile([string]$Path, $Value) {
     $Value | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $Path -Encoding UTF8
 }
 
+function Get-ProcessStartTicks($Process) {
+    try {
+        return [Int64]$Process.StartTime.ToUniversalTime().Ticks
+    } catch {
+        return $null
+    }
+}
+
+function Get-CimProcess([int]$ProcessId) {
+    try {
+        return Get-CimInstance Win32_Process `
+            -Filter ("ProcessId = {0}" -f $ProcessId) `
+            -ErrorAction Stop |
+            Select-Object -First 1
+    } catch {
+        return $null
+    }
+}
+
+function Get-GatewayCommandPort([string]$CommandLine) {
+    if ([string]::IsNullOrWhiteSpace($CommandLine)) { return $null }
+    $match = [regex]::Match(
+        $CommandLine,
+        '(?i)(?:^|\s)--port(?:=|\s+)(?<port>\d+)(?=\s|$)'
+    )
+    if (-not $match.Success) { return $null }
+    $parsedPort = 0
+    if (-not [int]::TryParse($match.Groups['port'].Value, [ref]$parsedPort)) { return $null }
+    return $parsedPort
+}
+
+function Test-GatewayCommandLine([string]$CommandLine) {
+    if ([string]::IsNullOrWhiteSpace($CommandLine)) { return $false }
+    if (-not [regex]::IsMatch($CommandLine, '(?i)(?:^|\s)-m\s+"?nexus_gateway"?(?=\s|$)')) {
+        return $false
+    }
+    $commandPort = Get-GatewayCommandPort $CommandLine
+    if ($null -eq $commandPort) { return $false }
+    return $ManagedPorts -contains [int]$commandPort
+}
+
+function Get-RecoverableGatewayChildren($Record) {
+    $recordPid = 0
+    $recordTicks = [Int64]0
+    if (-not [int]::TryParse([string]$Record.pid, [ref]$recordPid)) { return @() }
+    if (-not [Int64]::TryParse([string]$Record.start_ticks, [ref]$recordTicks)) { return @() }
+
+    try {
+        $children = @(Get-CimInstance Win32_Process `
+            -Filter ("ParentProcessId = {0}" -f $recordPid) `
+            -ErrorAction Stop)
+    } catch {
+        return @()
+    }
+
+    $maximumDifference = [TimeSpan]::FromSeconds($ProcessRecoveryWindowSeconds).Ticks
+    $candidates = @()
+    foreach ($child in $children) {
+        $commandLine = [string]$child.CommandLine
+        if (-not (Test-GatewayCommandLine $commandLine)) { continue }
+        $candidateProcess = Get-Process -Id ([int]$child.ProcessId) -ErrorAction SilentlyContinue
+        if ($null -eq $candidateProcess) { continue }
+        $candidateTicks = Get-ProcessStartTicks $candidateProcess
+        if ($null -eq $candidateTicks) { continue }
+        $difference = [Math]::Abs([Int64]($candidateTicks - $recordTicks))
+        if ($difference -gt $maximumDifference) { continue }
+        $candidates += [pscustomobject]@{
+            Process = $candidateProcess
+            StartTicks = [Int64]$candidateTicks
+            CommandLine = $commandLine
+        }
+    }
+    return $candidates
+}
+
+function Adopt-GatewayProcess($Record, $Candidate) {
+    $updated = [ordered]@{}
+    foreach ($property in $Record.PSObject.Properties) {
+        $updated[$property.Name] = $property.Value
+    }
+    $updated['schema_version'] = 2
+    $updated['pid'] = [int]$Candidate.Process.Id
+    $updated['start_ticks'] = ([Int64]$Candidate.StartTicks).ToString()
+    $updated['started_at'] = $Candidate.Process.StartTime.ToUniversalTime().ToString('yyyy-MM-ddTHH:mm:ssZ')
+    Write-JsonFile $ProcessFile $updated
+    return [pscustomobject]@{
+        Record = [pscustomobject]$updated
+        Process = $Candidate.Process
+    }
+}
+
 function Get-OwnedProcess {
     $record = Read-JsonFile $ProcessFile
     if ($null -eq $record -or $null -eq $record.pid -or $null -eq $record.start_ticks) {
         Remove-Item -LiteralPath $ProcessFile -Force -ErrorAction SilentlyContinue
         return $null
     }
-    $process = Get-Process -Id ([int]$record.pid) -ErrorAction SilentlyContinue
-    if ($null -eq $process) {
+
+    $recordPid = 0
+    $recordTicks = [Int64]0
+    if (-not [int]::TryParse([string]$record.pid, [ref]$recordPid) -or
+        -not [Int64]::TryParse([string]$record.start_ticks, [ref]$recordTicks)) {
         Remove-Item -LiteralPath $ProcessFile -Force -ErrorAction SilentlyContinue
         return $null
     }
-    try {
-        $actualTicks = $process.StartTime.ToUniversalTime().Ticks.ToString()
-    } catch {
-        Remove-Item -LiteralPath $ProcessFile -Force -ErrorAction SilentlyContinue
+
+    $exactProcess = Get-Process -Id $recordPid -ErrorAction SilentlyContinue
+    $exactMatches = $false
+    if ($null -ne $exactProcess) {
+        $actualTicks = Get-ProcessStartTicks $exactProcess
+        if ($null -ne $actualTicks -and [Int64]$actualTicks -eq $recordTicks) {
+            $cimProcess = Get-CimProcess $recordPid
+            if ($null -ne $cimProcess -and (Test-GatewayCommandLine ([string]$cimProcess.CommandLine))) {
+                $exactMatches = $true
+            }
+        }
+    }
+
+    # Python virtual-environment launchers on Windows can spawn the real base-Python
+    # process and then exit. Recover only one tightly constrained direct child.
+    $candidates = @(Get-RecoverableGatewayChildren $record)
+    if ($candidates.Count -gt 1) {
+        throw 'Multiple possible Nexus Gateway child processes were found; no process was touched.'
+    }
+    if ($candidates.Count -eq 1) {
+        return Adopt-GatewayProcess $record $candidates[0]
+    }
+    if ($exactMatches) {
+        return [pscustomobject]@{ Record = $record; Process = $exactProcess }
+    }
+
+    $recordAgeTicks = [DateTime]::UtcNow.Ticks - $recordTicks
+    $recoveryTicks = [TimeSpan]::FromSeconds($ProcessRecoveryWindowSeconds).Ticks
+    if ($recordAgeTicks -ge 0 -and $recordAgeTicks -le $recoveryTicks) {
         return $null
     }
-    if ($actualTicks -ne [string]$record.start_ticks) {
-        Remove-Item -LiteralPath $ProcessFile -Force -ErrorAction SilentlyContinue
-        return $null
-    }
-    return [pscustomobject]@{ Record = $record; Process = $process }
+
+    Remove-Item -LiteralPath $ProcessFile -Force -ErrorAction SilentlyContinue
+    return $null
 }
 
 function Wait-ForProcessExit([int]$ProcessId, [int]$Seconds) {
@@ -119,13 +237,7 @@ function Get-LanAddress {
 function Get-LanUrl {
     $lanAddress = Get-LanAddress
     if ([string]::IsNullOrWhiteSpace($lanAddress)) { return $null }
-    return "http://${lanAddress}:$Port"
-}
-
-function Get-LanHttpsUrl {
-    $lanAddress = Get-LanAddress
-    if ([string]::IsNullOrWhiteSpace($lanAddress)) { return $null }
-    return "https://${lanAddress}:$HttpsPort"
+    return "https://${lanAddress}:$Port"
 }
 
 function Ensure-FirewallRule {
@@ -144,115 +256,11 @@ function Ensure-FirewallRule {
             -Enabled True `
             -Profile Any `
             -Protocol TCP `
-            -LocalPort @($Port, $HttpsPort) `
+            -LocalPort $Port `
             -RemoteAddress LocalSubnet `
             -ErrorAction Stop
     } catch {
         Write-Warning ("Could not configure the local-subnet firewall rule: " + $_.Exception.Message)
-    }
-}
-
-function Get-OpenSsl {
-    $candidates = @(
-        "C:\Program Files\Git\usr\bin\openssl.exe",
-        "C:\Program Files\Git\mingw64\bin\openssl.exe"
-    )
-    $command = Get-Command openssl.exe -ErrorAction SilentlyContinue
-    if ($null -ne $command) { $candidates = @($command.Source) + $candidates }
-    foreach ($candidate in $candidates) {
-        if (Test-Path -LiteralPath $candidate) { return $candidate }
-    }
-    throw "OpenSSL was not found. Install Git for Windows before enabling the local HTTPS environment."
-}
-
-function Invoke-OpenSsl([string]$OpenSsl, [string[]]$Arguments) {
-    $previousErrorActionPreference = $ErrorActionPreference
-    try {
-        # OpenSSL writes normal key-generation progress to stderr. Windows PowerShell 5
-        # turns redirected native stderr into ErrorRecord objects, so keep it non-terminating
-        # and decide success strictly from the native process exit code.
-        $ErrorActionPreference = "Continue"
-        $output = & $OpenSsl @Arguments 2>&1
-        $exitCode = $LASTEXITCODE
-    } finally {
-        $ErrorActionPreference = $previousErrorActionPreference
-    }
-    if ($exitCode -ne 0) {
-        $message = ($output | Select-Object -Last 5) -join " "
-        throw "OpenSSL failed: $message"
-    }
-}
-
-function Ensure-TlsCertificates {
-    $safeTlsDir = Assert-ManagedPath $TlsDir
-    $null = New-Item -ItemType Directory -Path $safeTlsDir -Force
-    $caKey = Join-Path $safeTlsDir "ca.key"
-    $caCert = Join-Path $safeTlsDir "ca.crt"
-    $serverKey = Join-Path $safeTlsDir "server.key"
-    $serverCert = Join-Path $safeTlsDir "server.crt"
-    $sanState = Join-Path $safeTlsDir "server-san.txt"
-    $caKeyExists = Test-Path -LiteralPath $caKey
-    $caCertExists = Test-Path -LiteralPath $caCert
-    if ($caKeyExists -xor $caCertExists) {
-        throw "The local HTTPS CA is incomplete. Restore both ca.key and ca.crt instead of replacing the trusted CA silently."
-    }
-
-    $openSsl = Get-OpenSsl
-    if (-not $caKeyExists) {
-        Write-Host "Creating the persistent Nexus local test CA..."
-        Invoke-OpenSsl $openSsl @(
-            "req", "-x509", "-newkey", "rsa:3072", "-sha256", "-days", "3650", "-nodes",
-            "-keyout", $caKey, "-out", $caCert,
-            "-subj", "/CN=Nexus Local Test CA",
-            "-addext", "basicConstraints=critical,CA:TRUE",
-            "-addext", "keyUsage=critical,keyCertSign,cRLSign"
-        )
-    }
-
-    $sanEntries = @("DNS:localhost", "IP:127.0.0.1")
-    $lanAddress = Get-LanAddress
-    if (-not [string]::IsNullOrWhiteSpace($lanAddress)) { $sanEntries += "IP:$lanAddress" }
-    $sanValue = $sanEntries -join ","
-    $savedSan = if (Test-Path -LiteralPath $sanState) {
-        (Get-Content -LiteralPath $sanState -Raw -Encoding UTF8).Trim()
-    } else { "" }
-    $serverCurrent = (Test-Path -LiteralPath $serverKey) -and
-        (Test-Path -LiteralPath $serverCert) -and
-        ($savedSan -eq $sanValue)
-    if (-not $serverCurrent) {
-        Write-Host "Issuing the local HTTPS server certificate for the current LAN address..."
-        $csr = Join-Path $StateDir "server.csr"
-        $ext = Join-Path $StateDir "server.ext"
-        $serial = Join-Path $safeTlsDir "ca.srl"
-        $null = New-Item -ItemType Directory -Path $StateDir -Force
-        @(
-            "basicConstraints=critical,CA:FALSE",
-            "keyUsage=critical,digitalSignature,keyEncipherment",
-            "extendedKeyUsage=serverAuth",
-            "subjectAltName=$sanValue"
-        ) | Set-Content -LiteralPath $ext -Encoding ASCII
-        Remove-Item -LiteralPath $csr, $serial -Force -ErrorAction SilentlyContinue
-        try {
-            Invoke-OpenSsl $openSsl @(
-                "req", "-new", "-newkey", "rsa:2048", "-sha256", "-nodes",
-                "-keyout", $serverKey, "-out", $csr,
-                "-subj", "/CN=Nexus Local Test Gateway"
-            )
-            Invoke-OpenSsl $openSsl @(
-                "x509", "-req", "-in", $csr, "-sha256", "-days", "825",
-                "-CA", $caCert, "-CAkey", $caKey, "-CAcreateserial",
-                "-out", $serverCert, "-extfile", $ext
-            )
-            Invoke-OpenSsl $openSsl @("verify", "-CAfile", $caCert, $serverCert)
-            Set-Content -LiteralPath $sanState -Value $sanValue -Encoding UTF8
-        } finally {
-            Remove-Item -LiteralPath $csr, $ext, $serial -Force -ErrorAction SilentlyContinue
-        }
-    }
-    return [pscustomobject]@{
-        Ca = $caCert
-        Certificate = $serverCert
-        Key = $serverKey
     }
 }
 
@@ -289,13 +297,26 @@ function Invoke-HiddenTaskkill([int]$ProcessId, [switch]$Force) {
     }
 }
 
+function Wait-ForManagedPortsClosed([int]$Seconds) {
+    $deadline = (Get-Date).AddSeconds($Seconds)
+    while ((Get-Date) -lt $deadline) {
+        $openPorts = @($ManagedPorts | Where-Object { Test-PortOpen -TargetPort $_ })
+        if ($openPorts.Count -eq 0) { return $true }
+        Start-Sleep -Milliseconds 200
+    }
+    return @($ManagedPorts | Where-Object { Test-PortOpen -TargetPort $_ }).Count -eq 0
+}
+
 function Stop-Gateway([switch]$Quiet) {
     $owned = Get-OwnedProcess
     if ($null -eq $owned) {
+        if (Test-Path -LiteralPath $ProcessFile) {
+            throw 'The Gateway process record is still within its recovery window, but no unique owned process can be identified yet.'
+        }
         if (-not $Quiet) { Write-Host "Gateway is stopped." }
         return
     }
-    $pidValue = [int]$owned.Record.pid
+    $pidValue = [int]$owned.Process.Id
     $null = Invoke-HiddenTaskkill -ProcessId $pidValue
     if (-not (Wait-ForProcessExit $pidValue 5)) {
         $null = Invoke-HiddenTaskkill -ProcessId $pidValue -Force
@@ -304,6 +325,9 @@ function Stop-Gateway([switch]$Quiet) {
         throw "Could not stop the owned Gateway process. No other process was touched."
     }
     Remove-Item -LiteralPath $ProcessFile -Force -ErrorAction SilentlyContinue
+    if (-not (Wait-ForManagedPortsClosed 5)) {
+        throw 'The owned Gateway process exited, but port 18787 or 18788 is still listening; no unrelated process was touched.'
+    }
     if (-not $Quiet) { Write-Host "Gateway stopped." }
 }
 
@@ -318,6 +342,50 @@ function Test-PortOpen([int]$TargetPort) {
         return $false
     } finally {
         $client.Close()
+    }
+}
+
+function Get-ListeningProcessIds([int]$TargetPort) {
+    try {
+        return @(Get-NetTCPConnection -State Listen -LocalPort $TargetPort -ErrorAction Stop |
+            Select-Object -ExpandProperty OwningProcess -Unique)
+    } catch {
+        return @()
+    }
+}
+
+function Invoke-HttpsJson([string]$Url) {
+    $python = Get-VenvPython
+    if (-not (Test-Path -LiteralPath $python)) { return $null }
+    $probeScript = @"
+import json
+import ssl
+import sys
+import urllib.request
+
+opener = urllib.request.build_opener(
+    urllib.request.ProxyHandler({}),
+    urllib.request.HTTPSHandler(context=ssl._create_unverified_context()),
+)
+with opener.open(sys.argv[1], timeout=3) as response:
+    if response.status != 200:
+        raise SystemExit(2)
+    payload = json.load(response)
+sys.stdout.write(json.dumps(payload, ensure_ascii=False))
+"@
+    $previousErrorActionPreference = $ErrorActionPreference
+    try {
+        $ErrorActionPreference = "Continue"
+        $output = & $python -X utf8 -c $probeScript $Url 2>$null
+        $exitCode = $LASTEXITCODE
+    } finally {
+        $ErrorActionPreference = $previousErrorActionPreference
+    }
+    if ($exitCode -ne 0) { return $null }
+    try {
+        return (($output -join "`n") | ConvertFrom-Json)
+    } catch {
+        return $null
     }
 }
 
@@ -370,7 +438,7 @@ function Ensure-Dependencies([string]$RequirementsPath) {
         }
         & $uvCommand.Source pip sync --python $python --link-mode copy $lockFile
         if ($LASTEXITCODE -ne 0) { throw "Dependency synchronization failed." }
-        & $python -c "import aiohttp, multidict, yarl"
+        & $python -c "import aiohttp, cryptography, multidict, yarl"
         if ($LASTEXITCODE -ne 0) { throw "The synchronized runtime dependencies cannot be imported." }
     } finally {
         [Environment]::SetEnvironmentVariable("UV_LINK_MODE", $previousLinkMode, "Process")
@@ -411,29 +479,27 @@ function Deploy-LatestArtifact {
         deployed_at = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
         gateway_url = $BaseUrl
         lan_gateway_url = Get-LanUrl
-        https_url = $HttpsBaseUrl
-        lan_https_url = Get-LanHttpsUrl
         bind_address = $BindAddress
     })
     Write-Host "Release artifact deployed independently from source."
 }
 
 function Get-SetupStatus {
-    try {
-        return Invoke-RestMethod -Method Get -Uri ($BaseUrl + "/api/setup/status") -TimeoutSec 3
-    } catch {
-        return $null
-    }
+    return Invoke-HttpsJson ($BaseUrl + "/api/setup/status")
 }
 
-function Wait-ForSetupStatus([int]$ProcessId) {
+function Wait-ForSetupStatus {
     $deadline = (Get-Date).AddSeconds(30)
     while ((Get-Date) -lt $deadline) {
-        if ($null -eq (Get-Process -Id $ProcessId -ErrorAction SilentlyContinue)) {
+        $owned = Get-OwnedProcess
+        if ($null -eq $owned -and -not (Test-Path -LiteralPath $ProcessFile)) {
             throw "Gateway exited during startup. Check the files in $LogDir"
         }
         $status = Get-SetupStatus
-        if ($null -ne $status) { return $status }
+        if ($null -ne $status) {
+            $confirmed = Get-OwnedProcess
+            if ($null -ne $confirmed) { return $status }
+        }
         Start-Sleep -Milliseconds 400
     }
     throw "Gateway did not become ready. Check the files in $LogDir"
@@ -442,18 +508,15 @@ function Wait-ForSetupStatus([int]$ProcessId) {
 function Start-Gateway {
     $owned = Get-OwnedProcess
     if ($null -ne $owned) {
-        $httpReady = Test-PortOpen -TargetPort $Port
-        $httpsReady = Test-PortOpen -TargetPort $HttpsPort
-        if ($httpReady -and $httpsReady) {
-            Write-Host ("Gateway is already running. HTTP API: " + $BaseUrl)
-            Write-Host ("HTTPS Web: " + $HttpsBaseUrl)
+        $httpsReady = Test-PortOpen -TargetPort $Port
+        $legacyHttpOpen = Test-PortOpen -TargetPort 18787
+        if ($httpsReady -and -not $legacyHttpOpen -and $null -ne (Get-SetupStatus)) {
+            Write-Host ("Gateway is already running at " + $BaseUrl)
             $existingLanUrl = Get-LanUrl
-            $existingLanHttpsUrl = Get-LanHttpsUrl
-            if ($null -ne $existingLanUrl) { Write-Host ("LAN HTTP API: " + $existingLanUrl) }
-            if ($null -ne $existingLanHttpsUrl) { Write-Host ("LAN HTTPS Web: " + $existingLanHttpsUrl) }
+            if ($null -ne $existingLanUrl) { Write-Host ("LAN HTTPS: " + $existingLanUrl) }
             return
         }
-        Write-Host "The owned Gateway is missing the current HTTP/HTTPS listeners; restarting it safely..."
+        Write-Host "The owned Gateway does not match the HTTPS-only listener policy; restarting it safely..."
         Stop-Gateway -Quiet
     }
     if (-not (Test-Path -LiteralPath (Join-Path $AppDir "gateway\nexus_gateway\__main__.py"))) {
@@ -461,27 +524,25 @@ function Start-Gateway {
     }
     Ensure-Dependencies (Join-Path $AppDir "gateway\requirements.txt")
     if (Test-PortOpen -TargetPort $Port) { throw "Port $Port is already used by another process; it was not stopped." }
-    if (Test-PortOpen -TargetPort $HttpsPort) { throw "Port $HttpsPort is already used by another process; it was not stopped." }
+    if (Test-PortOpen -TargetPort 18787) { throw "Legacy HTTP port 18787 is still in use by another process; HTTPS-only startup was refused." }
     $null = New-Item -ItemType Directory -Path $DataDir -Force
     $null = New-Item -ItemType Directory -Path (Join-Path $DataDir "media") -Force
+    $null = New-Item -ItemType Directory -Path $TlsDir -Force
     $null = New-Item -ItemType Directory -Path $LogDir -Force
     $null = New-Item -ItemType Directory -Path $StateDir -Force
-    $tls = Ensure-TlsCertificates
     Ensure-FirewallRule
     $python = Get-VenvPython
     $workingDirectory = Join-Path $AppDir "gateway"
     $stdoutLog = Join-Path $LogDir "gateway.stdout.log"
     $stderrLog = Join-Path $LogDir "gateway.stderr.log"
+    $lanAddress = Get-LanAddress
     $launchEnvironment = [ordered]@{
         PYTHONUTF8 = "1"
         PYTHONUNBUFFERED = "1"
         NEXUS_GATEWAY_HOST = $BindAddress
         NEXUS_GATEWAY_PORT = $Port.ToString()
-        NEXUS_HTTPS_PORT = $HttpsPort.ToString()
-        NEXUS_TLS_CERT_FILE = $tls.Certificate
-        NEXUS_TLS_KEY_FILE = $tls.Key
-        NEXUS_TLS_CA_FILE = $tls.Ca
-        NEXUS_REDIRECT_WEB_TO_HTTPS = "true"
+        NEXUS_TLS_DIR = $TlsDir
+        NEXUS_TLS_HOSTS = $(if ([string]::IsNullOrWhiteSpace($lanAddress)) { "" } else { $lanAddress })
         NEXUS_CREDENTIALS_FILE = (Join-Path $DataDir "account.json")
         NEXUS_CONFIG_FILE = (Join-Path $DataDir "config.json")
         NEXUS_BOOTSTRAP_TOKEN_FILE = (Join-Path $DataDir "bootstrap.token")
@@ -489,7 +550,9 @@ function Start-Gateway {
     }
     $blockedEnvironment = @(
         "NEXUS_USERNAME", "NEXUS_PASSWORD", "NEXUS_SESSION_SECRET",
-        "HERMES_API_URL", "HERMES_API_TOKEN", "NEXUS_LOCAL_HERMES_TOKEN"
+        "HERMES_API_URL", "HERMES_API_TOKEN", "NEXUS_LOCAL_HERMES_TOKEN",
+        "NEXUS_HTTPS_PORT", "NEXUS_TLS_CERT_FILE", "NEXUS_TLS_KEY_FILE",
+        "NEXUS_TLS_CA_FILE", "NEXUS_REDIRECT_WEB_TO_HTTPS"
     )
     $allNames = @($launchEnvironment.Keys) + $blockedEnvironment
     $previousEnvironment = @{}
@@ -503,7 +566,7 @@ function Start-Gateway {
     }
     try {
         $process = Start-Process -FilePath $python `
-            -ArgumentList @("-m", "nexus_gateway", "--host", $BindAddress, "--port", $Port.ToString()) `
+            -ArgumentList @("-m", "nexus_gateway", "--host", $BindAddress, "--port", $Port.ToString(), "--tls-dir", $TlsDir) `
             -WorkingDirectory $workingDirectory `
             -RedirectStandardOutput $stdoutLog `
             -RedirectStandardError $stderrLog `
@@ -514,36 +577,39 @@ function Start-Gateway {
             [Environment]::SetEnvironmentVariable($name, $previousEnvironment[$name], "Process")
         }
     }
-    Start-Sleep -Milliseconds 150
-    $process.Refresh()
-    if ($process.HasExited) { throw "Gateway failed to start. Check the files in $LogDir" }
+    $launcherTicks = Get-ProcessStartTicks $process
+    if ($null -eq $launcherTicks) { throw "Gateway launcher metadata could not be read. Check the files in $LogDir" }
     Write-JsonFile $ProcessFile ([ordered]@{
-        schema_version = 1
-        pid = $process.Id
-        start_ticks = $process.StartTime.ToUniversalTime().Ticks.ToString()
-        started_at = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
+        schema_version = 2
+        pid = [int]$process.Id
+        start_ticks = ([Int64]$launcherTicks).ToString()
+        started_at = $process.StartTime.ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
         gateway_url = $BaseUrl
         lan_gateway_url = Get-LanUrl
-        https_url = $HttpsBaseUrl
-        lan_https_url = Get-LanHttpsUrl
         bind_address = $BindAddress
     })
     try {
-        $setup = Wait-ForSetupStatus $process.Id
+        $setup = Wait-ForSetupStatus
+        $owned = Get-OwnedProcess
+        if ($null -eq $owned) { throw "The running Gateway process could not be identified safely." }
+        if (-not (Test-PortOpen -TargetPort $Port)) { throw "HTTPS port $Port did not open." }
+        if (Test-PortOpen -TargetPort 18787) { throw "Legacy HTTP port 18787 is still listening; HTTPS-only verification failed." }
+        $listenerPids = @(Get-ListeningProcessIds -TargetPort $Port)
+        if ($listenerPids.Count -ne 1 -or [int]$listenerPids[0] -ne [int]$owned.Process.Id) {
+            throw "HTTPS port $Port is not owned by the safely tracked Gateway process."
+        }
     } catch {
         Stop-Gateway -Quiet
         throw
     }
-    Write-Host ("HTTP API started at " + $BaseUrl)
-    Write-Host ("HTTPS Web started at " + $HttpsBaseUrl)
+    Write-Host ("HTTPS Gateway started at " + $BaseUrl)
     $lanUrl = Get-LanUrl
-    $lanHttpsUrl = Get-LanHttpsUrl
-    if ($null -ne $lanUrl) { Write-Host ("LAN HTTP API: " + $lanUrl) }
-    if ($null -ne $lanHttpsUrl) { Write-Host ("LAN HTTPS Web: " + $lanHttpsUrl) }
-    Write-Host ("Local CA certificate: " + $tls.Ca)
-    Write-Host ("Local CA SHA-256: " + (Get-CertificateSha256 $tls.Ca))
-    Write-Host ("Local CA download: " + $BaseUrl + "/nexus-local-ca.crt")
-    if ($null -ne $lanUrl) { Write-Host ("LAN CA download: " + $lanUrl + "/nexus-local-ca.crt") }
+    if ($null -ne $lanUrl) { Write-Host ("LAN HTTPS: " + $lanUrl) }
+    $caCertificate = Join-Path $TlsDir "ca.crt"
+    if (Test-Path -LiteralPath $caCertificate) {
+        Write-Host ("Temporary CA certificate: " + $caCertificate)
+        Write-Host ("Temporary CA SHA-256: " + (Get-CertificateSha256 $caCertificate))
+    }
     if ([bool]$setup.initialized) {
         Write-Host "State: initialized"
     } else {
@@ -569,20 +635,17 @@ function Show-Status {
     Write-Host ("Deployment directory: " + $Root)
     if ($null -ne $deployment) { Write-Host ("Artifact: " + [string]$deployment.artifact) }
     Write-Host ("Gateway process: " + $(if ($null -ne $owned) { "running" } else { "stopped" }))
-    Write-Host ("Local HTTP API: " + $BaseUrl)
-    Write-Host ("Local HTTPS Web: " + $HttpsBaseUrl)
+    Write-Host ("Local HTTPS: " + $BaseUrl)
     $lanUrl = Get-LanUrl
-    $lanHttpsUrl = Get-LanHttpsUrl
-    if ($null -ne $lanUrl) { Write-Host ("LAN HTTP API: " + $lanUrl) }
-    if ($null -ne $lanHttpsUrl) { Write-Host ("LAN HTTPS Web: " + $lanHttpsUrl) }
+    if ($null -ne $lanUrl) { Write-Host ("LAN HTTPS: " + $lanUrl) }
+    Write-Host ("HTTPS port 18788: " + $(if (Test-PortOpen -TargetPort $Port) { "listening" } else { "closed" }))
+    Write-Host ("HTTP port 18787: " + $(if (Test-PortOpen -TargetPort 18787) { "unexpectedly listening" } else { "closed" }))
     $caCertificate = Join-Path $TlsDir "ca.crt"
     if (Test-Path -LiteralPath $caCertificate) {
-        Write-Host ("HTTPS CA: " + $caCertificate)
-        Write-Host ("HTTPS CA SHA-256: " + (Get-CertificateSha256 $caCertificate))
-        Write-Host ("Local CA download: " + $BaseUrl + "/nexus-local-ca.crt")
-        if ($null -ne $lanUrl) { Write-Host ("LAN CA download: " + $lanUrl + "/nexus-local-ca.crt") }
+        Write-Host ("Temporary HTTPS CA: " + $caCertificate)
+        Write-Host ("Temporary HTTPS CA SHA-256: " + (Get-CertificateSha256 $caCertificate))
     } else {
-        Write-Host "HTTPS CA: not generated yet"
+        Write-Host "Temporary HTTPS CA: not generated yet"
     }
     if ($null -ne $owned) {
         $setup = Get-SetupStatus

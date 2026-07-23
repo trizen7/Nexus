@@ -21,6 +21,7 @@ from urllib.parse import quote
 from aiohttp import ClientSession, ClientTimeout, web
 
 from . import __version__
+from .tls import TLSConfigurationError, TLSManager, TLSValidationError
 
 CHUNK_SIZE = 256 * 1024
 IMAGE_MIME_TYPES = {"image/jpeg", "image/png", "image/webp", "image/gif"}
@@ -49,8 +50,10 @@ LOGIN_RATE_LIMITER_KEY = web.AppKey("login_rate_limiter", object)
 SETUP_LOCK_KEY = web.AppKey("setup_lock", asyncio.Lock)
 HTTPS_PORT_KEY = web.AppKey("https_port", int)
 TLS_CA_PATH_KEY = web.AppKey("tls_ca_path", object)
-REDIRECT_WEB_TO_HTTPS_KEY = web.AppKey("redirect_web_to_https", bool)
+TLS_MANAGER_KEY = web.AppKey("tls_manager", object)
+TLS_UPDATE_LOCK_KEY = web.AppKey("tls_update_lock", asyncio.Lock)
 TOKEN_TTL_SECONDS = 30 * 24 * 60 * 60
+ALLOWED_REASONING_EFFORTS = {"none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"}
 PUBLIC_PATHS = {
     "/",
     "/health",
@@ -562,6 +565,8 @@ async def security_headers(request: web.Request, handler):
     response.headers.setdefault("X-Frame-Options", "DENY")
     response.headers.setdefault("Referrer-Policy", "no-referrer")
     response.headers.setdefault("Cache-Control", "no-store")
+    if request.secure:
+        response.headers.setdefault("Strict-Transport-Security", "max-age=31536000")
     return response
 
 
@@ -669,34 +674,67 @@ def _upstream_headers(app: web.Application, request: web.Request) -> dict[str, s
     return headers
 
 
-def _https_redirect_location(request: web.Request, https_port: int) -> str:
-    host = request.host.strip()
-    if host.startswith("["):
-        closing = host.find("]")
-        hostname = host[:closing + 1] if closing >= 0 else host
-    elif host.count(":") == 1 and host.rsplit(":", 1)[1].isdigit():
-        hostname = host.rsplit(":", 1)[0]
-    else:
-        hostname = f"[{host}]" if ":" in host else host
-    authority = hostname if https_port == 443 else f"{hostname}:{https_port}"
-    return f"https://{authority}{request.rel_url}"
-
-
-async def admin_page(request: web.Request) -> web.StreamResponse:
-    https_port = request.app[HTTPS_PORT_KEY]
-    if request.app[REDIRECT_WEB_TO_HTTPS_KEY] and https_port and request.scheme != "https":
-        raise web.HTTPPermanentRedirect(location=_https_redirect_location(request, https_port))
+async def admin_page(_request: web.Request) -> web.StreamResponse:
     return web.FileResponse(WEB_ROOT / "index.html")
 
 
 async def local_ca_certificate(request: web.Request) -> web.StreamResponse:
-    ca_path = request.app[TLS_CA_PATH_KEY]
+    manager = request.app[TLS_MANAGER_KEY]
+    if isinstance(manager, TLSManager) and manager.mode != "temporary":
+        raise web.HTTPNotFound()
+    ca_path = manager.ca_certificate_path if isinstance(manager, TLSManager) else request.app[TLS_CA_PATH_KEY]
     if not isinstance(ca_path, Path) or not ca_path.is_file():
         raise web.HTTPNotFound()
     response = web.FileResponse(ca_path)
     response.content_type = "application/x-x509-ca-cert"
     response.headers["Content-Disposition"] = 'attachment; filename="nexus-local-ca.crt"'
     return response
+
+
+async def admin_tls_status(request: web.Request) -> web.Response:
+    manager = request.app[TLS_MANAGER_KEY]
+    if not isinstance(manager, TLSManager):
+        return web.json_response({"configured": False, "hot_reload_supported": False}, status=503)
+    payload = manager.status()
+    payload["https_port"] = request.app[HTTPS_PORT_KEY]
+    return web.json_response(payload)
+
+
+async def update_admin_tls(request: web.Request) -> web.Response:
+    manager = request.app[TLS_MANAGER_KEY]
+    if not isinstance(manager, TLSManager):
+        return web.json_response(
+            {"error": {"code": "tls_unavailable", "message": "当前 Gateway 未启用证书管理"}},
+            status=503,
+        )
+    try:
+        body = await request.json()
+    except (json.JSONDecodeError, ValueError):
+        return web.json_response({"error": {"code": "invalid_json", "message": "请求 JSON 无效"}}, status=400)
+    if not isinstance(body, dict):
+        return web.json_response({"error": {"code": "invalid_json", "message": "请求 JSON 必须是对象"}}, status=400)
+    certificate_chain = body.get("certificate_chain")
+    private_key = body.get("private_key")
+    if not isinstance(certificate_chain, str) or not isinstance(private_key, str):
+        return web.json_response(
+            {"error": {"code": "invalid_tls_upload", "message": "请同时提供 PEM 格式的完整证书链和私钥"}},
+            status=400,
+        )
+    try:
+        async with request.app[TLS_UPDATE_LOCK_KEY]:
+            payload = await asyncio.to_thread(manager.replace_with_custom, certificate_chain, private_key)
+    except TLSValidationError as exc:
+        return web.json_response(
+            {"error": {"code": "invalid_tls_material", "message": str(exc)}},
+            status=400,
+        )
+    except TLSConfigurationError as exc:
+        return web.json_response(
+            {"error": {"code": "tls_reload_failed", "message": str(exc)}},
+            status=500,
+        )
+    payload["https_port"] = request.app[HTTPS_PORT_KEY]
+    return web.json_response(payload)
 
 
 async def web_asset(request: web.Request) -> web.StreamResponse:
@@ -736,7 +774,7 @@ async def login(request: web.Request) -> web.Response:
     try:
         body = await request.json()
     except (json.JSONDecodeError, ValueError):
-        return web.json_response({"error": {"code": "invalid_json", "message": "请求格式无效"}}, status=400)
+        return web.json_response({"error": {"code": "invalid_json", "message": "请求 JSON 无效"}}, status=400)
     username = str(body.get("username", ""))
     password = str(body.get("password", ""))
     auth_state = request.app[AUTH_STATE_KEY]
@@ -790,7 +828,7 @@ async def setup(request: web.Request) -> web.Response:
     try:
         body = await request.json()
     except (json.JSONDecodeError, ValueError):
-        return web.json_response({"error": {"code": "invalid_json", "message": "请求格式无效"}}, status=400)
+        return web.json_response({"error": {"code": "invalid_json", "message": "请求 JSON 无效"}}, status=400)
     username = str(body.get("username", "")).strip()
     password = str(body.get("password", ""))
     hermes_api_url = str(body.get("hermes_api_url", "")).strip().rstrip("/")
@@ -867,7 +905,7 @@ async def change_account(request: web.Request) -> web.Response:
     try:
         body = await request.json()
     except (json.JSONDecodeError, ValueError):
-        return web.json_response({"error": {"code": "invalid_json", "message": "请求格式无效"}}, status=400)
+        return web.json_response({"error": {"code": "invalid_json", "message": "请求 JSON 无效"}}, status=400)
     current_password = str(body.get("current_password", ""))
     username = str(body.get("username", "")).strip()
     password = str(body.get("password", ""))
@@ -1301,6 +1339,16 @@ async def _tracked_session_stream(request: web.Request) -> web.StreamResponse:
     legacy_model = str(body.pop("model", "") or "").strip()
     persona_model = str(body.pop("persona_model", "") or "").strip()
     inference_model = str(body.pop("inference_model", "") or "").strip() or legacy_model
+    raw_reasoning_effort = body.pop("reasoning_effort", None)
+    if raw_reasoning_effort is None or raw_reasoning_effort == "":
+        reasoning_effort = None
+    elif not isinstance(raw_reasoning_effort, str) or raw_reasoning_effort.strip().lower() not in ALLOWED_REASONING_EFFORTS:
+        return web.json_response(
+            {"error": {"code": "invalid_reasoning_effort", "message": "推理深度无效"}},
+            status=400,
+        )
+    else:
+        reasoning_effort = raw_reasoning_effort.strip().lower()
     use_model_route = bool(inference_model)
     if use_model_route:
         upstream_body = {
@@ -1308,10 +1356,14 @@ async def _tracked_session_stream(request: web.Request) -> web.StreamResponse:
             "stream": True,
             "messages": [{"role": "user", "content": body.get("message", "")}],
         }
+        if reasoning_effort is not None:
+            upstream_body["reasoning_effort"] = reasoning_effort
         upstream_path = "/v1/chat/completions"
     else:
         if persona_model:
             body["model"] = persona_model
+        if reasoning_effort is not None:
+            body["reasoning_effort"] = reasoning_effort
         upstream_body = body
         upstream_path = request.path_qs
     body_bytes = json.dumps(upstream_body, ensure_ascii=False).encode("utf-8")
@@ -1568,7 +1620,7 @@ def create_app(
     login_rate_window_seconds: float = 60.0,
     https_port: int = 0,
     tls_ca_path: Path | None = None,
-    redirect_web_to_https: bool = False,
+    tls_manager: TLSManager | None = None,
     transcribe_audio: Callable[[str], dict[str, Any]] | None = None,
 ) -> web.Application:
     resolved_config_path = Path(config_path or (Path(storage_dir).resolve().parent / "config.json")).resolve()
@@ -1655,8 +1707,9 @@ def create_app(
     app[LOGIN_RATE_LIMITER_KEY] = LoginRateLimiter(login_rate_limit, login_rate_window_seconds)
     app[SETUP_LOCK_KEY] = asyncio.Lock()
     app[HTTPS_PORT_KEY] = max(0, int(https_port))
+    app[TLS_MANAGER_KEY] = tls_manager
+    app[TLS_UPDATE_LOCK_KEY] = asyncio.Lock()
     app[TLS_CA_PATH_KEY] = Path(tls_ca_path).resolve() if tls_ca_path else None
-    app[REDIRECT_WEB_TO_HTTPS_KEY] = bool(redirect_web_to_https and https_port)
     app[MEDIA_STORE_KEY] = MediaStore(
         storage_dir,
         max_upload_bytes,
@@ -1683,6 +1736,8 @@ def create_app(
     app.router.add_post("/api/setup", setup)
     app.router.add_post("/api/auth/login", login)
     app.router.add_put("/api/admin/account", change_account)
+    app.router.add_get("/api/admin/tls", admin_tls_status)
+    app.router.add_put("/api/admin/tls", update_admin_tls)
     app.router.add_get("/api/admin/overview", admin_overview)
     app.router.add_get("/api/admin/files", admin_files)
     app.router.add_get("/api/admin/audio", admin_audio)
