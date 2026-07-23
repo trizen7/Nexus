@@ -468,15 +468,19 @@ class HermesApiClientTest {
             MockResponse()
                 .setResponseCode(200)
                 .setHeader("Content-Type", "application/json")
-                .setBody("""{"object":"list","data":[{"id":"model-a","root":"root-a","owned_by":"local"},{"id":"model-b","owned_by":"remote"}]}""")
+                .setBody("""{"object":"list","data":[{"id":"profile-a","root":"profile-a","owned_by":"local","parent":null},{"id":"model-fast","root":"gpt-5.6-sol","owned_by":"remote","parent":"profile-a"}]}""")
         )
         val client = HermesApiClient(server.url("/").toString(), "test-token")
 
         val models = client.listModels()
 
-        assertEquals(listOf("model-a", "model-b"), models.map { it.id })
-        assertEquals("root-a", models.first().root)
+        assertEquals(listOf("profile-a", "model-fast"), models.map { it.id })
+        assertEquals("profile-a", models.first().root)
         assertEquals("local", models.first().ownedBy)
+        assertEquals(null, models.first().parent)
+        assertEquals("profile-a", models.last().parent)
+        assertEquals(true, models.first().isPersona)
+        assertEquals(true, models.last().isInferenceModel)
         assertEquals("/v1/models", server.takeRequest().path)
     }
 
@@ -552,7 +556,7 @@ class HermesApiClientTest {
     }
 
     @Test
-    fun `streamChat sends selected model`() = runTest {
+    fun `streamChat sends persona and inference models independently`() = runTest {
         server.enqueue(
             MockResponse()
                 .setResponseCode(200)
@@ -561,10 +565,17 @@ class HermesApiClientTest {
         )
         val client = HermesApiClient(server.url("/").toString(), "test-token")
 
-        client.streamChat("mobile-session", "hello", model = "model-fast")
+        client.streamChat(
+            "mobile-session",
+            "hello",
+            personaModel = "profile-a",
+            inferenceModel = "gpt-5.6-sol"
+        )
 
         val body = com.google.gson.JsonParser.parseString(server.takeRequest().body.readUtf8()).asJsonObject
-        assertEquals("model-fast", body.get("model").asString)
+        assertEquals("profile-a", body.get("persona_model").asString)
+        assertEquals("gpt-5.6-sol", body.get("inference_model").asString)
+        assertEquals(false, body.has("model"))
     }
 
     private fun requestSignature(request: okhttp3.mockwebserver.RecordedRequest): String =

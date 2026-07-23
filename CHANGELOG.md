@@ -6,6 +6,19 @@
 
 - 暂无。
 
+## 0.0.4｜人物与调用模型拆分、内置 HTTPS
+
+- Android 将“人物模型”和“调用模型”拆分为两个独立选择：人物模型保留角色设定，调用模型决定实际推理模型，并支持“使用 Hermes 默认”；
+- 模型列表按 Hermes `parent` 元数据分类，旧版单一模型偏好自动迁移为人物模型偏好；
+- Android 发送 `persona_model` 与 `inference_model`，Gateway 继续兼容旧 `model` 字段；
+- Gateway 在选择调用模型时使用 Hermes OpenAI 兼容流式接口，未选择调用模型时保留原生 Session Chat 与人物模型路由；
+- Gateway 新增可选内置 HTTPS 监听、最低 TLS 1.2、网页 HTTP→HTTPS 跳转和本地 CA 下载接口；
+- 独立成品测试环境使用 HTTP `18787` 提供 Android/兼容 API、HTTPS `18788` 提供网页，并持久保存本地 CA；
+- 测试环境控制文件纳入 `scripts/product-test-environment/` 维护，安全同步只更新控制脚本，不修改账号、配置、媒体、虚拟环境、日志或状态；
+- Hermes 本地测试配置新增 `gpt-5.6-sol` 调用模型路由，人物模型“星禾”继续保留。
+- 自动验证：Gateway 68 项通过、9 项按环境跳过，Python 编译和网页契约通过；Android 116 项 JVM 测试通过，Lint 无 Error，Debug APK 构建成功；
+- 独立环境完成两轮无损升级，账号、Hermes 配置、媒体和 3 个 Hermes 定时任务保持不变，本地 CA 指纹在第二轮升级中保持一致；本机与局域网 HTTPS、HTTP 跳转、双端口监听和 LocalSubnet 防火墙规则均验证通过。
+
 ## 0.0.3｜移动模型选择与定时任务管理
 
 - Android 对话列表不再显示 Hermes 定时任务执行会话；

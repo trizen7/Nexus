@@ -1290,6 +1290,39 @@ async def test_web_admin_requires_login_and_lists_files(gateway_client: TestClie
 
 
 @pytest.mark.asyncio
+async def test_web_root_redirects_to_https_and_public_ca_can_be_downloaded(tmp_path: Path):
+    ca_path = tmp_path / "ca.crt"
+    ca_path.write_bytes(b"test-local-ca")
+    app = create_app(
+        username="nexus",
+        password="test-password",
+        session_secret="test-session-secret",
+        upstream_url="http://127.0.0.1:9",
+        upstream_token="upstream-secret",
+        storage_dir=tmp_path / "media",
+        credentials_path=tmp_path / "auth.json",
+        https_port=18788,
+        tls_ca_path=ca_path,
+        redirect_web_to_https=True,
+        transcribe_audio=lambda _path: {"success": False, "transcript": ""},
+    )
+    async with TestClient(TestServer(app)) as client:
+        response = await client.get(
+            "/",
+            headers={"Host": "10.0.0.123:18787"},
+            allow_redirects=False,
+        )
+        assert response.status == 308
+        assert response.headers["Location"] == "https://10.0.0.123:18788/"
+
+        ca_response = await client.get("/nexus-local-ca.crt")
+        assert ca_response.status == 200
+        assert ca_response.content_type == "application/x-x509-ca-cert"
+        assert await ca_response.read() == b"test-local-ca"
+        assert "nexus-local-ca.crt" in ca_response.headers["Content-Disposition"]
+
+
+@pytest.mark.asyncio
 async def test_admin_overview_combines_gateway_files_and_hermes_sessions(gateway_client: TestClient):
     response = await gateway_client.get(
         "/api/admin/overview",
@@ -1490,13 +1523,13 @@ async def test_audio_upload_is_transcribed_on_server(gateway_client: TestClient)
 
 
 @pytest.mark.asyncio
-async def test_selected_model_uses_openai_route_and_adapts_stream(
+async def test_inference_model_uses_openai_route_and_adapts_stream(
     gateway_client: TestClient,
     upstream_client: TestClient,
 ):
     response = await gateway_client.post(
         "/api/sessions/session-1/chat/stream",
-        json={"message": "hello", "model": "route-fast"},
+        json={"message": "hello", "persona_model": "profile-a", "inference_model": "route-fast"},
         headers=await auth_headers(gateway_client),
     )
 
@@ -1521,6 +1554,23 @@ async def test_selected_model_uses_openai_route_and_adapts_stream(
 
 
 @pytest.mark.asyncio
+async def test_legacy_model_field_remains_an_inference_route(
+    gateway_client: TestClient,
+    upstream_client: TestClient,
+):
+    response = await gateway_client.post(
+        "/api/sessions/session-1/chat/stream",
+        json={"message": "legacy", "model": "route-legacy"},
+        headers=await auth_headers(gateway_client),
+    )
+
+    assert response.status == 200
+    await response.text()
+    assert upstream_client.captured_completion["model"] == "route-legacy"
+    assert upstream_client.captured_chat == {}
+
+
+@pytest.mark.asyncio
 async def test_chat_without_model_keeps_native_session_route(
     gateway_client: TestClient,
     upstream_client: TestClient,
@@ -1534,6 +1584,23 @@ async def test_chat_without_model_keeps_native_session_route(
     assert response.status == 200
     assert "\u6536\u5230" in await response.text()
     assert upstream_client.captured_chat == {"message": "native"}
+    assert upstream_client.captured_completion == {}
+
+
+@pytest.mark.asyncio
+async def test_persona_model_stays_on_native_session_route(
+    gateway_client: TestClient,
+    upstream_client: TestClient,
+):
+    response = await gateway_client.post(
+        "/api/sessions/session-1/chat/stream",
+        json={"message": "persona", "persona_model": "profile-a"},
+        headers=await auth_headers(gateway_client),
+    )
+
+    assert response.status == 200
+    await response.text()
+    assert upstream_client.captured_chat == {"message": "persona", "model": "profile-a"}
     assert upstream_client.captured_completion == {}
 
 

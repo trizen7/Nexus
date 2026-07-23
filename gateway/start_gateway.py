@@ -25,8 +25,16 @@ def main() -> None:
     load_env()
     host = os.environ.get("NEXUS_GATEWAY_HOST", "127.0.0.1")
     port = os.environ.get("NEXUS_GATEWAY_PORT", "8787")
+    https_port = os.environ.get("NEXUS_HTTPS_PORT", "").strip()
+    tls_enabled = bool(
+        https_port
+        and os.environ.get("NEXUS_TLS_CERT_FILE", "").strip()
+        and os.environ.get("NEXUS_TLS_KEY_FILE", "").strip()
+    )
     print("Starting Nexus mobile gateway...", flush=True)
     print(f"Listening on http://{host}:{port}", flush=True)
+    if tls_enabled:
+        print(f"Listening on https://{host}:{https_port}", flush=True)
     runpy.run_module("nexus_gateway", run_name="__main__")
 
 

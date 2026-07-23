@@ -34,8 +34,10 @@ data class MainUiState(
     val hermesVersion: String? = null,
     val sessions: List<HermesSession> = emptyList(),
     val activeSessionId: String? = null,
-    val models: List<HermesModel> = emptyList(),
-    val selectedModelId: String? = null,
+    val personaModels: List<HermesModel> = emptyList(),
+    val selectedPersonaModelId: String? = null,
+    val inferenceModels: List<HermesModel> = emptyList(),
+    val selectedInferenceModelId: String? = null,
     val modelsLoading: Boolean = false,
     val modelPickerOpen: Boolean = false,
     val cronManagerOpen: Boolean = false,
@@ -80,11 +82,21 @@ data class MainUiState(
     val activeSession: HermesSession?
         get() = sessions.firstOrNull { it.id == activeSessionId }
 
-    val selectedModel: HermesModel?
-        get() = models.firstOrNull { it.id == selectedModelId }
+    val selectedPersonaModel: HermesModel?
+        get() = personaModels.firstOrNull { it.id == selectedPersonaModelId }
 
-    val selectedModelLabel: String
-        get() = selectedModel?.displayName ?: selectedModelId ?: "服务器默认"
+    val selectedInferenceModel: HermesModel?
+        get() = inferenceModels.firstOrNull { it.id == selectedInferenceModelId }
+
+    val selectedPersonaModelLabel: String
+        get() = selectedPersonaModel?.displayName ?: selectedPersonaModelId ?: "当前人物"
+
+    val selectedInferenceModelLabel: String
+        get() = selectedInferenceModel?.displayName ?: selectedInferenceModelId ?: "Hermes 默认"
+
+    val selectedModelSummary: String
+        get() = "$selectedPersonaModelLabel / $selectedInferenceModelLabel"
+
 }
 
 enum class ConnectionStatus { NOT_CONFIGURED, CONNECTING, CONNECTED, FAILED }
@@ -106,7 +118,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             password = "",
             token = savedConnection.token,
             activeSessionId = savedConnection.activeSessionId,
-            selectedModelId = savedConnection.selectedModelId,
+            selectedPersonaModelId = savedConnection.selectedPersonaModelId,
+            selectedInferenceModelId = savedConnection.selectedInferenceModelId,
             autoRefresh = savedConnection.autoRefresh,
             themeMode = savedConnection.themeMode,
             connectionStatus = if (savedConnection.isUsable) ConnectionStatus.CONNECTING else ConnectionStatus.NOT_CONFIGURED
@@ -909,7 +922,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     message = text,
                     attachmentIds = uploadedImageIds + uploadedFileId?.let(::listOf).orEmpty(),
                     attachmentKinds = uploadedFileId?.let { mapOf(it to "file") }.orEmpty(),
-                    model = state.selectedModelId
+                    personaModel = state.selectedPersonaModelId,
+                    inferenceModel = state.selectedInferenceModelId
                 ) { event -> handleStreamEvent(sessionId, assistantId, event) }
                 connectionStore.saveMessageCache(sessionId, _uiState.value.messages)
             }.onSuccess {
@@ -1150,7 +1164,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun openModelPicker() {
         _uiState.update { it.copy(modelPickerOpen = true, settingsOpen = false, error = null) }
-        if (_uiState.value.models.isEmpty() && !_uiState.value.modelsLoading) refreshModels()
+        val state = _uiState.value
+        if (state.personaModels.isEmpty() && state.inferenceModels.isEmpty() && !state.modelsLoading) refreshModels()
     }
 
     fun closeModelPicker() {
@@ -1164,12 +1179,24 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             runCatching { api.listModels() }
                 .onSuccess { models ->
-                    val selected = resolveSelectedModelId(models, _uiState.value.selectedModelId)
-                    connectionStore.saveSelectedModel(selected)
+                    val personas = personaModels(models)
+                    val inference = inferenceModels(models)
+                    val selectedPersona = resolveSelectedPersonaModelId(
+                        personas,
+                        _uiState.value.selectedPersonaModelId
+                    )
+                    val selectedInference = resolveSelectedInferenceModelId(
+                        inference,
+                        _uiState.value.selectedInferenceModelId
+                    )
+                    connectionStore.saveSelectedPersonaModel(selectedPersona)
+                    connectionStore.saveSelectedInferenceModel(selectedInference)
                     _uiState.update {
                         it.copy(
-                            models = models,
-                            selectedModelId = selected,
+                            personaModels = personas,
+                            selectedPersonaModelId = selectedPersona,
+                            inferenceModels = inference,
+                            selectedInferenceModelId = selectedInference,
                             modelsLoading = false
                         )
                     }
@@ -1181,10 +1208,16 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    fun selectModel(modelId: String?) {
-        if (modelId != null && _uiState.value.models.none { it.id == modelId }) return
-        connectionStore.saveSelectedModel(modelId)
-        _uiState.update { it.copy(selectedModelId = modelId, modelPickerOpen = false, error = null) }
+    fun selectPersonaModel(modelId: String?) {
+        if (modelId != null && _uiState.value.personaModels.none { it.id == modelId }) return
+        connectionStore.saveSelectedPersonaModel(modelId)
+        _uiState.update { it.copy(selectedPersonaModelId = modelId, error = null) }
+    }
+
+    fun selectInferenceModel(modelId: String?) {
+        if (modelId != null && _uiState.value.inferenceModels.none { it.id == modelId }) return
+        connectionStore.saveSelectedInferenceModel(modelId)
+        _uiState.update { it.copy(selectedInferenceModelId = modelId, error = null) }
     }
 
     fun openCronManager() {

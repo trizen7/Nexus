@@ -74,59 +74,111 @@ internal fun ManagementDialogs(state: MainUiState, viewModel: MainViewModel) {
 private fun ModelPickerDialog(state: MainUiState, viewModel: MainViewModel) {
     AlertDialog(
         onDismissRequest = viewModel::closeModelPicker,
-        title = { Text("选择聊天模型") },
+        title = { Text("人物与调用模型") },
         text = {
-            Column(Modifier.fillMaxWidth(), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            Column(
+                Modifier
+                    .fillMaxWidth()
+                    .heightIn(max = 480.dp)
+                    .verticalScroll(rememberScrollState()),
+                verticalArrangement = Arrangement.spacedBy(8.dp)
+            ) {
                 Text(
-                    "选择后会用于接下来发送的消息，不影响已有对话内容。",
+                    "人物模型保留角色设定、记忆和工具；调用模型决定实际使用的推理模型。",
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     fontSize = 13.sp
                 )
-                Row(
-                    modifier = Modifier
-                        .fillMaxWidth()
-                        .clickable { viewModel.selectModel(null) }
-                        .padding(vertical = 8.dp),
-                    verticalAlignment = Alignment.CenterVertically
-                ) {
-                    RadioButton(
-                        selected = state.selectedModelId == null,
-                        onClick = { viewModel.selectModel(null) }
-                    )
-                    Column(Modifier.weight(1f)) {
-                        Text("服务器默认", fontWeight = FontWeight.SemiBold)
+                if (state.modelsLoading) {
+                    Box(Modifier.fillMaxWidth().height(120.dp), contentAlignment = Alignment.Center) {
+                        CircularProgressIndicator(modifier = Modifier.size(28.dp), strokeWidth = 2.dp)
+                    }
+                } else {
+                    Text("人物模型", fontWeight = FontWeight.SemiBold)
+                    if (state.personaModels.isEmpty()) {
                         Text(
-                            "保持 Hermes 原生会话的默认模型",
+                            "服务器没有返回可用的人物模型。",
                             color = MaterialTheme.colorScheme.onSurfaceVariant,
                             fontSize = 12.sp
                         )
-                    }
-                }
-                HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.45f))
-                if (state.modelsLoading) {
-                    Box(Modifier.fillMaxWidth().height(96.dp), contentAlignment = Alignment.Center) {
-                        CircularProgressIndicator(modifier = Modifier.size(28.dp), strokeWidth = 2.dp)
-                    }
-                } else if (state.models.isEmpty()) {
-                    Text("服务器没有返回其他可选模型。")
-                } else {
-                    LazyColumn(Modifier.fillMaxWidth().heightIn(max = 420.dp)) {
-                        items(state.models, key = { it.id }) { model ->
+                    } else {
+                        state.personaModels.forEach { model ->
                             Row(
                                 modifier = Modifier
                                     .fillMaxWidth()
-                                    .clickable { viewModel.selectModel(model.id) }
-                                    .padding(vertical = 8.dp),
+                                    .clickable { viewModel.selectPersonaModel(model.id) }
+                                    .padding(vertical = 6.dp),
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
                                 RadioButton(
-                                    selected = state.selectedModelId == model.id,
-                                    onClick = { viewModel.selectModel(model.id) }
+                                    selected = state.selectedPersonaModelId == model.id,
+                                    onClick = { viewModel.selectPersonaModel(model.id) }
                                 )
                                 Column(Modifier.weight(1f)) {
                                     Text(model.displayName, fontWeight = FontWeight.SemiBold)
-                                    model.ownedBy?.takeIf { it.isNotBlank() }?.let {
-                                        Text(it, color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 12.sp)
+                                    Text(
+                                        "Hermes Profile · 保留人物设定",
+                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                        fontSize = 12.sp
+                                    )
+                                }
+                            }
+                        }
+                    }
+
+                    HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.45f))
+                    Text("调用模型", fontWeight = FontWeight.SemiBold)
+                    Row(
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable { viewModel.selectInferenceModel(null) }
+                            .padding(vertical = 6.dp),
+                        verticalAlignment = Alignment.CenterVertically
+                    ) {
+                        RadioButton(
+                            selected = state.selectedInferenceModelId == null,
+                            onClick = { viewModel.selectInferenceModel(null) }
+                        )
+                        Column(Modifier.weight(1f)) {
+                            Text("Hermes 默认", fontWeight = FontWeight.SemiBold)
+                            Text(
+                                "使用 Hermes 当前配置的默认推理模型",
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                fontSize = 12.sp
+                            )
+                        }
+                    }
+                    if (state.inferenceModels.isEmpty()) {
+                        Text(
+                            "服务器还没有配置其他可切换的调用模型。",
+                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            fontSize = 12.sp
+                        )
+                    } else {
+                        state.inferenceModels.forEach { model ->
+                            Row(
+                                modifier = Modifier
+                                    .fillMaxWidth()
+                                    .clickable { viewModel.selectInferenceModel(model.id) }
+                                    .padding(vertical = 6.dp),
+                                verticalAlignment = Alignment.CenterVertically
+                            ) {
+                                RadioButton(
+                                    selected = state.selectedInferenceModelId == model.id,
+                                    onClick = { viewModel.selectInferenceModel(model.id) }
+                                )
+                                Column(Modifier.weight(1f)) {
+                                    Text(model.displayName, fontWeight = FontWeight.SemiBold)
+                                    val details = buildList {
+                                        model.root?.takeIf { it.isNotBlank() && it != model.id }?.let { add(it) }
+                                        model.parent?.takeIf { it.isNotBlank() }?.let { add("继承人物：$it") }
+                                        model.ownedBy?.takeIf { it.isNotBlank() }?.let(::add)
+                                    }.joinToString(" · ")
+                                    if (details.isNotBlank()) {
+                                        Text(
+                                            details,
+                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                            fontSize = 12.sp
+                                        )
                                     }
                                 }
                             }

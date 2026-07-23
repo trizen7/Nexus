@@ -376,7 +376,8 @@ class HermesApiClient(
         images: List<ChatImage> = emptyList(),
         attachmentIds: List<String> = emptyList(),
         attachmentKinds: Map<String, String> = emptyMap(),
-        model: String? = null,
+        personaModel: String? = null,
+        inferenceModel: String? = null,
         onEvent: (HermesStreamEvent) -> Unit = {}
     ): List<HermesStreamEvent> = withContext(Dispatchers.IO) {
         val userContent: Any = if (images.isEmpty()) {
@@ -397,7 +398,8 @@ class HermesApiClient(
         val body = mutableMapOf<String, Any>("message" to userContent)
         if (attachmentIds.isNotEmpty()) body["attachment_ids"] = attachmentIds
         if (attachmentKinds.isNotEmpty()) body["attachment_kinds"] = attachmentKinds
-        model?.trim()?.takeIf { it.isNotEmpty() }?.let { body["model"] = it }
+        personaModel?.trim()?.takeIf { it.isNotEmpty() }?.let { body["persona_model"] = it }
+        inferenceModel?.trim()?.takeIf { it.isNotEmpty() }?.let { body["inference_model"] = it }
         val payload = gson.toJson(body)
         val request = authorizedRequest(
             baseUrl + "api/sessions/${encodePathSegment(sessionId)}/chat/stream"
@@ -558,7 +560,8 @@ private fun JsonObject.toModel(): HermesModel? {
     return HermesModel(
         id = id,
         root = string("root").ifBlank { null },
-        ownedBy = string("owned_by").ifBlank { null }
+        ownedBy = string("owned_by").ifBlank { null },
+        parent = string("parent").ifBlank { null }
     )
 }
 

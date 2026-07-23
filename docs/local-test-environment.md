@@ -1,6 +1,47 @@
 # 本地测试环境（无需 Docker）
 
-Nexus 提供一套与正式部署完全隔离的本地测试环境，用于连接本机已运行的 Hermes API Server。该环境不会启动、停止或修改 Hermes，也不会在本机调用 Docker。
+Nexus 提供两套与正式部署隔离的非 Docker 测试环境，均连接本机已运行的 Hermes API Server：
+
+- `.local-test/`：面向开发回归，直接验证当前源码；
+- `成品/本地测试环境/`：面向用户验收，只运行已经构建的 Gateway ZIP，不读取源码。
+
+两套环境默认都会使用 HTTP `18787`，不要同时启动。它们不会启动、停止或清理 Hermes；Hermes 配置和定时任务也不属于 Nexus reset/upgrade 的处理范围。
+
+## 独立成品验收环境
+
+控制文件的源码模板位于：
+
+~~~text
+scripts/product-test-environment/
+~~~
+
+同步到被 Git 忽略的独立运行目录：
+
+~~~bat
+scripts\sync-product-test-environment.cmd
+~~~
+
+同步命令只覆盖 `manage.ps1`、快捷方式和使用说明，不修改 `app/`、`data/`、`venv/`、`logs/` 或 `state/`。因此后续迭代可以升级控制逻辑，同时保留管理员账号、密码哈希、Hermes 地址与 Key、Session Secret、媒体、本地 HTTPS CA 和运行状态记录。
+
+运行目录中的主要入口：
+
+| 文件 | 行为 |
+| --- | --- |
+| `01-打开初始化页面.cmd` | 启动环境并打开 `https://127.0.0.1:18788` |
+| `02-查看状态.cmd` | 显示 HTTP/HTTPS 地址、初始化状态、CA 文件与 SHA-256 指纹 |
+| `03-停止测试环境.cmd` | 只停止该目录拥有的 Gateway 进程 |
+| `04-清空并重新开始.cmd` | 显式清除测试数据和本地 CA；普通升级不得使用 |
+| `05-升级到最新成品.cmd` | 无损部署父目录最新 `Nexus-Gateway-*.zip` 并重启 |
+| `06-安装本机HTTPS证书.cmd` | 仅在用户主动双击时，把本地 CA 加入当前 Windows 用户信任库 |
+
+端口约定：
+
+- `http://127.0.0.1:18787`：Android 和兼容 API；
+- `https://127.0.0.1:18788`：本机网页；
+- `http://局域网IP:18787/nexus-local-ca.crt`：其他测试设备下载本地 CA；
+- `https://局域网IP:18788`：其他设备安装并信任 CA 后访问网页。
+
+`manage.ps1 upgrade` 只替换已解压应用并同步依赖，不会执行 reset。服务器证书会在局域网 IP 改变时由原 CA 重新签发，CA 本身保持不变；若 CA 文件残缺，脚本会停止并要求恢复备份，而不会静默替换已经信任的根证书。
 
 ## 一次性搭建
 

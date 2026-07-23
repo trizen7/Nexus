@@ -4,7 +4,7 @@ Nexus 是一个面向 Hermes Agent 的社区移动客户端与轻量移动网关
 
 项目目标是让 Hermes 核心保持原版、可独立升级，同时把移动端所需的登录、会话、附件、缓存、下载、通知和断线续接能力放在客户端与移动网关中。
 
-当前版本：0.0.3
+当前版本：0.0.4
 
 ## 组成
 
@@ -19,7 +19,7 @@ Nexus 是一个面向 Hermes Agent 的社区移动客户端与轻量移动网关
 ## 当前能力
 
 - 多会话创建、切换、重命名和删除，定时任务执行会话不进入普通对话列表；
-- 可从 Hermes 返回的模型列表中选择后续消息使用的聊天模型；
+- 人物模型与实际调用模型独立选择：人物模型保留角色设定，调用模型决定真实推理模型（例如 `gpt-5.6-sol`）；
 - 可在手机端新建、编辑、删除、暂停、恢复和立即运行定时任务；
 - 文字、图片、普通文件和语音转文字；
 - 浅色、深色、跟随系统；
@@ -27,7 +27,8 @@ Nexus 是一个面向 Hermes Agent 的社区移动客户端与轻量移动网关
 - 文件上传、下载、暂停、继续和取消；
 - 后台回答状态与通知；
 - 长会话分页与一键回到底部；
-- 移动网关账号登录，App 不保存 Hermes 主密钥。
+- 移动网关账号登录，App 不保存 Hermes 主密钥；
+- Nexus Gateway 可同时提供 HTTP API 与内置 HTTPS 网页监听，并可公开下载本地测试 CA。
 
 ## 架构
 
@@ -97,7 +98,7 @@ python start_gateway.py
 curl http://127.0.0.1:8787/health
 ```
 
-生产环境请使用 HTTPS 反向代理，不要把明文 HTTP 和管理端口直接暴露到公网。
+Nexus Gateway 也支持通过 `NEXUS_HTTPS_PORT`、`NEXUS_TLS_CERT_FILE`、`NEXUS_TLS_KEY_FILE` 和 `NEXUS_TLS_CA_FILE` 启用内置 HTTPS；`NEXUS_REDIRECT_WEB_TO_HTTPS=true` 可把网页入口跳转到 HTTPS，同时保留 HTTP API。生产公网仍推荐使用受维护的域名证书和 HTTPS 反向代理，不要直接暴露明文管理入口。
 
 ### 2. 构建 Android App
 
@@ -138,6 +139,7 @@ scripts\local-test.cmd verify
 ```
 
 测试数据、日志和凭据全部保存在被 Git 忽略的 `.local-test/`。详细命令、升级约定和安全边界见 [`docs/local-test-environment.md`](docs/local-test-environment.md)。
+另有独立的成品验收环境 `成品\本地测试环境\`：它只运行已构建的 Gateway ZIP，不读取源码，不调用 Docker。HTTP `18787` 供 Android/兼容 API 使用，HTTPS `18788` 供网页使用；`scripts\sync-product-test-environment.cmd` 只同步控制脚本和说明，不修改该环境的账号、配置、媒体、虚拟环境、日志、状态或本地 HTTPS CA。
 
 ### 手动测试命令
 
@@ -181,7 +183,7 @@ cd android
 - 尚无完整 UI 自动化和多厂商真机矩阵；
 - 锁屏和后台通知会受到 Android 厂商电池策略影响；
 - Release/AAB、应用商店发布和正式签名流程尚未标准化；
-- HTTPS 终止由部署者的反向代理负责；
+- 内置 HTTPS 支持本地和受控网络测试；公网证书签发、域名、反向代理与外部访问控制仍由部署者维护；
 - 旧星禾版不再独立维护，后续功能、Bug 修复和发布统一进入 Nexus；
 - Nexus 使用新包名，可与旧星禾版并存；本地草稿和缓存不会自动迁移。
 

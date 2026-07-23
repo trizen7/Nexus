@@ -28,7 +28,9 @@ class ConnectionStore(context: Context) {
         activeSessionId = preferences.getString(KEY_ACTIVE_SESSION, null),
         autoRefresh = preferences.getBoolean(KEY_AUTO_REFRESH, true),
         themeMode = ThemeMode.fromStored(preferences.getString(KEY_THEME_MODE, null)),
-        selectedModelId = preferences.getString(KEY_SELECTED_MODEL, null)
+        selectedPersonaModelId = preferences.getString(KEY_SELECTED_PERSONA_MODEL, null)
+            ?: preferences.getString(KEY_LEGACY_SELECTED_MODEL, null),
+        selectedInferenceModelId = preferences.getString(KEY_SELECTED_INFERENCE_MODEL, null)
     )
 
     fun saveLogin(serverUrl: String, username: String, token: String, activeSessionId: String?) {
@@ -54,9 +56,23 @@ class ConnectionStore(context: Context) {
         preferences.edit().putString(KEY_THEME_MODE, mode.name).apply()
     }
 
-    fun saveSelectedModel(modelId: String?) {
+    fun saveSelectedPersonaModel(modelId: String?) {
+        val editor = preferences.edit().remove(KEY_LEGACY_SELECTED_MODEL)
+        if (modelId.isNullOrBlank()) {
+            editor.remove(KEY_SELECTED_PERSONA_MODEL)
+        } else {
+            editor.putString(KEY_SELECTED_PERSONA_MODEL, modelId)
+        }
+        editor.apply()
+    }
+
+    fun saveSelectedInferenceModel(modelId: String?) {
         val editor = preferences.edit()
-        if (modelId.isNullOrBlank()) editor.remove(KEY_SELECTED_MODEL) else editor.putString(KEY_SELECTED_MODEL, modelId)
+        if (modelId.isNullOrBlank()) {
+            editor.remove(KEY_SELECTED_INFERENCE_MODEL)
+        } else {
+            editor.putString(KEY_SELECTED_INFERENCE_MODEL, modelId)
+        }
         editor.apply()
     }
 
@@ -98,7 +114,9 @@ class ConnectionStore(context: Context) {
         const val KEY_ACTIVE_SESSION = "active_session_id"
         const val KEY_AUTO_REFRESH = "auto_refresh"
         const val KEY_THEME_MODE = "theme_mode"
-        const val KEY_SELECTED_MODEL = "selected_model_id"
+        const val KEY_LEGACY_SELECTED_MODEL = "selected_model_id"
+        const val KEY_SELECTED_PERSONA_MODEL = "selected_persona_model_id"
+        const val KEY_SELECTED_INFERENCE_MODEL = "selected_inference_model_id"
         const val KEY_DRAFTS = "composer_drafts_v1"
     }
 }

@@ -27,7 +27,16 @@ fun resolveVisibleActiveSessionId(
         ?: visible.firstOrNull()?.id?.takeIf { chooseFirstWhenMissing }
 }
 
-fun resolveSelectedModelId(models: List<HermesModel>, preferredModelId: String?): String? =
+fun personaModels(models: List<HermesModel>): List<HermesModel> =
+    models.filter(HermesModel::isPersona)
+
+fun inferenceModels(models: List<HermesModel>): List<HermesModel> =
+    models.filter(HermesModel::isInferenceModel)
+
+fun resolveSelectedPersonaModelId(models: List<HermesModel>, preferredModelId: String?): String? =
+    preferredModelId?.takeIf { id -> models.any { it.id == id } } ?: models.firstOrNull()?.id
+
+fun resolveSelectedInferenceModelId(models: List<HermesModel>, preferredModelId: String?): String? =
     preferredModelId?.takeIf { id -> models.any { it.id == id } }
 
 fun isValidRepeatInput(value: String): Boolean =
@@ -62,7 +71,8 @@ data class SavedConnection(
     val activeSessionId: String?,
     val autoRefresh: Boolean = true,
     val themeMode: ThemeMode = ThemeMode.SYSTEM,
-    val selectedModelId: String? = null
+    val selectedPersonaModelId: String? = null,
+    val selectedInferenceModelId: String? = null
 ) {
     val isUsable: Boolean
         get() = serverUrl.isNotBlank() && username.isNotBlank() && token.isNotBlank()

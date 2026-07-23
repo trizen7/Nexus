@@ -106,10 +106,17 @@ data class SessionRunStatus(
 data class HermesModel(
     val id: String,
     val root: String? = null,
-    val ownedBy: String? = null
+    val ownedBy: String? = null,
+    val parent: String? = null
 ) {
     val displayName: String
         get() = id.ifBlank { root.orEmpty() }
+
+    val isPersona: Boolean
+        get() = parent.isNullOrBlank()
+
+    val isInferenceModel: Boolean
+        get() = !isPersona
 }
 
 data class HermesCronSchedule(

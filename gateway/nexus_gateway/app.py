@@ -47,6 +47,9 @@ TRANSCRIBE_AUDIO_KEY = web.AppKey("transcribe_audio", object)
 REQUEST_ATTACHMENT_IDS_KEY = web.RequestKey("nexus_attachment_ids", list)
 LOGIN_RATE_LIMITER_KEY = web.AppKey("login_rate_limiter", object)
 SETUP_LOCK_KEY = web.AppKey("setup_lock", asyncio.Lock)
+HTTPS_PORT_KEY = web.AppKey("https_port", int)
+TLS_CA_PATH_KEY = web.AppKey("tls_ca_path", object)
+REDIRECT_WEB_TO_HTTPS_KEY = web.AppKey("redirect_web_to_https", bool)
 TOKEN_TTL_SECONDS = 30 * 24 * 60 * 60
 PUBLIC_PATHS = {
     "/",
@@ -54,6 +57,7 @@ PUBLIC_PATHS = {
     "/api/setup/status",
     "/api/setup",
     "/api/auth/login",
+    "/nexus-local-ca.crt",
     "/assets/styles.css",
     "/assets/app.js",
 }
@@ -665,8 +669,34 @@ def _upstream_headers(app: web.Application, request: web.Request) -> dict[str, s
     return headers
 
 
-async def admin_page(_request: web.Request) -> web.StreamResponse:
+def _https_redirect_location(request: web.Request, https_port: int) -> str:
+    host = request.host.strip()
+    if host.startswith("["):
+        closing = host.find("]")
+        hostname = host[:closing + 1] if closing >= 0 else host
+    elif host.count(":") == 1 and host.rsplit(":", 1)[1].isdigit():
+        hostname = host.rsplit(":", 1)[0]
+    else:
+        hostname = f"[{host}]" if ":" in host else host
+    authority = hostname if https_port == 443 else f"{hostname}:{https_port}"
+    return f"https://{authority}{request.rel_url}"
+
+
+async def admin_page(request: web.Request) -> web.StreamResponse:
+    https_port = request.app[HTTPS_PORT_KEY]
+    if request.app[REDIRECT_WEB_TO_HTTPS_KEY] and https_port and request.scheme != "https":
+        raise web.HTTPPermanentRedirect(location=_https_redirect_location(request, https_port))
     return web.FileResponse(WEB_ROOT / "index.html")
+
+
+async def local_ca_certificate(request: web.Request) -> web.StreamResponse:
+    ca_path = request.app[TLS_CA_PATH_KEY]
+    if not isinstance(ca_path, Path) or not ca_path.is_file():
+        raise web.HTTPNotFound()
+    response = web.FileResponse(ca_path)
+    response.content_type = "application/x-x509-ca-cert"
+    response.headers["Content-Disposition"] = 'attachment; filename="nexus-local-ca.crt"'
+    return response
 
 
 async def web_asset(request: web.Request) -> web.StreamResponse:
@@ -1268,16 +1298,20 @@ async def _tracked_session_stream(request: web.Request) -> web.StreamResponse:
     except (json.JSONDecodeError, ValueError):
         return web.json_response({"error": {"code": "invalid_json", "message": "请求 JSON 无效"}}, status=400)
     body = await _prepare_chat_body(request, body)
-    selected_model = str(body.pop("model", "") or "").strip()
-    use_model_route = bool(selected_model)
+    legacy_model = str(body.pop("model", "") or "").strip()
+    persona_model = str(body.pop("persona_model", "") or "").strip()
+    inference_model = str(body.pop("inference_model", "") or "").strip() or legacy_model
+    use_model_route = bool(inference_model)
     if use_model_route:
         upstream_body = {
-            "model": selected_model,
+            "model": inference_model,
             "stream": True,
             "messages": [{"role": "user", "content": body.get("message", "")}],
         }
         upstream_path = "/v1/chat/completions"
     else:
+        if persona_model:
+            body["model"] = persona_model
         upstream_body = body
         upstream_path = request.path_qs
     body_bytes = json.dumps(upstream_body, ensure_ascii=False).encode("utf-8")
@@ -1532,6 +1566,9 @@ def create_app(
     min_free_disk_bytes: int = 512 * 1024 * 1024,
     login_rate_limit: int = 5,
     login_rate_window_seconds: float = 60.0,
+    https_port: int = 0,
+    tls_ca_path: Path | None = None,
+    redirect_web_to_https: bool = False,
     transcribe_audio: Callable[[str], dict[str, Any]] | None = None,
 ) -> web.Application:
     resolved_config_path = Path(config_path or (Path(storage_dir).resolve().parent / "config.json")).resolve()
@@ -1617,6 +1654,9 @@ def create_app(
     app[AUTH_STATE_KEY] = AuthState(username, password_salt, password_hash, legacy_password, revision)
     app[LOGIN_RATE_LIMITER_KEY] = LoginRateLimiter(login_rate_limit, login_rate_window_seconds)
     app[SETUP_LOCK_KEY] = asyncio.Lock()
+    app[HTTPS_PORT_KEY] = max(0, int(https_port))
+    app[TLS_CA_PATH_KEY] = Path(tls_ca_path).resolve() if tls_ca_path else None
+    app[REDIRECT_WEB_TO_HTTPS_KEY] = bool(redirect_web_to_https and https_port)
     app[MEDIA_STORE_KEY] = MediaStore(
         storage_dir,
         max_upload_bytes,
@@ -1636,6 +1676,7 @@ def create_app(
     app.on_cleanup.append(_close_client_session)
 
     app.router.add_get("/", admin_page)
+    app.router.add_get("/nexus-local-ca.crt", local_ca_certificate)
     app.router.add_get("/assets/{name}", web_asset)
     app.router.add_get("/health", health)
     app.router.add_get("/api/setup/status", setup_status)

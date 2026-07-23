@@ -526,13 +526,28 @@ class SessionStateTest {
     }
 
     @Test
-    fun `model preference is retained when available and otherwise uses server default`() {
-        val models = listOf(HermesModel("model-a"), HermesModel("model-b"))
+    fun `persona and inference models are classified independently`() {
+        val models = listOf(
+            HermesModel("profile-a"),
+            HermesModel("model-fast", root = "gpt-5.6-sol", parent = "profile-a")
+        )
 
-        assertEquals("model-b", resolveSelectedModelId(models, "model-b"))
-        assertEquals(null, resolveSelectedModelId(models, "missing"))
-        assertEquals(null, resolveSelectedModelId(models, null))
-        assertEquals(null, resolveSelectedModelId(emptyList(), "missing"))
+        assertEquals(listOf("profile-a"), personaModels(models).map { it.id })
+        assertEquals(listOf("model-fast"), inferenceModels(models).map { it.id })
+    }
+
+    @Test
+    fun `persona falls back to first profile while inference falls back to Hermes default`() {
+        val personas = listOf(HermesModel("profile-a"), HermesModel("profile-b"))
+        val inference = listOf(HermesModel("model-fast", parent = "profile-a"))
+
+        assertEquals("profile-b", resolveSelectedPersonaModelId(personas, "profile-b"))
+        assertEquals("profile-a", resolveSelectedPersonaModelId(personas, "missing"))
+        assertEquals("profile-a", resolveSelectedPersonaModelId(personas, null))
+        assertEquals(null, resolveSelectedPersonaModelId(emptyList(), "missing"))
+        assertEquals("model-fast", resolveSelectedInferenceModelId(inference, "model-fast"))
+        assertEquals(null, resolveSelectedInferenceModelId(inference, "missing"))
+        assertEquals(null, resolveSelectedInferenceModelId(inference, null))
     }
 
     @Test
