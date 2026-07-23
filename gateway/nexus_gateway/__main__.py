@@ -8,7 +8,6 @@ from pathlib import Path
 from aiohttp import web
 
 from .app import create_app
-from .tls import TLSConfigurationError, TLSManager
 
 ACCESS_LOG_FORMAT = '%a "%r" %s %b %Tf'
 
@@ -22,30 +21,18 @@ def _default_port() -> int:
     return int(value)
 
 
-def _tls_hosts() -> list[str]:
-    raw = os.getenv("NEXUS_TLS_HOSTS", "")
-    return [value.strip() for value in raw.replace(";", ",").split(",") if value.strip()]
-
-
 def build_parser() -> argparse.ArgumentParser:
-    parser = argparse.ArgumentParser(description="Nexus mobile gateway (HTTPS only)")
+    parser = argparse.ArgumentParser(description="Nexus mobile gateway (HTTP origin)")
     parser.add_argument("--host", default=os.getenv("NEXUS_GATEWAY_HOST", "127.0.0.1"))
-    parser.add_argument("--port", type=int, default=_default_port(), help="HTTPS listener port")
-    parser.add_argument("--tls-dir", default=os.getenv("NEXUS_TLS_DIR", "./data/tls"))
+    parser.add_argument("--port", type=int, default=_default_port(), help="HTTP listener port")
     return parser
 
 
-async def _serve(
-    app: web.Application,
-    *,
-    host: str,
-    port: int,
-    tls_manager: TLSManager,
-) -> None:
+async def _serve(app: web.Application, *, host: str, port: int) -> None:
     runner = web.AppRunner(app, access_log_format=ACCESS_LOG_FORMAT)
     await runner.setup()
     try:
-        site = web.TCPSite(runner, host=host, port=port, ssl_context=tls_manager.ssl_context)
+        site = web.TCPSite(runner, host=host, port=port)
         await site.start()
         await asyncio.Event().wait()
     finally:
@@ -57,15 +44,6 @@ def main() -> None:
     args = parser.parse_args()
     if args.port <= 0 or args.port > 65535:
         parser.error("--port must be between 1 and 65535")
-
-    try:
-        tls_manager = TLSManager(
-            Path(args.tls_dir),
-            bind_host=args.host,
-            extra_hosts=_tls_hosts(),
-        ).bootstrap()
-    except TLSConfigurationError as exc:
-        parser.error(str(exc))
 
     app = create_app(
         username=_optional("NEXUS_USERNAME"),
@@ -82,16 +60,11 @@ def main() -> None:
         min_free_disk_bytes=int(os.getenv("NEXUS_MIN_FREE_DISK_BYTES", str(512 * 1024 * 1024))),
         login_rate_limit=int(os.getenv("NEXUS_LOGIN_RATE_LIMIT", "5")),
         login_rate_window_seconds=float(os.getenv("NEXUS_LOGIN_RATE_WINDOW_SECONDS", "60")),
-        https_port=args.port,
-        tls_manager=tls_manager,
     )
 
-    print(f"Listening on https://{args.host}:{args.port}", flush=True)
-    print(f"TLS mode: {tls_manager.mode}", flush=True)
-    if tls_manager.mode == "temporary":
-        print(f"Local CA certificate: {tls_manager.ca_certificate_path}", flush=True)
+    print(f"Listening on http://{args.host}:{args.port}", flush=True)
     try:
-        asyncio.run(_serve(app, host=args.host, port=args.port, tls_manager=tls_manager))
+        asyncio.run(_serve(app, host=args.host, port=args.port))
     except KeyboardInterrupt:
         pass
 

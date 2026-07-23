@@ -37,6 +37,16 @@ def test_product_test_controller_has_valid_paths_and_safe_process_recovery():
     assert "$ProcessRecoveryWindowSeconds = 10" in script
     assert "Multiple possible Nexus Gateway child processes" in script
     assert "Wait-ForManagedPortsClosed" in script
+    assert '$Port = 18787' in script
+    assert '$BaseUrl = "http://${HealthAddress}:$Port"' in script
+    assert '$ManagedPorts = @(18787, 18788)' in script
+    assert '-RemoteAddress LocalSubnet' in script
+    assert '--tls-dir' not in script
+    assert 'NEXUS_TLS_DIR' not in script
+    assert 'Invoke-HttpsJson' not in script
+    assert 'cryptography' not in script
+    assert 'PYTHONNOUSERSITE = "1"' in script
+    assert '"PYTHONPATH", "PYTHONHOME"' in script
 
 
 def test_local_test_cli_exposes_full_lifecycle():
@@ -59,24 +69,31 @@ def test_local_test_cli_exposes_full_lifecycle():
         assert parser.parse_args([command]).command == command
 
 
-def test_local_test_defaults_to_https_and_persistent_tls_directory():
+def test_local_test_defaults_to_http_origin_without_tls_state():
     module = load_local_test_module()
-    assert module.DEFAULT_GATEWAY_PORT == 18788
-    assert module.gateway_url() == "https://127.0.0.1:18788"
-    assert module.TLS_DIR == module.DATA_DIR / "tls"
+    assert module.DEFAULT_GATEWAY_PORT == 18787
+    assert module.gateway_url() == "http://127.0.0.1:18787"
+    assert not hasattr(module, "TLS_DIR")
+    source = SCRIPT_PATH.read_text(encoding="utf-8")
+    assert "--tls-dir" not in source
+    assert "NEXUS_TLS_DIR" not in source
+    assert "cryptography" not in source
 
 
-def test_local_management_opener_uses_an_isolated_unverified_tls_context():
+def test_local_management_opener_bypasses_proxies_without_disabling_tls_verification():
     module = load_local_test_module()
     opener = module._direct_url_opener()
-    https_handlers = [
-        handler for handler in opener.handlers
-        if isinstance(handler, module.urllib.request.HTTPSHandler)
-    ]
-    assert len(https_handlers) == 1
-    context = https_handlers[0]._context
-    assert context.check_hostname is False
-    assert context.verify_mode == module.ssl.CERT_NONE
+    source = SCRIPT_PATH.read_text(encoding="utf-8")
+
+    # An explicitly empty ProxyHandler suppresses urllib's environment-derived
+    # proxy handler. CPython intentionally omits that empty handler from the
+    # final opener list, so verify both the construction contract and result.
+    assert "build_opener(urllib.request.ProxyHandler({}))" in source
+    assert not any(
+        isinstance(handler, module.urllib.request.ProxyHandler)
+        for handler in opener.handlers
+    )
+    assert "_create_unverified_context" not in source
 
 
 def test_hermes_desktop_root_key_wins_over_stale_nested_key(tmp_path: Path):
@@ -162,3 +179,6 @@ def test_documentation_declares_iteration_upgrade_and_secret_boundary():
     assert ".local-test/" in document
     assert "不会输出" in document
     assert "不调用 Docker" in document
+    assert "HTTP 源站" in document
+    assert "反向代理" in document
+    assert "不要把" in document and "直接暴露到公网" in document

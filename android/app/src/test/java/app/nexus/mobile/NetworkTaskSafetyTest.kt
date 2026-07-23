@@ -9,62 +9,79 @@ import org.junit.Test
 class NetworkTaskSafetyTest {
     @Test
     fun `bearer token is sent only to the configured Nexus origin`() {
-        val server = "https://Nexus.Example.com/api/"
+        val secureServer = "https://Nexus.Example.com/api/"
 
-        assertTrue(shouldAttachBearerToken(server, "https://nexus.example.com/files/1"))
-        assertTrue(shouldAttachBearerToken(server, "/api/files/1"))
-        assertTrue(shouldAttachBearerToken(server, "files/1"))
-        assertFalse(shouldAttachBearerToken(server, "http://nexus.example.com/files/1"))
-        assertFalse(shouldAttachBearerToken(server, "https://nexus.example.com:444/files/1"))
-        assertFalse(shouldAttachBearerToken(server, "https://cdn.example.com/files/1"))
-        assertFalse(shouldAttachBearerToken(server, "not a valid url"))
+        assertTrue(shouldAttachBearerToken(secureServer, "https://nexus.example.com/files/1"))
+        assertTrue(shouldAttachBearerToken(secureServer, "/api/files/1"))
+        assertTrue(shouldAttachBearerToken(secureServer, "files/1"))
+        assertFalse(shouldAttachBearerToken(secureServer, "http://nexus.example.com/files/1"))
+        assertFalse(shouldAttachBearerToken(secureServer, "https://nexus.example.com:444/files/1"))
+        assertFalse(shouldAttachBearerToken(secureServer, "https://cdn.example.com/files/1"))
+        assertFalse(shouldAttachBearerToken(secureServer, "not a valid url"))
+
+        val localServer = "http://192.168.1.20:18787/api/"
+        assertTrue(shouldAttachBearerToken(localServer, "http://192.168.1.20:18787/files/1"))
+        assertTrue(shouldAttachBearerToken(localServer, "/api/files/1"))
+        assertFalse(shouldAttachBearerToken(localServer, "http://192.168.1.20:8080/files/1"))
+        assertFalse(shouldAttachBearerToken("http://nexus.example.com", "http://nexus.example.com/file"))
     }
 
     @Test
-    fun `default HTTPS ports are treated as the same effective port`() {
+    fun `default HTTPS port and explicit local HTTP port are origin safe`() {
         assertTrue(shouldAttachBearerToken("https://nexus.example.com:443", "https://nexus.example.com/file"))
-        assertFalse(shouldAttachBearerToken("http://nexus.example.com", "http://nexus.example.com:80/file"))
+        assertTrue(shouldAttachBearerToken("http://10.0.0.123:18787", "http://10.0.0.123:18787/file"))
+        assertFalse(shouldAttachBearerToken("http://10.0.0.123:18787", "https://10.0.0.123:18787/file"))
     }
 
     @Test
-    fun `HTTP server addresses are rejected without an insecure fallback`() {
-        val error = serverUrlValidationError("http://192.168.1.20:18787")
+    fun `private HTTP is allowed while public HTTP is rejected`() {
+        assertNull(serverUrlValidationError("http://192.168.1.20:18787"))
+        assertNull(serverUrlValidationError("http://localhost:18787"))
+        assertNull(serverUrlValidationError("https://nexus.example.com"))
 
-        assertTrue(error?.contains("仅允许 HTTPS") == true)
+        val error = serverUrlValidationError("http://nexus.example.com")
+        assertTrue(error?.contains("公网 HTTP") == true)
+        assertTrue(error?.contains("HTTPS 反向代理") == true)
     }
 
     @Test
-    fun `bare local address defaults to HTTPS product test port`() {
-        assertEquals("https://10.0.0.123:18788", normalizeServerUrl(" 10.0.0.123/ "))
-        assertEquals("https://10.0.0.123:9443", normalizeServerUrl("10.0.0.123:9443"))
-        assertEquals("https://nexus-box:18788", normalizeServerUrl("nexus-box"))
-        assertEquals("https://nexus.local:18788", normalizeServerUrl("nexus.local"))
-        assertEquals("https://[::1]:18788", normalizeServerUrl("::1"))
-        assertEquals("https://[fd00::1]:18788", normalizeServerUrl("[fd00::1]"))
+    fun `bare local address defaults to HTTP product test port`() {
+        assertEquals("http://10.0.0.123:18787", normalizeServerUrl(" 10.0.0.123/ "))
+        assertEquals("http://10.0.0.123:9443", normalizeServerUrl("10.0.0.123:9443"))
+        assertEquals("https://nexus-box", normalizeServerUrl("nexus-box"))
+        assertEquals("http://nexus.local:18787", normalizeServerUrl("nexus.local"))
+        assertEquals("http://[::1]:18787", normalizeServerUrl("::1"))
+        assertEquals("http://[fd00::1]:18787", normalizeServerUrl("[fd00::1]"))
         assertEquals("https://nexus.example.com", normalizeServerUrl("nexus.example.com"))
         assertNull(serverUrlValidationError("10.0.0.123"))
         assertNull(serverUrlValidationError("[fd00::1]"))
     }
 
     @Test
-    fun `stored legacy local address migrates from HTTP 18787 to HTTPS 18788 only`() {
+    fun `stored legacy local HTTPS address migrates back to HTTP 18787 only`() {
         assertEquals(
-            "https://10.0.0.123:18788",
+            "http://10.0.0.123:18787",
+            migrateStoredServerUrl("https://10.0.0.123:18788")
+        )
+        assertEquals(
+            "https://nexus.example.com:18788",
+            migrateStoredServerUrl("https://nexus.example.com:18788")
+        )
+        assertEquals(
+            "https://10.0.0.123:9443",
+            migrateStoredServerUrl("https://10.0.0.123:9443")
+        )
+        assertEquals(
+            "http://10.0.0.123:18787",
             migrateStoredServerUrl("http://10.0.0.123:18787")
-        )
-        assertEquals(
-            "http://nexus.example.com:18787",
-            migrateStoredServerUrl("http://nexus.example.com:18787")
-        )
-        assertEquals(
-            "http://10.0.0.123:8787",
-            migrateStoredServerUrl("http://10.0.0.123:8787")
         )
     }
 
     @Test
-    fun `server address rejects unsupported schemes unsafe authority and invalid ports`() {
+    fun `server address rejects unsupported schemes public HTTP unsafe authority and invalid ports`() {
         assertTrue(serverUrlValidationError("ftp://10.0.0.123/file") != null)
+        assertTrue(serverUrlValidationError("http://nexus.example.com") != null)
+        assertTrue(serverUrlValidationError("http://nexus-box") != null)
         assertTrue(serverUrlValidationError("https://nexus.example.com/?token=secret") != null)
         assertTrue(serverUrlValidationError("https://user@nexus.example.com") != null)
         assertTrue(serverUrlValidationError("https://nexus.example.com/#fragment") != null)
@@ -75,16 +92,16 @@ class NetworkTaskSafetyTest {
     @Test
     fun `legacy migration does not rewrite unsafe or unrelated addresses`() {
         assertEquals(
-            "http://user@10.0.0.123:18787",
-            migrateStoredServerUrl("http://user@10.0.0.123:18787")
+            "https://user@10.0.0.123:18788",
+            migrateStoredServerUrl("https://user@10.0.0.123:18788")
         )
         assertEquals(
-            "http://10.0.0.123:18787?token=secret",
-            migrateStoredServerUrl("http://10.0.0.123:18787?token=secret")
+            "https://10.0.0.123:18788?token=secret",
+            migrateStoredServerUrl("https://10.0.0.123:18788?token=secret")
         )
         assertEquals(
-            "https://10.0.0.123:18788",
-            migrateStoredServerUrl("https://10.0.0.123:18788")
+            "https://10.0.0.123:18788#fragment",
+            migrateStoredServerUrl("https://10.0.0.123:18788#fragment")
         )
     }
 

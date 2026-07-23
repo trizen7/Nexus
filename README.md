@@ -4,7 +4,7 @@ Nexus 是一个面向 Hermes Agent 的社区移动客户端与轻量移动网关
 
 项目目标是让 Hermes 核心保持原版、可独立升级，同时把移动端所需的登录、会话、附件、缓存、下载、通知和断线续接能力放在客户端与移动网关中。
 
-当前版本：0.0.6
+当前版本：0.0.7
 
 ## 组成
 
@@ -28,7 +28,7 @@ Nexus 是一个面向 Hermes Agent 的社区移动客户端与轻量移动网关
 - 后台回答状态与通知；
 - 长会话分页与一键回到底部；
 - 移动网关账号登录，App 不保存 Hermes 主密钥；
-- Nexus Gateway 只提供 HTTPS 监听，自动生成并持久化临时 CA，也支持在网页上传正式证书链和私钥并热切换。
+- Nexus Gateway 提供 HTTP 源站：可信局域网可直接访问，公网必须由 Nginx、Caddy 等反向代理提供 HTTPS。
 
 ## 架构
 
@@ -70,14 +70,14 @@ docker compose build --pull
 docker compose up -d
 ```
 
-首次启动后打开 `https://网关地址:8787`，在初始化页面中设置：
+首次启动后，在本机或可信局域网打开 `http://网关地址:8787`，在初始化页面中设置：
 
 - 管理员账号和密码；
 - Hermes API Server 地址；
-- Hermes API Server Key。
+- Hermes API Server Key；
 - `data/bootstrap.token` 中的一次性初始化令牌。
 
-Nexus 会自动生成 Session Secret，并将配置保存到仓库根目录 `data/`。首次启动会创建 `data/bootstrap.token`，令牌不会通过公开 API 回显，初始化成功后文件会自动删除。首次部署不需要创建 `.env`。详细的 NAS、权限、备份、更新和旧网关迁移说明见 `docs/docker-deployment.md`。
+Nexus 会自动生成 Session Secret，并将配置保存到仓库根目录 `data/`。首次启动会创建 `data/bootstrap.token`，令牌不会通过公开 API 回显，初始化成功后文件会自动删除。首次部署不需要创建 `.env`。详细的 NAS、权限、备份、更新和旧网关迁移说明见 [`docs/docker-deployment.md`](docs/docker-deployment.md)。
 
 也可以直接使用 Python 运行：
 
@@ -90,16 +90,17 @@ pip install -r requirements.txt
 python start_gateway.py
 ```
 
-然后打开 `https://127.0.0.1:8787` 完成首次初始化。首次启动会在 `data/tls/` 自动生成并持久化临时 CA 和服务器证书；`.env.example` 仅用于无网页环境、旧部署兼容或自动化预配置。
+然后打开 `http://127.0.0.1:8787` 完成首次初始化。
 
 健康检查：
 
 ```bash
-curl --insecure https://127.0.0.1:8787/health
+curl http://127.0.0.1:8787/health
 ```
 
-Nexus Gateway 不提供 HTTP 监听。`NEXUS_TLS_DIR` 保存临时 CA、当前服务器证书和证书状态，`NEXUS_TLS_HOSTS` 可补充临时证书 SAN。初始化后可在网页“系统状态 → HTTPS 证书”上传正式 PEM 证书链和未加密 PEM 私钥并热切换；生产公网应使用受系统信任 CA 签发且域名匹配的证书。
+Nexus Gateway 不再内置 TLS 或证书管理。局域网直连只适合受信任网络；**不要把 HTTP 源站端口直接暴露到公网**。外网访问应使用反向代理提供受系统信任的 HTTPS 域名，并关闭代理缓冲以支持 SSE/流式回答。Nginx 和 Caddy 示例见 [`docs/docker-deployment.md`](docs/docker-deployment.md#6-https-反向代理)。
 
+### 2. 构建 Android App
 ### 2. 构建 Android App
 
 ```bash
@@ -119,7 +120,7 @@ Debug APK 位于：
 android/app/build/outputs/apk/debug/app-debug.apk
 ```
 
-安装后填写移动网关地址、账号和密码即可登录。成品测试环境只接受 `https://电脑局域网IP:18788`，HTTP 会被 App 和 Gateway 拒绝。`Nexus-Android-0.0.6-debug.apk` 已内嵌当前成品测试环境 CA，手机无需手动安装证书；Release 构建只信任系统 CA。遗漏协议时 App 自动补全 `https://`，裸局域网 IP 未填写端口时补全 `18788`。
+安装后填写移动网关地址、账号和密码即可登录。局域网成品测试环境使用 `http://电脑局域网IP:18787`；外网使用反向代理提供的 `https://域名`。App 允许私网 HTTP，但拒绝公网 HTTP；遗漏协议时，裸私网地址自动补全 `http://` 和端口 `18787`，公网域名自动补全 `https://`。旧保存的私网 `https://IP:18788` 会迁移回 `http://IP:18787`。
 
 ## 测试
 
@@ -139,7 +140,7 @@ scripts\local-test.cmd verify
 ```
 
 测试数据、日志和凭据全部保存在被 Git 忽略的 `.local-test/`。详细命令、升级约定和安全边界见 [`docs/local-test-environment.md`](docs/local-test-environment.md)。
-另有独立的成品验收环境 `成品\本地测试环境\`：它只运行已构建的 Gateway ZIP，不读取源码，不调用 Docker，只监听 HTTPS `18788`，并要求 HTTP `18787` 关闭。`scripts\sync-product-test-environment.cmd` 只同步控制脚本和说明，不修改该环境的账号、配置、媒体、虚拟环境、日志、状态或 `data\tls`。
+另有独立的成品验收环境 `成品\本地测试环境\`：它只运行已构建的 Gateway ZIP，不读取源码，不调用 Docker，只监听 HTTP `18787`，并要求旧 HTTPS `18788` 关闭。`scripts\sync-product-test-environment.cmd` 只同步控制脚本和说明，不修改该环境的账号、配置、媒体、虚拟环境、日志、状态或历史 `data\tls`。
 
 ### 手动测试命令
 
@@ -183,7 +184,7 @@ cd android
 - 尚无完整 UI 自动化和多厂商真机矩阵；
 - 锁屏和后台通知会受到 Android 厂商电池策略影响；
 - Release/AAB、应用商店发布和正式签名流程尚未标准化；
-- 内置 HTTPS 支持本地和受控网络测试；公网证书签发、域名、反向代理与外部访问控制仍由部署者维护；
+- Gateway 只提供 HTTP 源站；公网证书、域名、反向代理、HSTS 和外部访问控制由部署者维护；
 - 旧星禾版不再独立维护，后续功能、Bug 修复和发布统一进入 Nexus；
 - Nexus 使用新包名，可与旧星禾版并存；本地草稿和缓存不会自动迁移。
 

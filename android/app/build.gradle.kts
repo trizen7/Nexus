@@ -3,37 +3,6 @@ plugins {
     id("org.jetbrains.kotlin.android")
 }
 
-val generatedDebugCaResDir = layout.buildDirectory.dir("generated/res/nexusDebugCa/debug")
-val fallbackDebugCaFile = layout.projectDirectory.file("debug-ca/nexus_debug_ca.crt")
-val debugCaPath = providers.environmentVariable("NEXUS_DEBUG_CA_FILE")
-    .orElse(fallbackDebugCaFile.asFile.absolutePath)
-
-val debugCaFile = debugCaPath.map { file(it) }
-
-val generateDebugCaResource by tasks.registering {
-    inputs.property("debugCaPath", debugCaPath)
-    inputs.file(debugCaFile)
-        .withPropertyName("debugCaFile")
-        .withPathSensitivity(org.gradle.api.tasks.PathSensitivity.NONE)
-    outputs.file(generatedDebugCaResDir.map { it.file("raw/nexus_debug_ca.crt") })
-    doLast {
-        val sourceFile = file(debugCaPath.get())
-        require(sourceFile.isFile) {
-            "NEXUS_DEBUG_CA_FILE does not point to a readable CA certificate: $sourceFile"
-        }
-        val pem = sourceFile.readText(Charsets.UTF_8)
-        require("-----BEGIN CERTIFICATE-----" in pem && "-----END CERTIFICATE-----" in pem) {
-            "Debug CA must be a PEM certificate"
-        }
-        require("PRIVATE KEY" !in pem) {
-            "Debug CA input must never contain a private key"
-        }
-        val targetFile = generatedDebugCaResDir.get().file("raw/nexus_debug_ca.crt").asFile
-        targetFile.parentFile.mkdirs()
-        sourceFile.copyTo(targetFile, overwrite = true)
-    }
-}
-
 android {
     namespace = "app.nexus.mobile"
     compileSdk = 35
@@ -42,8 +11,8 @@ android {
         applicationId = "app.nexus.mobile"
         minSdk = 26
         targetSdk = 35
-        versionCode = 6
-        versionName = "0.0.6"
+        versionCode = 7
+        versionName = "0.0.7"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
@@ -79,12 +48,6 @@ android {
     packaging {
         resources.excludes += "/META-INF/{AL2.0,LGPL2.1}"
     }
-
-    sourceSets.getByName("debug").res.srcDir(generatedDebugCaResDir)
-}
-
-tasks.matching { it.name == "preDebugBuild" }.configureEach {
-    dependsOn(generateDebugCaResource)
 }
 
 dependencies {

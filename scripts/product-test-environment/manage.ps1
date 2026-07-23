@@ -19,15 +19,15 @@ $ProcessFile = Join-Path $StateDir "process.json"
 $DeploymentFile = Join-Path $StateDir "deployment.json"
 $BindAddress = "0.0.0.0"
 $HealthAddress = "127.0.0.1"
-$Port = 18788
-$BaseUrl = "https://${HealthAddress}:$Port"
-$TlsDir = Join-Path $DataDir "tls"
-$ManagedPorts = @($Port, 18787)
+$Port = 18787
+$BaseUrl = "http://${HealthAddress}:$Port"
+$ManagedPorts = @(18787, 18788)
 $ProcessRecoveryWindowSeconds = 10
 $FirewallRuleNames = @(
     "Nexus Local Product Test Gateway 18787",
     "Nexus Local Product Test Gateway 18787-18788",
-    "Nexus Local Product Test Gateway 18788"
+    "Nexus Local Product Test Gateway 18788",
+    "Nexus Local Product Test Gateway 18787 HTTP"
 )
 
 function Assert-ManagedPath([string]$Path) {
@@ -237,7 +237,7 @@ function Get-LanAddress {
 function Get-LanUrl {
     $lanAddress = Get-LanAddress
     if ([string]::IsNullOrWhiteSpace($lanAddress)) { return $null }
-    return "https://${lanAddress}:$Port"
+    return "http://${lanAddress}:$Port"
 }
 
 function Ensure-FirewallRule {
@@ -326,7 +326,7 @@ function Stop-Gateway([switch]$Quiet) {
     }
     Remove-Item -LiteralPath $ProcessFile -Force -ErrorAction SilentlyContinue
     if (-not (Wait-ForManagedPortsClosed 5)) {
-        throw 'The owned Gateway process exited, but port 18787 or 18788 is still listening; no unrelated process was touched.'
+        throw 'The owned Gateway process exited, but a managed port (18787 or 18788) is still listening; no unrelated process was touched.'
     }
     if (-not $Quiet) { Write-Host "Gateway stopped." }
 }
@@ -354,19 +354,15 @@ function Get-ListeningProcessIds([int]$TargetPort) {
     }
 }
 
-function Invoke-HttpsJson([string]$Url) {
+function Invoke-HttpJson([string]$Url) {
     $python = Get-VenvPython
     if (-not (Test-Path -LiteralPath $python)) { return $null }
     $probeScript = @"
 import json
-import ssl
 import sys
 import urllib.request
 
-opener = urllib.request.build_opener(
-    urllib.request.ProxyHandler({}),
-    urllib.request.HTTPSHandler(context=ssl._create_unverified_context()),
-)
+opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
 with opener.open(sys.argv[1], timeout=3) as response:
     if response.status != 200:
         raise SystemExit(2)
@@ -438,7 +434,7 @@ function Ensure-Dependencies([string]$RequirementsPath) {
         }
         & $uvCommand.Source pip sync --python $python --link-mode copy $lockFile
         if ($LASTEXITCODE -ne 0) { throw "Dependency synchronization failed." }
-        & $python -c "import aiohttp, cryptography, multidict, yarl"
+        & $python -c "import aiohttp, multidict, yarl"
         if ($LASTEXITCODE -ne 0) { throw "The synchronized runtime dependencies cannot be imported." }
     } finally {
         [Environment]::SetEnvironmentVariable("UV_LINK_MODE", $previousLinkMode, "Process")
@@ -485,7 +481,7 @@ function Deploy-LatestArtifact {
 }
 
 function Get-SetupStatus {
-    return Invoke-HttpsJson ($BaseUrl + "/api/setup/status")
+    return Invoke-HttpJson ($BaseUrl + "/api/setup/status")
 }
 
 function Wait-ForSetupStatus {
@@ -508,26 +504,25 @@ function Wait-ForSetupStatus {
 function Start-Gateway {
     $owned = Get-OwnedProcess
     if ($null -ne $owned) {
-        $httpsReady = Test-PortOpen -TargetPort $Port
-        $legacyHttpOpen = Test-PortOpen -TargetPort 18787
-        if ($httpsReady -and -not $legacyHttpOpen -and $null -ne (Get-SetupStatus)) {
+        $httpReady = Test-PortOpen -TargetPort $Port
+        $legacyHttpsOpen = Test-PortOpen -TargetPort 18788
+        if ($httpReady -and -not $legacyHttpsOpen -and $null -ne (Get-SetupStatus)) {
             Write-Host ("Gateway is already running at " + $BaseUrl)
             $existingLanUrl = Get-LanUrl
-            if ($null -ne $existingLanUrl) { Write-Host ("LAN HTTPS: " + $existingLanUrl) }
+            if ($null -ne $existingLanUrl) { Write-Host ("LAN HTTP: " + $existingLanUrl) }
             return
         }
-        Write-Host "The owned Gateway does not match the HTTPS-only listener policy; restarting it safely..."
+        Write-Host "The owned Gateway does not match the HTTP-origin listener policy; restarting it safely..."
         Stop-Gateway -Quiet
     }
     if (-not (Test-Path -LiteralPath (Join-Path $AppDir "gateway\nexus_gateway\__main__.py"))) {
         Deploy-LatestArtifact
     }
     Ensure-Dependencies (Join-Path $AppDir "gateway\requirements.txt")
-    if (Test-PortOpen -TargetPort $Port) { throw "Port $Port is already used by another process; it was not stopped." }
-    if (Test-PortOpen -TargetPort 18787) { throw "Legacy HTTP port 18787 is still in use by another process; HTTPS-only startup was refused." }
+    if (Test-PortOpen -TargetPort $Port) { throw "HTTP port $Port is already used by another process; it was not stopped." }
+    if (Test-PortOpen -TargetPort 18788) { throw "Legacy HTTPS port 18788 is still used by another process; HTTP-origin startup was refused." }
     $null = New-Item -ItemType Directory -Path $DataDir -Force
     $null = New-Item -ItemType Directory -Path (Join-Path $DataDir "media") -Force
-    $null = New-Item -ItemType Directory -Path $TlsDir -Force
     $null = New-Item -ItemType Directory -Path $LogDir -Force
     $null = New-Item -ItemType Directory -Path $StateDir -Force
     Ensure-FirewallRule
@@ -535,14 +530,12 @@ function Start-Gateway {
     $workingDirectory = Join-Path $AppDir "gateway"
     $stdoutLog = Join-Path $LogDir "gateway.stdout.log"
     $stderrLog = Join-Path $LogDir "gateway.stderr.log"
-    $lanAddress = Get-LanAddress
     $launchEnvironment = [ordered]@{
         PYTHONUTF8 = "1"
         PYTHONUNBUFFERED = "1"
+        PYTHONNOUSERSITE = "1"
         NEXUS_GATEWAY_HOST = $BindAddress
         NEXUS_GATEWAY_PORT = $Port.ToString()
-        NEXUS_TLS_DIR = $TlsDir
-        NEXUS_TLS_HOSTS = $(if ([string]::IsNullOrWhiteSpace($lanAddress)) { "" } else { $lanAddress })
         NEXUS_CREDENTIALS_FILE = (Join-Path $DataDir "account.json")
         NEXUS_CONFIG_FILE = (Join-Path $DataDir "config.json")
         NEXUS_BOOTSTRAP_TOKEN_FILE = (Join-Path $DataDir "bootstrap.token")
@@ -551,8 +544,7 @@ function Start-Gateway {
     $blockedEnvironment = @(
         "NEXUS_USERNAME", "NEXUS_PASSWORD", "NEXUS_SESSION_SECRET",
         "HERMES_API_URL", "HERMES_API_TOKEN", "NEXUS_LOCAL_HERMES_TOKEN",
-        "NEXUS_HTTPS_PORT", "NEXUS_TLS_CERT_FILE", "NEXUS_TLS_KEY_FILE",
-        "NEXUS_TLS_CA_FILE", "NEXUS_REDIRECT_WEB_TO_HTTPS"
+        "PYTHONPATH", "PYTHONHOME"
     )
     $allNames = @($launchEnvironment.Keys) + $blockedEnvironment
     $previousEnvironment = @{}
@@ -566,7 +558,7 @@ function Start-Gateway {
     }
     try {
         $process = Start-Process -FilePath $python `
-            -ArgumentList @("-m", "nexus_gateway", "--host", $BindAddress, "--port", $Port.ToString(), "--tls-dir", $TlsDir) `
+            -ArgumentList @("-m", "nexus_gateway", "--host", $BindAddress, "--port", $Port.ToString()) `
             -WorkingDirectory $workingDirectory `
             -RedirectStandardOutput $stdoutLog `
             -RedirectStandardError $stderrLog `
@@ -592,24 +584,19 @@ function Start-Gateway {
         $setup = Wait-ForSetupStatus
         $owned = Get-OwnedProcess
         if ($null -eq $owned) { throw "The running Gateway process could not be identified safely." }
-        if (-not (Test-PortOpen -TargetPort $Port)) { throw "HTTPS port $Port did not open." }
-        if (Test-PortOpen -TargetPort 18787) { throw "Legacy HTTP port 18787 is still listening; HTTPS-only verification failed." }
+        if (-not (Test-PortOpen -TargetPort $Port)) { throw "HTTP port $Port did not open." }
+        if (Test-PortOpen -TargetPort 18788) { throw "Legacy HTTPS port 18788 is still listening; HTTP-origin verification failed." }
         $listenerPids = @(Get-ListeningProcessIds -TargetPort $Port)
         if ($listenerPids.Count -ne 1 -or [int]$listenerPids[0] -ne [int]$owned.Process.Id) {
-            throw "HTTPS port $Port is not owned by the safely tracked Gateway process."
+            throw "HTTP port $Port is not owned by the safely tracked Gateway process."
         }
     } catch {
         Stop-Gateway -Quiet
         throw
     }
-    Write-Host ("HTTPS Gateway started at " + $BaseUrl)
+    Write-Host ("HTTP Gateway started at " + $BaseUrl)
     $lanUrl = Get-LanUrl
-    if ($null -ne $lanUrl) { Write-Host ("LAN HTTPS: " + $lanUrl) }
-    $caCertificate = Join-Path $TlsDir "ca.crt"
-    if (Test-Path -LiteralPath $caCertificate) {
-        Write-Host ("Temporary CA certificate: " + $caCertificate)
-        Write-Host ("Temporary CA SHA-256: " + (Get-CertificateSha256 $caCertificate))
-    }
+    if ($null -ne $lanUrl) { Write-Host ("LAN HTTP: " + $lanUrl) }
     if ([bool]$setup.initialized) {
         Write-Host "State: initialized"
     } else {
@@ -618,35 +605,17 @@ function Start-Gateway {
     }
 }
 
-function Get-CertificateSha256([string]$Path) {
-    $certificate = Get-PfxCertificate -FilePath $Path
-    $sha256 = [System.Security.Cryptography.SHA256]::Create()
-    try {
-        $hash = $sha256.ComputeHash($certificate.RawData)
-    } finally {
-        $sha256.Dispose()
-    }
-    return ([System.BitConverter]::ToString($hash)).Replace("-", "")
-}
-
 function Show-Status {
     $deployment = Read-JsonFile $DeploymentFile
     $owned = Get-OwnedProcess
     Write-Host ("Deployment directory: " + $Root)
     if ($null -ne $deployment) { Write-Host ("Artifact: " + [string]$deployment.artifact) }
     Write-Host ("Gateway process: " + $(if ($null -ne $owned) { "running" } else { "stopped" }))
-    Write-Host ("Local HTTPS: " + $BaseUrl)
+    Write-Host ("Local HTTP: " + $BaseUrl)
     $lanUrl = Get-LanUrl
-    if ($null -ne $lanUrl) { Write-Host ("LAN HTTPS: " + $lanUrl) }
-    Write-Host ("HTTPS port 18788: " + $(if (Test-PortOpen -TargetPort $Port) { "listening" } else { "closed" }))
-    Write-Host ("HTTP port 18787: " + $(if (Test-PortOpen -TargetPort 18787) { "unexpectedly listening" } else { "closed" }))
-    $caCertificate = Join-Path $TlsDir "ca.crt"
-    if (Test-Path -LiteralPath $caCertificate) {
-        Write-Host ("Temporary HTTPS CA: " + $caCertificate)
-        Write-Host ("Temporary HTTPS CA SHA-256: " + (Get-CertificateSha256 $caCertificate))
-    } else {
-        Write-Host "Temporary HTTPS CA: not generated yet"
-    }
+    if ($null -ne $lanUrl) { Write-Host ("LAN HTTP: " + $lanUrl) }
+    Write-Host ("HTTP port 18787: " + $(if (Test-PortOpen -TargetPort $Port) { "listening" } else { "closed" }))
+    Write-Host ("Legacy HTTPS port 18788: " + $(if (Test-PortOpen -TargetPort 18788) { "unexpectedly listening" } else { "closed" }))
     if ($null -ne $owned) {
         $setup = Get-SetupStatus
         if ($null -eq $setup) {
@@ -665,7 +634,7 @@ function Reset-Environment {
     Remove-ManagedTree $DataDir
     Remove-ManagedTree $LogDir
     Remove-Item -LiteralPath $ProcessFile -Force -ErrorAction SilentlyContinue
-    Write-Host "Runtime data, account, password, configuration, media, local HTTPS CA and logs were cleared."
+    Write-Host "Runtime data, account, password, configuration, media, historical TLS files and logs were cleared."
     Start-Gateway
 }
 

@@ -9,7 +9,6 @@ import secrets
 import shutil
 import signal
 import socket
-import ssl
 import subprocess
 import sys
 import time
@@ -26,7 +25,6 @@ GATEWAY_DIR = ROOT / "gateway"
 LOCAL_DIR = ROOT / ".local-test"
 VENV_DIR = LOCAL_DIR / "venv"
 DATA_DIR = LOCAL_DIR / "data"
-TLS_DIR = DATA_DIR / "tls"
 LOG_DIR = LOCAL_DIR / "logs"
 ACCESS_FILE = LOCAL_DIR / "access.json"
 PROCESS_FILE = LOCAL_DIR / "process.json"
@@ -39,7 +37,7 @@ REQUIREMENTS_FILES = (
     GATEWAY_DIR / "requirements-dev.txt",
 )
 DEFAULT_GATEWAY_HOST = "127.0.0.1"
-DEFAULT_GATEWAY_PORT = 18788
+DEFAULT_GATEWAY_PORT = 18787
 COMMANDS = (
     "setup",
     "start",
@@ -118,25 +116,7 @@ def gateway_port() -> int:
 def gateway_url() -> str:
     host = gateway_host()
     url_host = f"[{host}]" if ":" in host and not host.startswith("[") else host
-    return f"https://{url_host}:{gateway_port()}"
-
-
-def gateway_tls_hosts() -> str:
-    candidates: list[str] = []
-    configured_host = gateway_host().strip("[]")
-    if configured_host not in {"", "0.0.0.0", "::", "*"}:
-        candidates.append(configured_host)
-    udp_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-    try:
-        udp_socket.connect(("192.0.2.1", 9))
-        lan_address = str(udp_socket.getsockname()[0]).strip()
-        if lan_address and not lan_address.startswith(("127.", "169.254.")):
-            candidates.append(lan_address)
-    except OSError:
-        pass
-    finally:
-        udp_socket.close()
-    return ",".join(dict.fromkeys(candidates))
+    return f"http://{url_host}:{gateway_port()}"
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -224,7 +204,7 @@ def _dependency_imports_work(python: Path) -> bool:
     if not python.is_file():
         return False
     result = subprocess.run(
-        [str(python), "-c", "import aiohttp, cryptography, pytest, yaml"],
+        [str(python), "-c", "import aiohttp, pytest, yaml"],
         cwd=ROOT,
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
@@ -500,12 +480,9 @@ def public_hermes_info(connection: HermesConnection) -> dict[str, str | None]:
 
 
 def _direct_url_opener() -> urllib.request.OpenerDirector:
-    # This opener is restricted to the local test-management process. The Gateway
-    # itself still enforces TLS, while its generated CA may not be in the OS trust store.
-    return urllib.request.build_opener(
-        urllib.request.ProxyHandler({}),
-        urllib.request.HTTPSHandler(context=ssl._create_unverified_context()),
-    )
+    # Local management must bypass ambient HTTP(S) proxy settings so loopback probes
+    # always reach the isolated Gateway directly.
+    return urllib.request.build_opener(urllib.request.ProxyHandler({}))
 
 
 def _http_json(
@@ -924,8 +901,6 @@ def start_gateway(connection: HermesConnection, *, force_restart: bool = False) 
         host,
         "--port",
         str(port),
-        "--tls-dir",
-        str(TLS_DIR),
     ]
     env = os.environ.copy()
     for key in SECRET_ENV_KEYS:
@@ -935,8 +910,6 @@ def start_gateway(connection: HermesConnection, *, force_restart: bool = False) 
         "PYTHONUNBUFFERED": "1",
         "NEXUS_GATEWAY_HOST": host,
         "NEXUS_GATEWAY_PORT": str(port),
-        "NEXUS_TLS_DIR": str(TLS_DIR),
-        "NEXUS_TLS_HOSTS": gateway_tls_hosts(),
         "NEXUS_CREDENTIALS_FILE": str(DATA_DIR / "account.json"),
         "NEXUS_CONFIG_FILE": str(DATA_DIR / "config.json"),
         "NEXUS_BOOTSTRAP_TOKEN_FILE": str(DATA_DIR / "bootstrap.token"),

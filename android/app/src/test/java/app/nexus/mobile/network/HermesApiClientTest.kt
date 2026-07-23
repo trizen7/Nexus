@@ -314,21 +314,23 @@ class HermesApiClientTest {
     }
 
     @Test
-    fun `local https certificate error includes actionable recovery`() {
+    fun `reverse proxy certificate error includes actionable recovery`() {
         val message = friendlyNetworkError(
             javax.net.ssl.SSLHandshakeException("Trust anchor for certification path not found"),
-            "https://10.0.0.123:18788"
+            "https://nexus.example.com"
         )
 
-        assertTrue(message.contains("Debug APK"))
-        assertFalse(message.contains("http://"))
+        assertTrue(message.contains("反向代理证书"))
+        assertTrue(message.contains("服务器域名"))
+        assertFalse(message.contains("Debug APK"))
     }
 
     @Test
-    fun `unknown host points local users to app api port`() {
+    fun `unknown host points local users to HTTP product test port`() {
         val message = friendlyNetworkError(java.net.UnknownHostException("nexus.local"))
 
-        assertTrue(message.contains("18788"))
+        assertTrue(message.contains("http://"))
+        assertTrue(message.contains("18787"))
     }
 
     @Test

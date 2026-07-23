@@ -17,6 +17,10 @@ def test_dockerfile_runs_gateway_as_non_root_with_healthcheck():
     assert "HEALTHCHECK" in dockerfile
     assert '"python", "-m", "nexus_gateway"' in dockerfile
     assert "0.0.0.0" in dockerfile
+    assert "http://127.0.0.1:8787/health" in dockerfile
+    assert "--tls-dir" not in dockerfile
+    assert "NEXUS_TLS" not in dockerfile
+    assert "_create_unverified_context" not in dockerfile
 
 
 def test_compose_persists_data_and_does_not_embed_secrets():
@@ -24,6 +28,7 @@ def test_compose_persists_data_and_does_not_embed_secrets():
     service = compose["services"]["nexus-gateway"]
 
     assert service["restart"] == "unless-stopped"
+    assert service["image"] == "nexus-mobile-gateway:0.0.7"
     assert service["ports"] == ["8787:8787"]
     assert service["volumes"] == ["./data:/data"]
     assert "env_file" not in service
@@ -35,6 +40,11 @@ def test_compose_persists_data_and_does_not_embed_secrets():
     assert "NEXUS_MIN_FREE_DISK_BYTES" in service["environment"]
     assert "NEXUS_PASSWORD" not in service["environment"]
     assert "HERMES_API_TOKEN" not in service["environment"]
+    assert "NEXUS_TLS_DIR" not in service["environment"]
+    assert "NEXUS_TLS_HOSTS" not in service["environment"]
+    healthcheck = " ".join(service["healthcheck"]["test"])
+    assert "http://127.0.0.1:8787/health" in healthcheck
+    assert "https://" not in healthcheck
     assert service["logging"]["options"] == {"max-size": "10m", "max-file": "3"}
 
 

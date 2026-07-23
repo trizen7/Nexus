@@ -6,6 +6,19 @@
 
 - 暂无。
 
+## 0.0.7｜HTTP 源站与 HTTPS 反向代理
+
+- Gateway 改回单一 HTTP 源站监听，不再生成、读取或热更新 TLS 证书，并移除临时 CA 下载与网页证书管理入口；旧 `/api/admin/tls` 路径不再转发给 Hermes；
+- 外网部署改由 Nginx、Caddy 或其他反向代理提供受信任的 HTTPS 域名，文档补充 `Host`、`X-Forwarded-Proto`、流式响应关闭缓冲、长读取超时及 HSTS 边界；HTTP 源站端口不得直接暴露到公网；
+- Android 允许回环、RFC 1918 私网、链路本地、CGNAT、IPv6 ULA 和 `.local` 地址使用 HTTP，拒绝公网 HTTP；裸私网地址默认补全 `http://地址:18787`，裸公网域名默认补全 `https://域名`；
+- Android 自动把旧保存的私网 `https://地址:18788` 迁移为 `http://地址:18787`，移除 Debug CA 生成、内嵌和安装依赖；反向代理 HTTPS 继续使用系统信任链；
+- 人物模型、实际调用模型、推理深度和手机端定时任务管理继续保留；普通对话列表继续隐藏定时任务执行会话；
+- 独立成品测试环境切换到 LocalSubnet TCP `18787`，升级时安全停止旧 `18788` 进程并确认旧端口关闭；普通 upgrade 继续保留账号、Hermes 配置、媒体、运行数据及历史 `data/tls`，reset 才清空数据；
+- Docker、Compose、环境变量示例和源码本地测试脚本同步为 HTTP 源站；按要求未在本机运行 Docker；
+- 自动验证：Gateway 77 项通过、9 项按环境跳过，Python 编译、网页契约与 JavaScript 语法检查通过；Android 126 项单元测试全部通过，`lintDebug` 与 Debug APK 构建通过；
+- 已生成 `Nexus-Android-0.0.7-debug.apk` 与 `Nexus-Gateway-0.0.7.zip`，并验证 Gateway ZIP 不含运行数据、缓存、私钥、测试 CA 或 Android 构建文件；
+- 独立测试环境已从 0.0.6 无损升级到 0.0.7：本机与局域网 HTTP 健康检查通过，`18787` 监听于 `0.0.0.0`、`18788` 完全关闭，账号、Hermes 配置、媒体和历史 TLS 文件保持不变。
+
 ## 0.0.6｜推理深度与 HTTPS 证书管理
 
 - Android 在人物模型和实际调用模型之外新增独立推理深度选择，支持默认、`none`、`minimal`、`low`、`medium`、`high`、`xhigh`、`max`、`ultra` 并持久保存；

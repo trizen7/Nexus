@@ -49,37 +49,18 @@
       <div class="panel">
         <div class="panel-title">系统状态</div>
         <div class="status-list">
-          <div class="status-row"><span>网关版本</span><span id="gatewayVersion">—</span></div>
+          <div class="status-row"><span>Gateway 版本</span><span id="gatewayVersion">—</span></div>
           <div class="status-row"><span>Hermes 版本</span><span id="hermesVersion">—</span></div>
           <div class="status-row"><span>登录有效期</span><span>30 天</span></div>
-          <div class="status-row"><span>服务入口</span><span id="systemEntry"></span></div>
-          <div class="status-row"><span>服务模式</span><span>HTTPS only · 18788</span></div>
+          <div class="status-row"><span>当前入口</span><span id="systemEntry"></span></div>
+          <div class="status-row"><span>Gateway 模式</span><span>HTTP 源站</span></div>
         </div>
       </div>
-      <div class="panel top-gap tls-panel">
-        <div class="panel-title">HTTPS 证书</div>
-        <div class="tls-grid">
-          <div class="status-list">
-            <div class="status-row"><span>当前模式</span><span id="tlsMode">检查中</span></div>
-            <div class="status-row"><span>Subject</span><span id="tlsSubject" class="tls-value">—</span></div>
-            <div class="status-row"><span>Issuer</span><span id="tlsIssuer" class="tls-value">—</span></div>
-            <div class="status-row"><span>生效时间</span><span id="tlsNotBefore">—</span></div>
-            <div class="status-row"><span>到期时间</span><span id="tlsNotAfter">—</span></div>
-            <div class="status-row"><span>SHA-256 指纹</span><code id="tlsFingerprint" class="tls-value">—</code></div>
-            <div class="status-row"><span>DNS SAN</span><span id="tlsDnsNames" class="tls-value">—</span></div>
-            <div class="status-row"><span>IP SAN</span><span id="tlsIpAddresses" class="tls-value">—</span></div>
-            <div class="status-row"><span>证书链长度</span><span id="tlsChainLength">—</span></div>
-            <div class="status-row"><span>临时 CA</span><a id="tlsCaDownload" href="/nexus-local-ca.crt" download>下载临时 CA</a></div>
-          </div>
-          <form id="tlsForm" class="tls-form">
-            <h2>上传正式证书</h2>
-            <p class="muted">现在无需提供正式证书，Gateway 会自动生成并持久化临时本地证书；获得正式证书后，可在此校验并热替换。</p>
-            <label class="field"><span>完整证书链 PEM</span><input id="tlsCertificateFile" type="file" accept=".pem,.crt,.cer,application/x-pem-file,application/x-x509-ca-cert" required></label>
-            <label class="field"><span>私钥 PEM</span><input id="tlsPrivateKeyFile" type="file" accept=".pem,.key,application/x-pem-file" required></label>
-            <div class="notice tls-private-note">私钥只会通过当前 HTTPS 连接发送给 Gateway，不会回显、写入日志或保存到浏览器。</div>
-            <button class="button" id="tlsUploadButton">验证并替换证书</button>
-            <div id="tlsMessage" class="success"></div>
-          </form>
+      <div class="panel top-gap proxy-panel">
+        <div class="panel-title">反向代理</div>
+        <div class="proxy-content">
+          <div class="notice">Gateway 只提供 HTTP 源站。局域网可以直接访问；外网请使用 Nginx、Caddy 等反向代理提供受信任的 HTTPS 域名。</div>
+          <p class="muted">不要把 HTTP 源站端口直接暴露到公网。反向代理应转发 Host 和 X-Forwarded-Proto，并关闭响应缓冲以支持流式输出。</p>
         </div>
       </div>
     </section>

@@ -3,14 +3,12 @@ services:
     build:
       context: ./gateway
       dockerfile: Dockerfile
-    image: nexus-mobile-gateway:0.0.6
+    image: nexus-mobile-gateway:0.0.7
     container_name: nexus-gateway
     restart: unless-stopped
     environment:
       NEXUS_GATEWAY_HOST: 0.0.0.0
       NEXUS_GATEWAY_PORT: 8787
-      NEXUS_TLS_DIR: /data/tls
-      NEXUS_TLS_HOSTS: ${NEXUS_TLS_HOSTS:-}
       NEXUS_CONFIG_FILE: /data/config.json
       NEXUS_CREDENTIALS_FILE: /data/account.json
       NEXUS_BOOTSTRAP_TOKEN_FILE: /data/bootstrap.token
@@ -23,7 +21,7 @@ services:
     volumes:
       - ./data:/data
     healthcheck:
-      test: ["CMD", "python", "-c", "import ssl,urllib.request; urllib.request.urlopen('https://127.0.0.1:8787/health', context=ssl._create_unverified_context(), timeout=3).read()"]
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://127.0.0.1:8787/health', timeout=3).read()"]
       interval: 30s
       timeout: 5s
       start_period: 10s

@@ -25,8 +25,12 @@ $ControlFiles = @(
     "03-停止测试环境.cmd",
     "04-清空并重新开始.cmd",
     "05-升级到最新成品.cmd",
-    "06-安装本机HTTPS证书.cmd",
+    "06-查看反向代理说明.cmd",
     "使用说明.txt"
+)
+
+$ObsoleteControlFiles = @(
+    "06-安装本机HTTPS证书.cmd"
 )
 
 $tokens = $null
@@ -41,6 +45,13 @@ if ($errors.Count -gt 0) {
 }
 
 $null = New-Item -ItemType Directory -Path $Destination -Force
+foreach ($name in $ObsoleteControlFiles) {
+    $obsolete = Join-Path $Destination $name
+    if (Test-Path -LiteralPath $obsolete -PathType Leaf) {
+        Remove-Item -LiteralPath $obsolete -Force
+    }
+}
+
 foreach ($name in $ControlFiles) {
     $source = Join-Path $TemplateRoot $name
     if (-not (Test-Path -LiteralPath $source -PathType Leaf)) {

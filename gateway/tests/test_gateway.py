@@ -3,7 +3,6 @@ from concurrent.futures import ThreadPoolExecutor
 import io
 import json
 import os
-import ssl
 import shutil
 import stat
 import threading
@@ -26,7 +25,6 @@ from nexus_gateway.app import (
     create_app,
     security_headers,
 )
-from nexus_gateway.tls import TLSManager
 
 
 @pytest_asyncio.fixture
@@ -1293,9 +1291,7 @@ async def test_web_admin_requires_login_and_lists_files(gateway_client: TestClie
 
 
 @pytest.mark.asyncio
-async def test_web_root_is_https_content_and_public_ca_can_be_downloaded(tmp_path: Path):
-    ca_path = tmp_path / "ca.crt"
-    ca_path.write_bytes(b"test-local-ca")
+async def test_web_root_describes_http_origin_and_reverse_proxy(tmp_path: Path):
     app = create_app(
         username="nexus",
         password="test-password",
@@ -1304,80 +1300,43 @@ async def test_web_root_is_https_content_and_public_ca_can_be_downloaded(tmp_pat
         upstream_token="upstream-secret",
         storage_dir=tmp_path / "media",
         credentials_path=tmp_path / "auth.json",
-        https_port=18788,
-        tls_ca_path=ca_path,
         transcribe_audio=lambda _path: {"success": False, "transcript": ""},
     )
     async with TestClient(TestServer(app)) as client:
         response = await client.get("/", allow_redirects=False)
         assert response.status == 200
+        html = await response.text()
+        assert "HTTP 源站" in html
+        assert "反向代理" in html
+        assert "上传正式证书" not in html
         assert "Strict-Transport-Security" not in response.headers
 
-        ca_response = await client.get("/nexus-local-ca.crt")
-        assert ca_response.status == 200
-        assert ca_response.content_type == "application/x-x509-ca-cert"
-        assert await ca_response.read() == b"test-local-ca"
-        assert "nexus-local-ca.crt" in ca_response.headers["Content-Disposition"]
-        assert "Strict-Transport-Security" not in ca_response.headers
+        headers = await auth_headers(client)
+        ca_response = await client.get("/nexus-local-ca.crt", headers=headers)
+        assert ca_response.status == 404
+
+        tls_status = await client.get("/api/admin/tls", headers=headers)
+        assert tls_status.status == 404
+        tls_upload = await client.put(
+            "/api/admin/tls",
+            json={"certificate_chain": "must-not-be-forwarded", "private_key": "must-not-be-forwarded"},
+            headers=headers,
+        )
+        assert tls_upload.status == 404
 
 
 @pytest.mark.asyncio
-async def test_hsts_is_emitted_only_for_https_requests():
+async def test_security_headers_are_suitable_for_an_http_origin():
     async def handler(_request):
         return web.Response(text="ok")
 
-    plain_request = make_mocked_request("GET", "/")
-    plain_response = await security_headers(plain_request, handler)
-    assert "Strict-Transport-Security" not in plain_response.headers
-
-    secure_request = make_mocked_request("GET", "/", sslcontext=ssl.create_default_context())
-    secure_response = await security_headers(secure_request, handler)
-    assert secure_response.headers["Strict-Transport-Security"] == "max-age=31536000"
-
-
-@pytest.mark.asyncio
-async def test_tls_admin_status_requires_auth_and_never_exposes_private_key(tmp_path: Path):
-    tls_manager = TLSManager(tmp_path / "tls", extra_hosts=["10.0.0.123"]).bootstrap()
-    app = create_app(
-        username="nexus",
-        password="test-password",
-        session_secret="test-session-secret",
-        upstream_url="http://127.0.0.1:9",
-        upstream_token="upstream-secret",
-        storage_dir=tmp_path / "media",
-        credentials_path=tmp_path / "auth.json",
-        https_port=18788,
-        tls_manager=tls_manager,
-        transcribe_audio=lambda _path: {"success": False, "transcript": ""},
-    )
-    async with TestClient(TestServer(app)) as client:
-        unauthorized = await client.get("/api/admin/tls")
-        assert unauthorized.status == 401
-
-        response = await client.get("/api/admin/tls", headers=await auth_headers(client))
-        assert response.status == 200
-        payload = await response.json()
-        assert payload["mode"] == "temporary"
-        assert payload["https_port"] == 18788
-        assert payload["hot_reload_supported"] is True
-        serialized = json.dumps(payload)
-        assert "private_key" not in serialized
-        assert "BEGIN PRIVATE KEY" not in serialized
-        assert str(tmp_path) not in serialized
-        assert payload["temporary_ca_active"] is True
-        assert payload["ca_download_available"] is True
-
-        invalid = await client.put(
-            "/api/admin/tls",
-            json={"certificate_chain": "not-a-certificate", "private_key": "not-a-key"},
-            headers=await auth_headers(client),
-        )
-        assert invalid.status == 400
-        assert (await invalid.json())["error"]["code"] == "invalid_tls_material"
-
-        tls_manager.mode = "custom"
-        obsolete_ca = await client.get("/nexus-local-ca.crt")
-        assert obsolete_ca.status == 404
+    request = make_mocked_request("GET", "/")
+    response = await security_headers(request, handler)
+    assert response.headers["X-Content-Type-Options"] == "nosniff"
+    assert response.headers["X-Frame-Options"] == "DENY"
+    assert response.headers["Referrer-Policy"] == "no-referrer"
+    assert response.headers["Cache-Control"] == "no-store"
+    assert "Strict-Transport-Security" not in response.headers
 
 
 @pytest.mark.asyncio

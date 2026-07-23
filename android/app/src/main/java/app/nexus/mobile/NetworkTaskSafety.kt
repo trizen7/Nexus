@@ -4,17 +4,19 @@ import java.net.Inet6Address
 import java.net.InetAddress
 import java.net.URI
 
-private const val PRODUCT_TEST_HTTPS_PORT = 18788
-private val LOCAL_HOST_LABEL = Regex("^[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?$")
+private const val PRODUCT_TEST_HTTP_PORT = 18787
+private const val LEGACY_PRODUCT_TEST_HTTPS_PORT = 18788
 
 fun shouldAttachBearerToken(serverUrl: String, resourceUrl: String): Boolean {
-    val server = parseHttpsUri(normalizeServerUrl(serverUrl))
+    val normalizedServer = normalizeServerUrl(serverUrl)
+    if (serverUrlValidationError(normalizedServer) != null) return false
+    val server = parseHttpUri(normalizedServer)
         ?.takeIf { it.userInfo == null && it.rawQuery == null && it.rawFragment == null }
         ?: return false
     val candidate = runCatching { URI(resourceUrl.trim()) }.getOrNull() ?: return false
-    val resource = (if (candidate.isAbsolute) parseHttpsUri(resourceUrl) else server.resolve(candidate)?.let {
-        parseHttpsUri(it.toString())
-    }) ?: return false
+    val resource = (if (candidate.isAbsolute) parseHttpUri(resourceUrl) else server.resolve(candidate)?.let {
+        parseHttpUri(it.toString())
+    })?.takeIf { it.userInfo == null } ?: return false
     return server.scheme.equals(resource.scheme, ignoreCase = true) &&
         server.host.equals(resource.host, ignoreCase = true) &&
         effectivePort(server) == effectivePort(resource)
@@ -26,15 +28,24 @@ fun bearerTokenFor(serverUrl: String, resourceUrl: String, token: String): Strin
 fun normalizeServerUrl(serverUrl: String): String {
     val trimmed = serverUrl.trim()
     if (trimmed.isEmpty()) return ""
+    val withoutTrailingSlash = trimmed.trimEnd('/')
     val withScheme = when {
         trimmed.startsWith("http://", ignoreCase = true) ||
             trimmed.startsWith("https://", ignoreCase = true) ||
-            "://" in trimmed -> trimmed
-        looksLikeBareIpv6Address(trimmed.trimEnd('/')) -> "https://[${trimmed.trimEnd('/')}]"
-        else -> "https://$trimmed"
-    }.trimEnd('/')
+            "://" in trimmed -> withoutTrailingSlash
+        looksLikeBareIpv6Address(withoutTrailingSlash) -> {
+            val host = withoutTrailingSlash.substringBefore('%')
+            val scheme = if (isLocalGatewayHost(host)) "http" else "https"
+            "$scheme://[$withoutTrailingSlash]"
+        }
+        else -> {
+            val probe = runCatching { URI("http://$withoutTrailingSlash") }.getOrNull()
+            val scheme = if (isLocalGatewayHost(probe?.host)) "http" else "https"
+            "$scheme://$withoutTrailingSlash"
+        }
+    }
     val uri = runCatching { URI(withScheme) }.getOrNull() ?: return withScheme
-    if (!uri.scheme.equals("https", ignoreCase = true) || uri.port >= 0 || !isLocalGatewayHost(uri.host)) {
+    if (!uri.scheme.equals("http", ignoreCase = true) || uri.port >= 0 || !isLocalGatewayHost(uri.host)) {
         return withScheme
     }
     return runCatching {
@@ -42,7 +53,7 @@ fun normalizeServerUrl(serverUrl: String): String {
             uri.scheme,
             uri.userInfo,
             uri.host,
-            PRODUCT_TEST_HTTPS_PORT,
+            PRODUCT_TEST_HTTP_PORT,
             uri.path,
             uri.query,
             uri.fragment,
@@ -53,34 +64,32 @@ fun normalizeServerUrl(serverUrl: String): String {
 fun migrateStoredServerUrl(serverUrl: String): String {
     val trimmed = serverUrl.trim().trimEnd('/')
     val uri = runCatching { URI(trimmed) }.getOrNull() ?: return serverUrl
-    if (!uri.scheme.equals("http", ignoreCase = true) || uri.port != 18787 ||
+    if (!uri.scheme.equals("https", ignoreCase = true) || uri.port != LEGACY_PRODUCT_TEST_HTTPS_PORT ||
         !isLocalGatewayHost(uri.host) || uri.userInfo != null || uri.rawQuery != null || uri.rawFragment != null
     ) {
         return serverUrl
     }
     return runCatching {
-        URI("https", null, uri.host, PRODUCT_TEST_HTTPS_PORT, uri.path, null, null).toString().trimEnd('/')
+        URI("http", null, uri.host, PRODUCT_TEST_HTTP_PORT, uri.path, null, null).toString().trimEnd('/')
     }.getOrDefault(serverUrl)
 }
 
 fun serverUrlValidationError(serverUrl: String): String? {
     val normalized = normalizeServerUrl(serverUrl)
     if (normalized.isBlank()) return "请填写服务器地址"
-    val candidate = runCatching { URI(normalized) }.getOrNull()
-        ?: return "服务器地址格式不正确，请填写例如 https://10.0.0.123:18788"
-    if (candidate.scheme.equals("http", ignoreCase = true)) {
-        return "Nexus App 仅允许 HTTPS，请填写例如 https://10.0.0.123:18788"
-    }
-    val parsed = parseHttpsUri(normalized)
-        ?: return "服务器地址格式不正确，请填写例如 https://10.0.0.123:18788"
+    val parsed = parseHttpUri(normalized)
+        ?: return "服务器地址格式不正确，请填写例如 http://10.0.0.123:18787 或 https://你的域名"
     if (parsed.userInfo != null || parsed.rawQuery != null || parsed.rawFragment != null) {
         return "服务器地址不能包含账号、查询参数或锚点"
+    }
+    if (parsed.scheme.equals("http", ignoreCase = true) && !isLocalGatewayHost(parsed.host)) {
+        return "公网 HTTP 会明文传输账号和消息，请使用 HTTPS 反向代理地址"
     }
     return null
 }
 
-private fun parseHttpsUri(value: String): URI? = runCatching { URI(value.trim()) }.getOrNull()
-    ?.takeIf { it.isAbsolute && it.scheme.equals("https", true) }
+private fun parseHttpUri(value: String): URI? = runCatching { URI(value.trim()) }.getOrNull()
+    ?.takeIf { it.isAbsolute && (it.scheme.equals("http", true) || it.scheme.equals("https", true)) }
     ?.takeIf { !it.host.isNullOrBlank() }
     ?.takeIf { it.port == -1 || it.port in 1..65535 }
 
@@ -94,8 +103,7 @@ private fun isLocalGatewayHost(host: String?): Boolean {
     val withoutScope = normalized.substringBefore('%')
     if (withoutScope.equals("localhost", ignoreCase = true) ||
         withoutScope.equals("localhost.localdomain", ignoreCase = true) ||
-        withoutScope.endsWith(".local", ignoreCase = true) ||
-        (!withoutScope.contains('.') && !withoutScope.contains(':') && LOCAL_HOST_LABEL.matches(withoutScope))
+        withoutScope.endsWith(".local", ignoreCase = true)
     ) {
         return true
     }
@@ -120,6 +128,7 @@ private fun isLocalGatewayHost(host: String?): Boolean {
 
 private fun effectivePort(uri: URI): Int = when {
     uri.port >= 0 -> uri.port
+    uri.scheme.equals("http", ignoreCase = true) -> 80
     else -> 443
 }
 

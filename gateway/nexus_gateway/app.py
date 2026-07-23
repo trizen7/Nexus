@@ -21,7 +21,6 @@ from urllib.parse import quote
 from aiohttp import ClientSession, ClientTimeout, web
 
 from . import __version__
-from .tls import TLSConfigurationError, TLSManager, TLSValidationError
 
 CHUNK_SIZE = 256 * 1024
 IMAGE_MIME_TYPES = {"image/jpeg", "image/png", "image/webp", "image/gif"}
@@ -48,10 +47,6 @@ TRANSCRIBE_AUDIO_KEY = web.AppKey("transcribe_audio", object)
 REQUEST_ATTACHMENT_IDS_KEY = web.RequestKey("nexus_attachment_ids", list)
 LOGIN_RATE_LIMITER_KEY = web.AppKey("login_rate_limiter", object)
 SETUP_LOCK_KEY = web.AppKey("setup_lock", asyncio.Lock)
-HTTPS_PORT_KEY = web.AppKey("https_port", int)
-TLS_CA_PATH_KEY = web.AppKey("tls_ca_path", object)
-TLS_MANAGER_KEY = web.AppKey("tls_manager", object)
-TLS_UPDATE_LOCK_KEY = web.AppKey("tls_update_lock", asyncio.Lock)
 TOKEN_TTL_SECONDS = 30 * 24 * 60 * 60
 ALLOWED_REASONING_EFFORTS = {"none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"}
 PUBLIC_PATHS = {
@@ -60,7 +55,6 @@ PUBLIC_PATHS = {
     "/api/setup/status",
     "/api/setup",
     "/api/auth/login",
-    "/nexus-local-ca.crt",
     "/assets/styles.css",
     "/assets/app.js",
 }
@@ -565,8 +559,6 @@ async def security_headers(request: web.Request, handler):
     response.headers.setdefault("X-Frame-Options", "DENY")
     response.headers.setdefault("Referrer-Policy", "no-referrer")
     response.headers.setdefault("Cache-Control", "no-store")
-    if request.secure:
-        response.headers.setdefault("Strict-Transport-Security", "max-age=31536000")
     return response
 
 
@@ -678,63 +670,8 @@ async def admin_page(_request: web.Request) -> web.StreamResponse:
     return web.FileResponse(WEB_ROOT / "index.html")
 
 
-async def local_ca_certificate(request: web.Request) -> web.StreamResponse:
-    manager = request.app[TLS_MANAGER_KEY]
-    if isinstance(manager, TLSManager) and manager.mode != "temporary":
-        raise web.HTTPNotFound()
-    ca_path = manager.ca_certificate_path if isinstance(manager, TLSManager) else request.app[TLS_CA_PATH_KEY]
-    if not isinstance(ca_path, Path) or not ca_path.is_file():
-        raise web.HTTPNotFound()
-    response = web.FileResponse(ca_path)
-    response.content_type = "application/x-x509-ca-cert"
-    response.headers["Content-Disposition"] = 'attachment; filename="nexus-local-ca.crt"'
-    return response
-
-
-async def admin_tls_status(request: web.Request) -> web.Response:
-    manager = request.app[TLS_MANAGER_KEY]
-    if not isinstance(manager, TLSManager):
-        return web.json_response({"configured": False, "hot_reload_supported": False}, status=503)
-    payload = manager.status()
-    payload["https_port"] = request.app[HTTPS_PORT_KEY]
-    return web.json_response(payload)
-
-
-async def update_admin_tls(request: web.Request) -> web.Response:
-    manager = request.app[TLS_MANAGER_KEY]
-    if not isinstance(manager, TLSManager):
-        return web.json_response(
-            {"error": {"code": "tls_unavailable", "message": "当前 Gateway 未启用证书管理"}},
-            status=503,
-        )
-    try:
-        body = await request.json()
-    except (json.JSONDecodeError, ValueError):
-        return web.json_response({"error": {"code": "invalid_json", "message": "请求 JSON 无效"}}, status=400)
-    if not isinstance(body, dict):
-        return web.json_response({"error": {"code": "invalid_json", "message": "请求 JSON 必须是对象"}}, status=400)
-    certificate_chain = body.get("certificate_chain")
-    private_key = body.get("private_key")
-    if not isinstance(certificate_chain, str) or not isinstance(private_key, str):
-        return web.json_response(
-            {"error": {"code": "invalid_tls_upload", "message": "请同时提供 PEM 格式的完整证书链和私钥"}},
-            status=400,
-        )
-    try:
-        async with request.app[TLS_UPDATE_LOCK_KEY]:
-            payload = await asyncio.to_thread(manager.replace_with_custom, certificate_chain, private_key)
-    except TLSValidationError as exc:
-        return web.json_response(
-            {"error": {"code": "invalid_tls_material", "message": str(exc)}},
-            status=400,
-        )
-    except TLSConfigurationError as exc:
-        return web.json_response(
-            {"error": {"code": "tls_reload_failed", "message": str(exc)}},
-            status=500,
-        )
-    payload["https_port"] = request.app[HTTPS_PORT_KEY]
-    return web.json_response(payload)
+async def removed_tls_admin(_request: web.Request) -> web.StreamResponse:
+    raise web.HTTPNotFound()
 
 
 async def web_asset(request: web.Request) -> web.StreamResponse:
@@ -1618,9 +1555,6 @@ def create_app(
     min_free_disk_bytes: int = 512 * 1024 * 1024,
     login_rate_limit: int = 5,
     login_rate_window_seconds: float = 60.0,
-    https_port: int = 0,
-    tls_ca_path: Path | None = None,
-    tls_manager: TLSManager | None = None,
     transcribe_audio: Callable[[str], dict[str, Any]] | None = None,
 ) -> web.Application:
     resolved_config_path = Path(config_path or (Path(storage_dir).resolve().parent / "config.json")).resolve()
@@ -1706,10 +1640,6 @@ def create_app(
     app[AUTH_STATE_KEY] = AuthState(username, password_salt, password_hash, legacy_password, revision)
     app[LOGIN_RATE_LIMITER_KEY] = LoginRateLimiter(login_rate_limit, login_rate_window_seconds)
     app[SETUP_LOCK_KEY] = asyncio.Lock()
-    app[HTTPS_PORT_KEY] = max(0, int(https_port))
-    app[TLS_MANAGER_KEY] = tls_manager
-    app[TLS_UPDATE_LOCK_KEY] = asyncio.Lock()
-    app[TLS_CA_PATH_KEY] = Path(tls_ca_path).resolve() if tls_ca_path else None
     app[MEDIA_STORE_KEY] = MediaStore(
         storage_dir,
         max_upload_bytes,
@@ -1729,15 +1659,13 @@ def create_app(
     app.on_cleanup.append(_close_client_session)
 
     app.router.add_get("/", admin_page)
-    app.router.add_get("/nexus-local-ca.crt", local_ca_certificate)
     app.router.add_get("/assets/{name}", web_asset)
     app.router.add_get("/health", health)
     app.router.add_get("/api/setup/status", setup_status)
     app.router.add_post("/api/setup", setup)
     app.router.add_post("/api/auth/login", login)
     app.router.add_put("/api/admin/account", change_account)
-    app.router.add_get("/api/admin/tls", admin_tls_status)
-    app.router.add_put("/api/admin/tls", update_admin_tls)
+    app.router.add_route("*", "/api/admin/tls", removed_tls_admin)
     app.router.add_get("/api/admin/overview", admin_overview)
     app.router.add_get("/api/admin/files", admin_files)
     app.router.add_get("/api/admin/audio", admin_audio)
