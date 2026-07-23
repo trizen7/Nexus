@@ -16,8 +16,17 @@ import okhttp3.RequestBody.Companion.toRequestBody
 import okio.BufferedSink
 import java.io.IOException
 import java.io.InputStream
+import java.net.ConnectException
+import java.net.NoRouteToHostException
 import java.net.SocketException
+import java.net.SocketTimeoutException
+import java.net.URI
+import java.net.UnknownHostException
+import java.security.cert.CertPathValidatorException
+import java.security.cert.CertificateException
 import java.util.concurrent.TimeUnit
+import javax.net.ssl.SSLHandshakeException
+import javax.net.ssl.SSLPeerUnverifiedException
 
 class HermesApiClient(
     baseUrl: String,
@@ -37,8 +46,11 @@ class HermesApiClient(
             .post(payload.toRequestBody(jsonType))
             .build()
         httpClient.newCall(request).execute().use { response ->
-            check(response.isSuccessful) { "登录失败：账号或密码错误" }
-            val root = gson.fromJson(response.body?.string().orEmpty(), JsonObject::class.java) ?: JsonObject()
+            val text = response.body?.string().orEmpty()
+            if (!response.isSuccessful) {
+                throw HermesHttpException(response.code, responseErrorMessage(text), "登录")
+            }
+            val root = gson.fromJson(text, JsonObject::class.java) ?: JsonObject()
             root.string("access_token").ifBlank { error("服务器没有返回登录凭证") }.also { token = it }
         }
     }
@@ -217,8 +229,11 @@ class HermesApiClient(
             .post(ByteArray(0).toRequestBody(null))
             .build()
         httpClient.newCall(request).execute().use { response ->
-            check(response.isSuccessful) { "停止回答失败：HTTP ${response.code}" }
-            val root = gson.fromJson(response.body?.string().orEmpty(), JsonObject::class.java) ?: JsonObject()
+            val text = response.body?.string().orEmpty()
+            if (!response.isSuccessful) {
+                throw HermesHttpException(response.code, responseErrorMessage(text), "停止回答")
+            }
+            val root = gson.fromJson(text, JsonObject::class.java) ?: JsonObject()
             root.get("stopped")?.takeUnless { it.isJsonNull }?.asBoolean ?: false
         }
     }
@@ -428,7 +443,10 @@ class HermesApiClient(
         request: Request,
         onEvent: (HermesStreamEvent) -> Unit
     ): List<HermesStreamEvent> = httpClient.newCall(request).execute().use { response ->
-        check(response.isSuccessful) { "对话请求失败：HTTP ${response.code}" }
+        if (!response.isSuccessful) {
+            val text = response.body?.string().orEmpty()
+            throw HermesHttpException(response.code, responseErrorMessage(text), "对话请求")
+        }
         val parser = HermesStreamParser()
         val events = mutableListOf<HermesStreamEvent>()
         val source = response.body?.source() ?: error("响应内容为空")
@@ -463,11 +481,18 @@ class HermesApiClient(
     private fun requestJson(builder: Request.Builder): JsonObject {
         val request = authorized(builder).build()
         httpClient.newCall(request).execute().use { response ->
-            check(response.isSuccessful) { "Hermes 请求失败：HTTP ${response.code}" }
             val text = response.body?.string().orEmpty()
+            if (!response.isSuccessful) {
+                throw HermesHttpException(response.code, responseErrorMessage(text), "Hermes 请求")
+            }
             return gson.fromJson(text, JsonObject::class.java) ?: JsonObject()
         }
     }
+
+    private fun responseErrorMessage(text: String): String? = runCatching {
+        val root = gson.fromJson(text, JsonObject::class.java) ?: return@runCatching null
+        root.objectValue("error").string("message").ifBlank { root.string("message") }.ifBlank { null }
+    }.getOrNull()
 
     private fun authorizedRequest(url: String): Request.Builder = authorized(Request.Builder().url(url))
 
@@ -493,17 +518,60 @@ class HermesApiClient(
 
 data class HermesHealth(val status: String, val version: String)
 
-private fun isConnectionAbort(error: Throwable): Boolean {
-    val message = error.message.orEmpty().lowercase()
-    return error is SocketException &&
-        ("connection abort" in message || "connection reset" in message)
+class HermesHttpException(
+    val statusCode: Int,
+    val serverMessage: String?,
+    val operation: String
+) : IOException(serverMessage?.takeIf { it.isNotBlank() } ?: "$operation 失败：HTTP $statusCode")
+
+private fun throwableChain(error: Throwable): Sequence<Throwable> =
+    generateSequence(error) { it.cause }
+
+fun requiresPasswordReauthentication(error: Throwable): Boolean =
+    throwableChain(error)
+        .filterIsInstance<HermesHttpException>()
+        .any { it.statusCode == 401 && it.operation != "登录" }
+
+private fun isConnectionAbort(error: Throwable): Boolean =
+    throwableChain(error).any { cause ->
+        cause is SocketException && cause.message.orEmpty().let { message ->
+            message.contains("connection abort", ignoreCase = true) ||
+                message.contains("connection reset", ignoreCase = true)
+        }
+    }
+
+private fun certificateConnectionMessage(serverUrl: String?): String {
+    val uri = serverUrl?.let { runCatching { URI(it) }.getOrNull() }
+    if (uri?.scheme.equals("https", ignoreCase = true) && uri?.port == 18788 && !uri.host.isNullOrBlank()) {
+        val host = uri.host.let { if (':' in it) "[$it]" else it }
+        return "HTTPS 证书校验失败。请先在手机安装 Nexus 本地 CA（http://$host:18787/nexus-local-ca.crt），或仅在可信局域网把 App 地址改为 http://$host:18787"
+    }
+    return "HTTPS 安全连接失败，请检查证书是否有效、受信任且与服务器地址匹配"
 }
 
-fun friendlyNetworkError(error: Throwable): String = when {
-    error is kotlinx.coroutines.CancellationException -> "操作已取消"
-    isConnectionAbort(error) -> app.nexus.mobile.genericConnectionInterruptedMessage()
-    error is IOException -> "网络连接异常，请稍后重试"
-    else -> error.message ?: "发生未知错误"
+fun friendlyNetworkError(error: Throwable, serverUrl: String? = null): String {
+    val causes = throwableChain(error).toList()
+    val httpError = causes.filterIsInstance<HermesHttpException>().firstOrNull()
+    return when {
+        error is kotlinx.coroutines.CancellationException -> "操作已取消"
+        httpError?.statusCode == 401 && httpError.operation == "登录" -> "登录失败：账号或密码错误"
+        httpError?.statusCode == 401 -> "登录已失效，请重新输入密码"
+        httpError != null -> httpError.serverMessage?.takeIf { it.isNotBlank() }
+            ?: "${httpError.operation}失败：HTTP ${httpError.statusCode}"
+        causes.any { it is SSLHandshakeException || it is SSLPeerUnverifiedException ||
+            it is CertPathValidatorException || it is CertificateException } -> certificateConnectionMessage(serverUrl)
+        causes.any { it is UnknownHostException } ->
+            "找不到服务器，请检查地址；本地测试 App 地址通常为 http://电脑局域网IP:18787"
+        causes.any { it is ConnectException || it is NoRouteToHostException } ->
+            "无法连接服务器，请确认电脑和手机在同一网络，并检查 IP、端口及 Gateway 是否运行"
+        causes.any { it is SocketTimeoutException } ->
+            "连接服务器超时，请检查局域网、IP 地址和端口"
+        isConnectionAbort(error) -> app.nexus.mobile.genericConnectionInterruptedMessage()
+        error is IllegalArgumentException ->
+            "服务器地址格式不正确，请填写例如 http://10.0.0.123:18787"
+        error is IOException -> "网络连接异常，请稍后重试"
+        else -> error.message ?: "发生未知错误"
+    }
 }
 
 private fun defaultHttpClient(): OkHttpClient =

@@ -44,6 +44,14 @@ class ConnectionStore(context: Context) {
             .apply()
     }
 
+    fun clearToken() {
+        preferences.edit()
+            .remove(KEY_TOKEN)
+            .remove(KEY_LEGACY_TOKEN)
+            .remove(KEY_PASSWORD)
+            .apply()
+    }
+
     fun saveActiveSession(activeSessionId: String?) {
         preferences.edit().putString(KEY_ACTIVE_SESSION, activeSessionId).apply()
     }

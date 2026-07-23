@@ -3,7 +3,7 @@ package app.nexus.mobile
 import java.net.URI
 
 fun shouldAttachBearerToken(serverUrl: String, resourceUrl: String): Boolean {
-    val server = parseHttpUri(serverUrl) ?: return false
+    val server = parseHttpUri(normalizeServerUrl(serverUrl)) ?: return false
     val candidate = runCatching { URI(resourceUrl.trim()) }.getOrNull() ?: return false
     val resource = (if (candidate.isAbsolute) parseHttpUri(resourceUrl) else server.resolve(candidate))
         ?: return false
@@ -15,8 +15,33 @@ fun shouldAttachBearerToken(serverUrl: String, resourceUrl: String): Boolean {
 fun bearerTokenFor(serverUrl: String, resourceUrl: String, token: String): String? =
     token.takeIf(String::isNotBlank)?.takeIf { shouldAttachBearerToken(serverUrl, resourceUrl) }
 
+fun normalizeServerUrl(serverUrl: String): String {
+    val trimmed = serverUrl.trim()
+    if (trimmed.isEmpty()) return ""
+    val withScheme = if (trimmed.startsWith("http://", ignoreCase = true) ||
+        trimmed.startsWith("https://", ignoreCase = true) ||
+        "://" in trimmed
+    ) {
+        trimmed
+    } else {
+        "http://$trimmed"
+    }
+    return withScheme.trimEnd('/')
+}
+
+fun serverUrlValidationError(serverUrl: String): String? {
+    val normalized = normalizeServerUrl(serverUrl)
+    if (normalized.isBlank()) return "请填写服务器地址"
+    val parsed = parseHttpUri(normalized)
+        ?: return "服务器地址格式不正确，请填写例如 http://10.0.0.123:18787"
+    if (parsed.userInfo != null || parsed.rawQuery != null || parsed.rawFragment != null) {
+        return "服务器地址不能包含账号、查询参数或锚点"
+    }
+    return null
+}
+
 fun requiresInsecureHttpConfirmation(serverUrl: String): Boolean =
-    parseHttpUri(serverUrl)?.scheme.equals("http", ignoreCase = true)
+    parseHttpUri(normalizeServerUrl(serverUrl))?.scheme.equals("http", ignoreCase = true)
 
 private fun parseHttpUri(value: String): URI? = runCatching { URI(value.trim()) }.getOrNull()
     ?.takeIf { it.scheme.equals("http", true) || it.scheme.equals("https", true) }

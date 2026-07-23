@@ -4,7 +4,7 @@ Nexus 是一个面向 Hermes Agent 的社区移动客户端与轻量移动网关
 
 项目目标是让 Hermes 核心保持原版、可独立升级，同时把移动端所需的登录、会话、附件、缓存、下载、通知和断线续接能力放在客户端与移动网关中。
 
-当前版本：0.0.4
+当前版本：0.0.5
 
 ## 组成
 
@@ -119,7 +119,7 @@ Debug APK 位于：
 android/app/build/outputs/apk/debug/app-debug.apk
 ```
 
-安装后填写移动网关地址、账号和密码即可登录。
+安装后填写移动网关地址、账号和密码即可登录。本地成品测试默认推荐填写 `http://电脑局域网IP:18787`；也可以先在 Android 系统中安装并信任 `http://电脑局域网IP:18787/nexus-local-ca.crt`，再填写完整的 `https://电脑局域网IP:18788`。从 0.0.5 起，Debug APK 会信任系统证书及用户主动安装的 CA；Release 构建仍只信任系统 CA，并会为遗漏协议的 `IP:端口` 自动补全 `http://`。
 
 ## 测试
 
@@ -139,7 +139,7 @@ scripts\local-test.cmd verify
 ```
 
 测试数据、日志和凭据全部保存在被 Git 忽略的 `.local-test/`。详细命令、升级约定和安全边界见 [`docs/local-test-environment.md`](docs/local-test-environment.md)。
-另有独立的成品验收环境 `成品\本地测试环境\`：它只运行已构建的 Gateway ZIP，不读取源码，不调用 Docker。HTTP `18787` 供 Android/兼容 API 使用，HTTPS `18788` 供网页使用；`scripts\sync-product-test-environment.cmd` 只同步控制脚本和说明，不修改该环境的账号、配置、媒体、虚拟环境、日志、状态或本地 HTTPS CA。
+另有独立的成品验收环境 `成品\本地测试环境\`：它只运行已构建的 Gateway ZIP，不读取源码，不调用 Docker。HTTP `18787` 是 Android/兼容 API 的默认入口；安装并信任本地 CA 后，Android App 与网页也可使用 HTTPS `18788`。`scripts\sync-product-test-environment.cmd` 只同步控制脚本和说明，不修改该环境的账号、配置、媒体、虚拟环境、日志、状态或本地 HTTPS CA。
 
 ### 手动测试命令
 

@@ -15,6 +15,7 @@ import app.nexus.mobile.network.HermesModel
 import app.nexus.mobile.network.HermesSession
 import app.nexus.mobile.network.HermesStreamEvent
 import app.nexus.mobile.network.friendlyNetworkError
+import app.nexus.mobile.network.requiresPasswordReauthentication
 import kotlinx.coroutines.Job
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.isActive
@@ -159,8 +160,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun connect() {
-        if (requiresInsecureHttpConfirmation(_uiState.value.serverUrl)) {
-            _uiState.update { it.copy(insecureHttpConfirmationPending = true, error = null) }
+        val normalizedUrl = normalizeServerUrl(_uiState.value.serverUrl)
+        serverUrlValidationError(normalizedUrl)?.let { message ->
+            _uiState.update { it.copy(serverUrl = normalizedUrl, error = message) }
+            return
+        }
+        _uiState.update { it.copy(serverUrl = normalizedUrl, error = null) }
+        if (requiresInsecureHttpConfirmation(normalizedUrl)) {
+            _uiState.update { it.copy(insecureHttpConfirmationPending = true) }
             return
         }
         connectConfirmed()
@@ -177,14 +184,26 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     private fun connectConfirmed() {
         val snapshot = _uiState.value
-        if (snapshot.serverUrl.isBlank() || snapshot.username.isBlank() || (snapshot.token.isBlank() && snapshot.password.isBlank())) {
-            _uiState.update { it.copy(error = "请填写服务器、账号和密码") }
+        val normalizedUrl = normalizeServerUrl(snapshot.serverUrl)
+        if (normalizedUrl.isBlank() || snapshot.username.isBlank() || (snapshot.token.isBlank() && snapshot.password.isBlank())) {
+            _uiState.update { it.copy(serverUrl = normalizedUrl, error = "请填写服务器、账号和密码") }
+            return
+        }
+        serverUrlValidationError(normalizedUrl)?.let { message ->
+            _uiState.update { it.copy(serverUrl = normalizedUrl, error = message) }
             return
         }
         viewModelScope.launch {
-            _uiState.update { it.copy(connectionStatus = ConnectionStatus.CONNECTING, loading = true, error = null) }
+            _uiState.update {
+                it.copy(
+                    serverUrl = normalizedUrl,
+                    connectionStatus = ConnectionStatus.CONNECTING,
+                    loading = true,
+                    error = null
+                )
+            }
             runCatching {
-                val api = HermesApiClient(snapshot.serverUrl, snapshot.token)
+                val api = HermesApiClient(normalizedUrl, snapshot.token)
                 val accessToken = snapshot.token.ifBlank { api.login(snapshot.username, snapshot.password) }
                 val health = api.health()
                 val sessions = visibleSessions(api.listSessions())
@@ -192,7 +211,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 Triple(accessToken, health, sessions)
             }.onSuccess { (accessToken, health, sessions) ->
                 val selected = resolveVisibleActiveSessionId(sessions, _uiState.value.activeSessionId)
-                connectionStore.saveLogin(snapshot.serverUrl, snapshot.username, accessToken, selected)
+                connectionStore.saveLogin(normalizedUrl, snapshot.username, accessToken, selected)
                 _uiState.update {
                     it.copy(
                         password = "",
@@ -211,11 +230,17 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     refreshActiveRunStatus()
                 } else createSession()
             }.onFailure { error ->
+                val tokenExpired = snapshot.token.isNotBlank() && requiresPasswordReauthentication(error)
+                if (tokenExpired) {
+                    connectionStore.clearToken()
+                    client = null
+                }
                 _uiState.update {
                     it.copy(
+                        token = if (tokenExpired) "" else it.token,
                         connectionStatus = ConnectionStatus.FAILED,
                         loading = false,
-                        error = error.message ?: "连接失败"
+                        error = friendlyNetworkError(error, normalizedUrl)
                     )
                 }
             }
@@ -1527,7 +1552,28 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     private fun showError(error: Throwable) {
-        _uiState.update { it.copy(error = friendlyNetworkError(error)) }
+        val serverUrl = _uiState.value.serverUrl
+        val message = friendlyNetworkError(error, serverUrl)
+        if (requiresPasswordReauthentication(error)) {
+            stopPolling()
+            connectionStore.clearToken()
+            client = null
+            RunMonitorService.cancelAll(getApplication())
+            _uiState.update {
+                it.copy(
+                    password = "",
+                    token = "",
+                    connectionStatus = ConnectionStatus.FAILED,
+                    loading = false,
+                    streaming = false,
+                    thinking = false,
+                    toolStatus = null,
+                    error = message
+                )
+            }
+        } else {
+            _uiState.update { it.copy(error = message) }
+        }
     }
 
     class Factory(

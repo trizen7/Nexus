@@ -8,6 +8,7 @@ import java.io.IOException
 import java.net.SocketException
 import org.junit.After
 import org.junit.Assert.assertEquals
+import org.junit.Assert.assertFalse
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
@@ -277,6 +278,57 @@ class HermesApiClientTest {
         val message = friendlyNetworkError(SocketException("Software caused connection abort"))
 
         assertEquals("网络连接中断，请稍后重试", message)
+    }
+
+    @Test
+    fun `login maps unauthorized response to credential error`() = runTest {
+        server.enqueue(
+            MockResponse()
+                .setResponseCode(401)
+                .setHeader("Content-Type", "application/json")
+                .setBody("{\"error\":{\"code\":\"invalid_credentials\",\"message\":\"bad credentials\"}}")
+        )
+        val client = HermesApiClient(server.url("/").toString())
+
+        val error = runCatching { client.login("nexus", "wrong") }.exceptionOrNull()
+
+        assertTrue(error is HermesHttpException)
+        assertEquals("登录失败：账号或密码错误", friendlyNetworkError(error!!))
+        assertFalse(requiresPasswordReauthentication(error))
+    }
+
+    @Test
+    fun `expired device token asks for password again`() = runTest {
+        server.enqueue(
+            MockResponse()
+                .setResponseCode(401)
+                .setHeader("Content-Type", "application/json")
+                .setBody("{\"error\":{\"code\":\"unauthorized\",\"message\":\"expired\"}}")
+        )
+        val client = HermesApiClient(server.url("/").toString(), "expired-token")
+
+        val error = runCatching { client.listSessions() }.exceptionOrNull()
+
+        assertEquals("登录已失效，请重新输入密码", friendlyNetworkError(error!!))
+        assertTrue(requiresPasswordReauthentication(error))
+    }
+
+    @Test
+    fun `local https certificate error includes actionable recovery`() {
+        val message = friendlyNetworkError(
+            javax.net.ssl.SSLHandshakeException("Trust anchor for certification path not found"),
+            "https://10.0.0.123:18788"
+        )
+
+        assertTrue(message.contains("nexus-local-ca.crt"))
+        assertTrue(message.contains("http://10.0.0.123:18787"))
+    }
+
+    @Test
+    fun `unknown host points local users to app api port`() {
+        val message = friendlyNetworkError(java.net.UnknownHostException("nexus.local"))
+
+        assertTrue(message.contains("18787"))
     }
 
     @Test

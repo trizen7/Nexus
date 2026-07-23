@@ -390,14 +390,15 @@ private fun ConnectionScreen(state: MainUiState, viewModel: MainViewModel) {
         ) {
             Column(Modifier.padding(22.dp)) {
                 Text("连接Nexus", fontSize = 19.sp, fontWeight = FontWeight.SemiBold, color = primaryInk())
-                Text("App 与文件管理页面使用同一账号", fontSize = 12.sp, color = mutedInk())
+                Text("App 与 HTTPS 网页使用同一账号，但本地测试端口不同", fontSize = 12.sp, color = mutedInk())
                 Spacer(Modifier.height(18.dp))
                 OutlinedTextField(
                     value = state.serverUrl,
                     onValueChange = { viewModel.updateConnection(it, state.username, state.password) },
                     modifier = Modifier.fillMaxWidth(),
-                    label = { Text("服务器地址") },
-                    placeholder = { Text("https://你的Nexus地址/") },
+                    label = { Text("Nexus API 地址") },
+                    placeholder = { Text("http://电脑局域网IP:18787") },
+                    supportingText = { Text("推荐 App 用 HTTP 18787；网页用 HTTPS 18788，安装 CA 后 App 也可用 HTTPS") },
                     singleLine = true,
                     shape = RoundedCornerShape(14.dp)
                 )

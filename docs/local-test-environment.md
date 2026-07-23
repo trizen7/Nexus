@@ -36,10 +36,10 @@ scripts\sync-product-test-environment.cmd
 
 端口约定：
 
-- `http://127.0.0.1:18787`：Android 和兼容 API；
-- `https://127.0.0.1:18788`：本机网页；
+- `http://127.0.0.1:18787`：Android 和兼容 API 的默认入口；
 - `http://局域网IP:18787/nexus-local-ca.crt`：其他测试设备下载本地 CA；
-- `https://局域网IP:18788`：其他设备安装并信任 CA 后访问网页。
+- `https://127.0.0.1:18788`：本机网页；
+- `https://局域网IP:18788`：其他设备安装并信任 CA 后访问网页；Android 0.0.5 Debug APK 及以上测试包也可使用该地址。
 
 `manage.ps1 upgrade` 只替换已解压应用并同步依赖，不会执行 reset。服务器证书会在局域网 IP 改变时由原 CA 重新签发，CA 本身保持不变；若 CA 文件残缺，脚本会停止并要求恢复备份，而不会静默替换已经信任的根证书。
 

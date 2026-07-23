@@ -34,6 +34,19 @@ class NetworkTaskSafetyTest {
     }
 
     @Test
+    fun `bare local address is normalized to confirmed http url`() {
+        assertEquals("http://10.0.0.123:18787", normalizeServerUrl(" 10.0.0.123:18787/ "))
+        assertTrue(requiresInsecureHttpConfirmation("10.0.0.123:18787"))
+        assertNull(serverUrlValidationError("10.0.0.123:18787"))
+    }
+
+    @Test
+    fun `server address rejects unsupported schemes and query parameters`() {
+        assertTrue(serverUrlValidationError("ftp://10.0.0.123/file") != null)
+        assertTrue(serverUrlValidationError("https://nexus.example.com/?token=secret") != null)
+    }
+
+    @Test
     fun `monitor registry keeps different sessions and replaces only duplicate session`() {
         val registry = SessionMonitorRegistry<String>()
 
