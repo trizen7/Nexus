@@ -412,7 +412,15 @@ class HermesApiClient(
                 }
             }
         }
-        val body = mutableMapOf<String, Any>("message" to userContent)
+        val body = mutableMapOf<String, Any>(
+            "message" to userContent,
+            "client_context" to mapOf(
+                "platform" to "android",
+                "form_factor" to "phone",
+                "supports_direct_local_paths" to false,
+                "supports_drag_and_drop" to false
+            )
+        )
         if (attachmentIds.isNotEmpty()) body["attachment_ids"] = attachmentIds
         if (attachmentKinds.isNotEmpty()) body["attachment_kinds"] = attachmentKinds
         personaModel?.trim()?.takeIf { it.isNotEmpty() }?.let { body["persona_model"] = it }

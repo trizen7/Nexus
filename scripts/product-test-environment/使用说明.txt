@@ -24,6 +24,7 @@ Hermes 原版只读边界
 Android 连接
 - App 可填写显式 http:// 或 https:// 地址，不再按公网/私网强制 HTTPS，也不要求安装证书。
 - App 支持一次选择多个文件；调用模型和推理深度按对话保存，人物模型仍为全局设定。
+- App 会声明 Android 手机端能力；Gateway 只通过原版 Hermes HTTP API 注入本轮提示，避免把 Hermes 主机路径、桌面拖拽或电脑快捷键当作手机可用的文件发送方式。
 - 外网建议填写反向代理提供的 https://域名；如果明确填写公网 HTTP，App 也会连接，但账号、密码、消息和 Token 会以明文传输。
 - 旧保存的 https://私网IP:18788 会自动迁移为 http://私网IP:18787。
 
@@ -31,7 +32,7 @@ Android 连接
 1. 双击 01-打开初始化页面.cmd。
 2. 浏览器打开 http://127.0.0.1:18787。
 3. 按页面提示输入 data\bootstrap.token 中的一次性初始化令牌，并设置管理员账号、密码、Hermes API 地址和 Hermes API Server Key。
-4. 在手机安装父目录中的 Nexus-Android-0.0.9-debug.apk。
+4. 在手机安装父目录中的 Nexus-Android-0.0.10-debug.apk。
 5. App 在局域网填写 http://电脑局域网IP:18787，再输入 Nexus 管理员账号和密码。
 
 控制文件

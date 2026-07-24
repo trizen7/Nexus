@@ -455,6 +455,7 @@ class HermesApiClientTest {
 
         val json = com.google.gson.JsonParser.parseString(server.takeRequest().body.readUtf8()).asJsonObject
         assertEquals("file-1", json.getAsJsonArray("attachment_ids")[0].asString)
+        assertAndroidPhoneContext(json)
     }
 
     @Test
@@ -634,6 +635,7 @@ class HermesApiClientTest {
         assertEquals("gpt-5.6-sol", body.get("inference_model").asString)
         assertEquals("high", body.get("reasoning_effort").asString)
         assertEquals(false, body.has("model"))
+        assertAndroidPhoneContext(body)
     }
 
     @Test
@@ -650,6 +652,15 @@ class HermesApiClientTest {
 
         val body = com.google.gson.JsonParser.parseString(server.takeRequest().body.readUtf8()).asJsonObject
         assertFalse(body.has("reasoning_effort"))
+        assertAndroidPhoneContext(body)
+    }
+
+    private fun assertAndroidPhoneContext(body: com.google.gson.JsonObject) {
+        val context = body.getAsJsonObject("client_context")
+        assertEquals("android", context.get("platform").asString)
+        assertEquals("phone", context.get("form_factor").asString)
+        assertFalse(context.get("supports_direct_local_paths").asBoolean)
+        assertFalse(context.get("supports_drag_and_drop").asBoolean)
     }
 
     private fun requestSignature(request: okhttp3.mockwebserver.RecordedRequest): String =

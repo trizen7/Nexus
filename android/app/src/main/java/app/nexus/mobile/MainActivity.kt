@@ -31,6 +31,7 @@ import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
+import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.WindowInsets
@@ -47,6 +48,7 @@ import androidx.compose.foundation.lazy.LazyRow
 import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.lazy.rememberLazyListState
 import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.text.KeyboardActions
 import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.text.selection.SelectionContainer
@@ -112,7 +114,9 @@ import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.vector.ImageVector
+import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalConfiguration
@@ -420,55 +424,51 @@ private fun ConnectionScreen(state: MainUiState, viewModel: MainViewModel) {
                 .statusBarsPadding()
                 .navigationBarsPadding()
                 .imePadding()
-                .padding(horizontal = 20.dp, vertical = 16.dp),
+                .padding(horizontal = 18.dp, vertical = 4.dp),
             verticalArrangement = Arrangement.Top
         ) {
-            Surface(
-                modifier = Modifier.size(54.dp),
-                shape = RoundedCornerShape(21.dp),
-                color = MaterialTheme.colorScheme.primary,
-                shadowElevation = 8.dp
-            ) {
-                Box(contentAlignment = Alignment.Center) {
-                    Text("N", color = MaterialTheme.colorScheme.onPrimary, fontSize = 27.sp, fontWeight = FontWeight.Bold)
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Surface(
+                    modifier = Modifier.size(36.dp),
+                    shape = RoundedCornerShape(13.dp),
+                    color = MaterialTheme.colorScheme.primary,
+                    shadowElevation = 4.dp
+                ) {
+                    Box(contentAlignment = Alignment.Center) {
+                        Text("N", color = MaterialTheme.colorScheme.onPrimary, fontSize = 19.sp, fontWeight = FontWeight.Bold)
+                    }
+                }
+                Spacer(Modifier.width(9.dp))
+                Column {
+                    Text("Nexus", style = MaterialTheme.typography.titleLarge)
+                    Text("连接 Hermes，继续你的工作", color = mutedInk(), style = MaterialTheme.typography.bodySmall)
                 }
             }
-            Spacer(Modifier.height(14.dp))
-            Text("欢迎使用 Nexus", style = MaterialTheme.typography.headlineLarge)
-            Text(
-                "连接 Hermes，随时继续你的工作",
-                color = mutedInk(),
-                style = MaterialTheme.typography.bodyLarge
-            )
-            Spacer(Modifier.height(18.dp))
+            Spacer(Modifier.height(6.dp))
 
             Card(
-                shape = RoundedCornerShape(28.dp),
+                shape = RoundedCornerShape(22.dp),
                 colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-                elevation = CardDefaults.cardElevation(defaultElevation = 4.dp)
+                elevation = CardDefaults.cardElevation(defaultElevation = 3.dp)
             ) {
-                Column(Modifier.padding(horizontal = 20.dp, vertical = 22.dp)) {
-                    Text("登录", style = MaterialTheme.typography.titleLarge)
-                    Spacer(Modifier.height(4.dp))
-                    Text(
-                        "支持 HTTP 或 HTTPS，可填写 IP、域名和端口",
-                        style = MaterialTheme.typography.bodySmall,
-                        color = mutedInk()
-                    )
-                    Spacer(Modifier.height(20.dp))
+                Column(Modifier.padding(horizontal = 16.dp, vertical = 14.dp)) {
+                    Row(verticalAlignment = Alignment.CenterVertically) {
+                        Text("登录信息", style = MaterialTheme.typography.titleMedium, modifier = Modifier.weight(1f))
+                        Text("HTTP / HTTPS", style = MaterialTheme.typography.bodySmall, color = mutedInk())
+                    }
+                    Spacer(Modifier.height(8.dp))
                     OutlinedTextField(
                         value = serverUrl,
                         onValueChange = { serverUrl = it; clearVisibleError() },
                         modifier = Modifier.fillMaxWidth(),
                         label = { Text("Nexus 地址") },
                         placeholder = { Text("http://服务器地址:18787") },
-                        supportingText = { Text("例如：http://10.0.0.123:18787") },
                         singleLine = true,
                         keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri, imeAction = ImeAction.Next),
                         keyboardActions = KeyboardActions(onNext = { usernameFocusRequester.requestFocus() }),
                         shape = RoundedCornerShape(16.dp)
                     )
-                    Spacer(Modifier.height(10.dp))
+                    Spacer(Modifier.height(8.dp))
                     OutlinedTextField(
                         value = username,
                         onValueChange = { username = it; clearVisibleError() },
@@ -481,7 +481,7 @@ private fun ConnectionScreen(state: MainUiState, viewModel: MainViewModel) {
                         keyboardActions = KeyboardActions(onNext = { passwordFocusRequester.requestFocus() }),
                         shape = RoundedCornerShape(16.dp)
                     )
-                    Spacer(Modifier.height(10.dp))
+                    Spacer(Modifier.height(8.dp))
                     OutlinedTextField(
                         value = password,
                         onValueChange = { password = it; clearVisibleError() },
@@ -506,13 +506,13 @@ private fun ConnectionScreen(state: MainUiState, viewModel: MainViewModel) {
                         keyboardActions = KeyboardActions(onDone = { submit() }),
                         shape = RoundedCornerShape(16.dp)
                     )
-                    Spacer(Modifier.height(18.dp))
+                    Spacer(Modifier.height(12.dp))
                     Button(
                         onClick = { submit() },
                         enabled = canSubmit,
                         modifier = Modifier
                             .fillMaxWidth()
-                            .height(52.dp),
+                            .height(48.dp),
                         shape = RoundedCornerShape(16.dp)
                     ) {
                         if (connecting) {
@@ -626,7 +626,7 @@ private fun ChatScreen(state: MainUiState, viewModel: MainViewModel) {
             val imeVisible = WindowInsets.isImeVisible
             LaunchedEffect(imeVisible) {
                 if (imeVisible && state.messages.isNotEmpty()) {
-                    listState.scrollToItem(latestLazyListIndex(state.messages.size))
+                    listState.requestScrollToItem(latestLazyListIndex(state.messages.size))
                 }
             }
             LaunchedEffect(listState) {
@@ -672,7 +672,7 @@ private fun ChatScreen(state: MainUiState, viewModel: MainViewModel) {
                 if (!state.loading && state.messages.isNotEmpty() &&
                     (state.streaming || state.thinking) && closeToBottom && !state.loadingOlder
                 ) {
-                    listState.scrollToItem(latestLazyListIndex(state.messages.size))
+                    listState.requestScrollToItem(latestLazyListIndex(state.messages.size))
                 }
             }
             val visibleMessages = remember(state.messages) { state.messages.filter(::shouldRenderMessageBubble) }
@@ -926,29 +926,77 @@ private fun ChatTextInput(
     viewModel: MainViewModel
 ) {
     val input by viewModel.input.collectAsState()
-    OutlinedTextField(
+    val focusRequester = remember { FocusRequester() }
+    val keyboardController = LocalSoftwareKeyboardController.current
+    var focused by remember { mutableStateOf(false) }
+    val shape = RoundedCornerShape(20.dp)
+    val cursorColor = MaterialTheme.colorScheme.primary
+    val borderColor = if (focused) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outline
+
+    BasicTextField(
         value = input,
         onValueChange = viewModel::updateInput,
-        modifier = modifier.onFocusChanged { focusState ->
-            if (focusState.isFocused && state.featurePanelOpen) viewModel.closeFeaturePanel()
-        },
-        placeholder = { Text("和 Nexus 说点什么……", color = mutedInk()) },
+        modifier = modifier
+            .focusRequester(focusRequester)
+            .onFocusChanged { focusState ->
+                focused = focusState.isFocused
+                if (focusState.isFocused && state.featurePanelOpen) viewModel.closeFeaturePanel()
+            }
+            .pointerInput(state.featurePanelOpen) {
+                awaitPointerEventScope {
+                    while (true) {
+                        val event = awaitPointerEvent(PointerEventPass.Initial)
+                        if (event.changes.any { change -> change.pressed && !change.previousPressed }) {
+                            if (state.featurePanelOpen) viewModel.closeFeaturePanel()
+                            focusRequester.requestFocus()
+                            keyboardController?.show()
+                        }
+                    }
+                }
+            },
+        textStyle = MaterialTheme.typography.bodyLarge.copy(color = MaterialTheme.colorScheme.onSurface),
+        cursorBrush = SolidColor(cursorColor),
         minLines = 1,
         maxLines = 4,
-        shape = RoundedCornerShape(20.dp),
-        trailingIcon = {
-            if (state.streaming) {
-                IconButton(onClick = viewModel::stopStreaming) {
-                    Icon(Icons.Filled.StopCircle, contentDescription = "停止生成", tint = primaryInk())
+        keyboardOptions = KeyboardOptions(imeAction = ImeAction.Default),
+        decorationBox = { innerTextField ->
+            Row(
+                modifier = Modifier
+                    .fillMaxWidth()
+                    .heightIn(min = 50.dp)
+                    .background(MaterialTheme.colorScheme.surface, shape)
+                    .border(1.dp, borderColor, shape)
+                    .padding(start = 14.dp, end = 2.dp),
+                verticalAlignment = Alignment.Bottom
+            ) {
+                Box(
+                    modifier = Modifier
+                        .weight(1f)
+                        .padding(vertical = 13.dp)
+                ) {
+                    if (input.isEmpty()) {
+                        Text(
+                            "和 Nexus 说点什么……",
+                            color = mutedInk(),
+                            style = MaterialTheme.typography.bodyLarge
+                        )
+                    }
+                    innerTextField()
                 }
-            } else if (canSendComposition(input, state.pendingImages.map(ChatImage::id), state.pendingFiles.map { it.id })) {
-                IconButton(onClick = viewModel::send) {
-                    Icon(Icons.AutoMirrored.Filled.Send, contentDescription = "发送", tint = primaryInk())
+                if (state.streaming) {
+                    IconButton(onClick = viewModel::stopStreaming) {
+                        Icon(Icons.Filled.StopCircle, contentDescription = "停止生成", tint = primaryInk())
+                    }
+                } else if (canSendComposition(input, state.pendingImages.map(ChatImage::id), state.pendingFiles.map { it.id })) {
+                    IconButton(onClick = viewModel::send) {
+                        Icon(Icons.AutoMirrored.Filled.Send, contentDescription = "发送", tint = primaryInk())
+                    }
                 }
             }
         }
     )
 }
+
 
 @Composable
 private fun PendingFileStrip(
@@ -1299,13 +1347,13 @@ private fun SessionDrawer(
     Column(
         Modifier
             .fillMaxHeight()
-            .fillMaxWidth(0.76f)
-            .widthIn(max = 304.dp)
-            .clip(RoundedCornerShape(topEnd = 28.dp, bottomEnd = 28.dp))
+            .fillMaxWidth(0.58f)
+            .widthIn(max = 220.dp)
+            .clip(RoundedCornerShape(topEnd = 20.dp, bottomEnd = 20.dp))
             .background(MaterialTheme.colorScheme.surface)
             .statusBarsPadding()
             .clickable(enabled = false) {}
-            .padding(horizontal = 10.dp, vertical = 8.dp)
+            .padding(horizontal = 6.dp, vertical = 6.dp)
     ) {
         Row(verticalAlignment = Alignment.CenterVertically) {
             Text("对话", fontSize = 20.sp, fontWeight = FontWeight.SemiBold, color = primaryInk(), modifier = Modifier.weight(1f))

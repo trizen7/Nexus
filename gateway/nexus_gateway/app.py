@@ -49,6 +49,15 @@ LOGIN_RATE_LIMITER_KEY = web.AppKey("login_rate_limiter", object)
 SETUP_LOCK_KEY = web.AppKey("setup_lock", asyncio.Lock)
 TOKEN_TTL_SECONDS = 30 * 24 * 60 * 60
 ALLOWED_REASONING_EFFORTS = {"none", "minimal", "low", "medium", "high", "xhigh", "max", "ultra"}
+MOBILE_CLIENT_CONTEXT_MARKER = "[NEXUS MOBILE CLIENT CONTEXT]"
+MOBILE_CLIENT_SYSTEM_MESSAGE = f"""{MOBILE_CLIENT_CONTEXT_MARKER}
+当前用户正通过 Nexus Android 手机客户端操作。
+交互约束：
+- 不要要求或假设用户能够访问 Hermes 运行主机的本地文件系统、桌面路径、拖拽区域、剪贴板或电脑快捷键。
+- 本轮消息中的图片和文件均来自手机端附件；应直接根据消息内提供的图片、文件名、类型和可读内容处理，不要要求用户改用电脑重新上传。
+- 需要向用户交付图片或文件时，只能在回复中直接呈现内容，或提供手机可访问的 HTTP/HTTPS 下载地址。不得把 Hermes 主机本地路径（例如 /tmp/...、C:/... 或 sandbox:/...）当作已发送的文件。
+- 如果当前 API 无法把生成的二进制文件交付给手机，必须明确说明限制，并提供可在手机上完成的替代方案或可复制内容。
+- 操作步骤应按 Android 触屏方式表述。"""
 PUBLIC_PATHS = {
     "/",
     "/health",
@@ -989,11 +998,41 @@ async def delete_file(request: web.Request) -> web.Response:
     return web.json_response({"object": "nexus.file.deleted", "id": request.match_info["file_id"], "deleted": True})
 
 
-def _attachment_part(item: StoredFile, path: Path, kind: str | None = None) -> dict[str, Any]:
+def _is_mobile_client_context(value: Any) -> bool:
+    if not isinstance(value, dict):
+        return False
+    platform = str(value.get("platform", "")).strip().lower()
+    form_factor = str(value.get("form_factor", "")).strip().lower()
+    return platform == "android" and form_factor in {"", "phone", "tablet", "mobile", "handset"}
+
+
+def _merge_system_message(existing: Any, required_context: str) -> str:
+    existing_text = existing.strip() if isinstance(existing, str) else ""
+    return f"{required_context}\n\n{existing_text}" if existing_text else required_context
+
+
+def _apply_client_context(body: dict[str, Any]) -> bool:
+    mobile_client = _is_mobile_client_context(body.pop("client_context", None))
+    if mobile_client:
+        body["system_message"] = _merge_system_message(
+            body.get("system_message"),
+            MOBILE_CLIENT_SYSTEM_MESSAGE,
+        )
+    return mobile_client
+
+
+def _attachment_part(
+    item: StoredFile,
+    path: Path,
+    kind: str | None = None,
+    mobile_client: bool = False,
+) -> dict[str, Any]:
     if item.mime_type in IMAGE_MIME_TYPES and kind != "file":
         encoded = base64.b64encode(path.read_bytes()).decode("ascii")
         return {"type": "image_url", "image_url": {"url": f"data:{item.mime_type};base64,{encoded}"}}
     note = f"附件：{item.name}\n类型：{item.mime_type}\n大小：{item.size} 字节"
+    if mobile_client:
+        note += "\n来源：Nexus Android 手机端附件"
     if item.mime_type in TEXT_MIME_TYPES and item.size <= 512 * 1024:
         try:
             text = path.read_text(encoding="utf-8")
@@ -1003,7 +1042,11 @@ def _attachment_part(item: StoredFile, path: Path, kind: str | None = None) -> d
     return {"type": "text", "text": note}
 
 
-async def _prepare_chat_body(request: web.Request, body: dict[str, Any]) -> dict[str, Any]:
+async def _prepare_chat_body(
+    request: web.Request,
+    body: dict[str, Any],
+    mobile_client: bool = False,
+) -> dict[str, Any]:
     attachment_ids = body.pop("attachment_ids", [])
     attachment_kinds = body.pop("attachment_kinds", {})
     if not isinstance(attachment_ids, list):
@@ -1024,7 +1067,13 @@ async def _prepare_chat_body(request: web.Request, body: dict[str, Any]) -> dict
         found = request.app[MEDIA_STORE_KEY].get(file_id)
         if found is None:
             raise web.HTTPBadRequest(text=json.dumps({"error": {"code": "attachment_not_found", "message": f"附件不存在：{file_id}"}}, ensure_ascii=False), content_type="application/json")
-        parts.append(_attachment_part(*found, kind=str(attachment_kinds.get(file_id, ""))))
+        parts.append(
+            _attachment_part(
+                *found,
+                kind=str(attachment_kinds.get(file_id, "")),
+                mobile_client=mobile_client,
+            )
+        )
     session_match = re.fullmatch(r"/api/sessions/([^/]+)/chat(?:/stream)?", request.path)
     if session_match:
         request.app[MEDIA_STORE_KEY].record_session_media(
@@ -1038,14 +1087,17 @@ async def _prepare_chat_body(request: web.Request, body: dict[str, Any]) -> dict
 
 
 def _is_internal_runtime_message(message: dict[str, Any]) -> bool:
-    if str(message.get("role", "")).lower() != "user":
-        return False
+    role = str(message.get("role", "")).lower()
     content = message.get("content", "")
     if isinstance(content, list):
         content = "\n".join(
             str(part.get("text", "")) for part in content if isinstance(part, dict) and part.get("type") in {"text", "input_text"}
         )
     normalized = str(content).lstrip().lower()
+    if normalized.startswith(MOBILE_CLIENT_CONTEXT_MARKER.lower()):
+        return True
+    if role != "user":
+        return False
     return normalized.startswith((
         "[context compaction",
         "[important: you are running as a scheduled cron job",
@@ -1121,7 +1173,8 @@ async def proxy(request: web.Request) -> web.StreamResponse:
                 body = await request.json()
             except (json.JSONDecodeError, ValueError):
                 return web.json_response({"error": {"code": "invalid_json", "message": "请求 JSON 无效"}}, status=400)
-            body = await _prepare_chat_body(request, body)
+            mobile_client = _apply_client_context(body)
+            body = await _prepare_chat_body(request, body, mobile_client=mobile_client)
             body_bytes = json.dumps(body, ensure_ascii=False).encode("utf-8")
         else:
             body_bytes = await request.read()
@@ -1272,7 +1325,8 @@ async def _tracked_session_stream(request: web.Request) -> web.StreamResponse:
         body = await request.json()
     except (json.JSONDecodeError, ValueError):
         return web.json_response({"error": {"code": "invalid_json", "message": "请求 JSON 无效"}}, status=400)
-    body = await _prepare_chat_body(request, body)
+    mobile_client = _apply_client_context(body)
+    body = await _prepare_chat_body(request, body, mobile_client=mobile_client)
     legacy_model = str(body.pop("model", "") or "").strip()
     persona_model = str(body.pop("persona_model", "") or "").strip()
     inference_model = str(body.pop("inference_model", "") or "").strip() or legacy_model
@@ -1288,10 +1342,15 @@ async def _tracked_session_stream(request: web.Request) -> web.StreamResponse:
         reasoning_effort = raw_reasoning_effort.strip().lower()
     use_model_route = bool(inference_model)
     if use_model_route:
+        messages: list[dict[str, Any]] = []
+        system_message = body.pop("system_message", None)
+        if isinstance(system_message, str) and system_message.strip():
+            messages.append({"role": "system", "content": system_message.strip()})
+        messages.append({"role": "user", "content": body.get("message", "")})
         upstream_body = {
             "model": inference_model,
             "stream": True,
-            "messages": [{"role": "user", "content": body.get("message", "")}],
+            "messages": messages,
         }
         if reasoning_effort is not None:
             upstream_body["reasoning_effort"] = reasoning_effort

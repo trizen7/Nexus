@@ -18,6 +18,8 @@ from nexus_gateway.app import (
     CREDENTIALS_PATH_KEY,
     GATEWAY_CONFIG_KEY,
     MEDIA_STORE_KEY,
+    MOBILE_CLIENT_CONTEXT_MARKER,
+    MOBILE_CLIENT_SYSTEM_MESSAGE,
     SETUP_LOCK_KEY,
     MediaStore,
     RunTracker,
@@ -96,6 +98,7 @@ async def upstream_client():
         assert request.headers["Authorization"] == "Bearer upstream-secret"
         data = [
             {"id": "internal", "role": "user", "content": "[CONTEXT COMPACTION — REFERENCE ONLY] hidden"},
+            {"id": "mobile-context", "role": "system", "content": f"{MOBILE_CLIENT_CONTEXT_MARKER}\nhidden"},
             {"id": "m1", "role": "user", "content": [
                 {"type": "text", "text": "看看"},
                 {"type": "text", "text": "附件：photo.png\n类型：image/png\n大小：5 字节\n服务器路径：C:/private/photo.png"},
@@ -127,6 +130,7 @@ async def upstream_client():
     app.router.add_patch("/api/sessions/{session_id}", update_session)
     app.router.add_delete("/api/sessions/{session_id}", delete_session)
     app.router.add_get("/api/sessions/{session_id}/messages", messages)
+    app.router.add_post("/api/sessions/{session_id}/chat", chat)
     app.router.add_post("/api/sessions/{session_id}/chat/stream", chat)
     app.router.add_post("/v1/chat/completions", chat_completions)
     server = TestServer(app)
@@ -1422,6 +1426,7 @@ async def test_public_message_pagination_excludes_internal_user_and_tool_records
     body = await response.json()
     assert [item["role"] for item in body["data"]] == ["user", "assistant"]
     assert [item["id"] for item in body["data"]] == ["m1", "m2"]
+    assert all(MOBILE_CLIENT_CONTEXT_MARKER not in str(item.get("content", "")) for item in body["data"])
     assert body["pagination"] == {"total": 2, "offset": 0, "limit": 10, "has_more": False}
 
 
@@ -1545,6 +1550,149 @@ async def test_audio_upload_is_transcribed_on_server(gateway_client: TestClient)
     audio = await gateway_client.get("/api/admin/audio", headers=await auth_headers(gateway_client))
     assert (await files.json())["data"] == []
     assert len((await audio.json())["data"]) == 1
+
+
+def mobile_client_context() -> dict[str, object]:
+    return {
+        "platform": "android",
+        "form_factor": "phone",
+        "supports_direct_local_paths": False,
+        "supports_drag_and_drop": False,
+    }
+
+
+@pytest.mark.asyncio
+async def test_mobile_client_context_is_consumed_and_forwarded_as_ephemeral_system_message(
+    gateway_client: TestClient,
+    upstream_client: TestClient,
+):
+    response = await gateway_client.post(
+        "/api/sessions/session-1/chat/stream",
+        json={"message": "手机操作", "client_context": mobile_client_context()},
+        headers=await auth_headers(gateway_client),
+    )
+
+    assert response.status == 200
+    await response.text()
+    assert upstream_client.captured_chat == {
+        "message": "手机操作",
+        "system_message": MOBILE_CLIENT_SYSTEM_MESSAGE,
+    }
+    assert "client_context" not in upstream_client.captured_chat
+
+
+@pytest.mark.asyncio
+async def test_mobile_client_context_merges_existing_system_message(
+    gateway_client: TestClient,
+    upstream_client: TestClient,
+):
+    response = await gateway_client.post(
+        "/api/sessions/session-1/chat/stream",
+        json={
+            "message": "保留提示",
+            "system_message": "原有系统提示",
+            "client_context": mobile_client_context(),
+        },
+        headers=await auth_headers(gateway_client),
+    )
+
+    assert response.status == 200
+    await response.text()
+    assert upstream_client.captured_chat["system_message"] == (
+        f"{MOBILE_CLIENT_SYSTEM_MESSAGE}\n\n原有系统提示"
+    )
+
+
+@pytest.mark.asyncio
+async def test_mobile_client_context_is_applied_to_non_streaming_chat_proxy(
+    gateway_client: TestClient,
+    upstream_client: TestClient,
+):
+    response = await gateway_client.post(
+        "/api/sessions/session-1/chat",
+        json={"message": "普通请求", "client_context": mobile_client_context()},
+        headers=await auth_headers(gateway_client),
+    )
+
+    assert response.status == 200
+    await response.text()
+    assert upstream_client.captured_chat == {
+        "message": "普通请求",
+        "system_message": MOBILE_CLIENT_SYSTEM_MESSAGE,
+    }
+
+
+@pytest.mark.asyncio
+async def test_non_mobile_chat_proxy_keeps_the_existing_request_body(
+    gateway_client: TestClient,
+    upstream_client: TestClient,
+):
+    body = {"message": "兼容旧客户端", "system_message": "既有提示", "custom": {"enabled": True}}
+    response = await gateway_client.post(
+        "/api/sessions/session-1/chat",
+        json=body,
+        headers=await auth_headers(gateway_client),
+    )
+
+    assert response.status == 200
+    await response.text()
+    assert upstream_client.captured_chat == body
+
+
+@pytest.mark.asyncio
+async def test_mobile_client_context_becomes_system_role_on_inference_route(
+    gateway_client: TestClient,
+    upstream_client: TestClient,
+):
+    response = await gateway_client.post(
+        "/api/sessions/session-1/chat/stream",
+        json={
+            "message": "选择模型",
+            "inference_model": "route-fast",
+            "client_context": mobile_client_context(),
+        },
+        headers=await auth_headers(gateway_client),
+    )
+
+    assert response.status == 200
+    await response.text()
+    assert upstream_client.captured_completion["messages"] == [
+        {"role": "system", "content": MOBILE_CLIENT_SYSTEM_MESSAGE},
+        {"role": "user", "content": "选择模型"},
+    ]
+    assert "client_context" not in upstream_client.captured_completion
+
+
+@pytest.mark.asyncio
+async def test_mobile_file_attachment_is_labeled_as_phone_origin(
+    gateway_client: TestClient,
+    upstream_client: TestClient,
+):
+    form = FormData()
+    form.add_field("file", io.BytesIO("手机资料".encode()), filename="phone-note.txt", content_type="text/plain")
+    upload = await gateway_client.post(
+        "/api/uploads",
+        data=form,
+        headers=await auth_headers(gateway_client),
+    )
+    file_id = (await upload.json())["file"]["id"]
+
+    response = await gateway_client.post(
+        "/api/sessions/session-1/chat/stream",
+        json={
+            "message": "读取附件",
+            "attachment_ids": [file_id],
+            "client_context": mobile_client_context(),
+        },
+        headers=await auth_headers(gateway_client),
+    )
+
+    assert response.status == 200
+    await response.text()
+    attachment_text = upstream_client.captured_chat["message"][1]["text"]
+    assert "来源：Nexus Android 手机端附件" in attachment_text
+    assert "手机资料" in attachment_text
+    assert "服务器路径" not in attachment_text
 
 
 @pytest.mark.asyncio
