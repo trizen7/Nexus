@@ -213,15 +213,18 @@ class HermesApiClient(
 
     suspend fun getSessionRunStatus(sessionId: String): SessionRunStatus = withContext(Dispatchers.IO) {
         val root = getJson("api/sessions/${encodePathSegment(sessionId)}/run")
+        val active = root.get("active")?.takeUnless { it.isJsonNull }?.asBoolean ?: false
         SessionRunStatus(
             sessionId = root.string("session_id").ifBlank { sessionId },
             runId = root.string("run_id").takeIf { it.isNotBlank() },
             status = root.string("status").ifBlank { "idle" },
-            active = root.get("active")?.takeUnless { it.isJsonNull }?.asBoolean ?: false,
+            active = active,
             phase = root.string("phase").ifBlank { "idle" },
             snapshot = root.string("snapshot"),
             toolName = root.string("tool_name").takeIf { it.isNotBlank() },
-            message = root.string("message").takeIf { it.isNotBlank() }
+            message = root.string("message").takeIf { it.isNotBlank() },
+            source = root.string("source").ifBlank { "nexus_gateway" },
+            stoppable = root.get("stoppable")?.takeUnless { it.isJsonNull }?.asBoolean ?: active
         )
     }
 
@@ -645,7 +648,9 @@ private fun JsonObject.toModel(): HermesModel? {
         id = id,
         root = string("root").ifBlank { null },
         ownedBy = string("owned_by").ifBlank { null },
-        parent = string("parent").ifBlank { null }
+        parent = string("parent").ifBlank { null },
+        kind = string("kind").ifBlank { null },
+        objectType = string("object").ifBlank { null }
     )
 }
 

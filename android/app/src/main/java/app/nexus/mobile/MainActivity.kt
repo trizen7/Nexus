@@ -983,9 +983,19 @@ private fun ChatTextInput(
                     }
                     innerTextField()
                 }
-                if (state.streaming) {
+                if (state.streaming && state.runStoppable) {
                     IconButton(onClick = viewModel::stopStreaming) {
                         Icon(Icons.Filled.StopCircle, contentDescription = "停止生成", tint = primaryInk())
+                    }
+                } else if (state.streaming) {
+                    Box(
+                        modifier = Modifier.size(48.dp),
+                        contentAlignment = Alignment.Center
+                    ) {
+                        CircularProgressIndicator(
+                            modifier = Modifier.size(20.dp),
+                            strokeWidth = 2.dp
+                        )
                     }
                 } else if (canSendComposition(input, state.pendingImages.map(ChatImage::id), state.pendingFiles.map { it.id })) {
                     IconButton(onClick = viewModel::send) {

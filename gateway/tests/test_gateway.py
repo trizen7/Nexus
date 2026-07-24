@@ -16,10 +16,12 @@ from aiohttp.test_utils import TestClient, TestServer, make_mocked_request
 
 from nexus_gateway.app import (
     CREDENTIALS_PATH_KEY,
+    EXTERNAL_RUN_OBSERVER_KEY,
     GATEWAY_CONFIG_KEY,
     MEDIA_STORE_KEY,
     MOBILE_CLIENT_CONTEXT_MARKER,
     MOBILE_CLIENT_SYSTEM_MESSAGE,
+    RUN_TRACKER_KEY,
     SETUP_LOCK_KEY,
     MediaStore,
     RunTracker,
@@ -36,13 +38,42 @@ async def upstream_client():
     captured_completion_headers: dict[str, str] = {}
     release_chat = asyncio.Event()
     chat_started = asyncio.Event()
+    detailed_health_state = {
+        "status": 200,
+        "payload": {"status": "ok", "gateway_busy": False, "active_agents": 0},
+    }
+    session_state = {
+        "status": 200,
+        "rows": [
+            {
+                "id": "session-1",
+                "title": None,
+                "source": "api_server",
+                "message_count": 0,
+                "last_active": 1.0,
+            }
+        ],
+    }
+    probe_counts = {"health_detailed": 0, "sessions": 0}
 
     async def health(_request):
         return web.json_response({"status": "ok", "platform": "hermes-agent", "version": "test"})
 
+    async def detailed_health(request):
+        assert request.headers["Authorization"] == "Bearer upstream-secret"
+        probe_counts["health_detailed"] += 1
+        return web.json_response(
+            detailed_health_state["payload"],
+            status=int(detailed_health_state["status"]),
+        )
+
     async def sessions(request):
         assert request.headers["Authorization"] == "Bearer upstream-secret"
-        return web.json_response({"object": "list", "data": [{"id": "session-1"}]})
+        probe_counts["sessions"] += 1
+        return web.json_response(
+            {"object": "list", "data": session_state["rows"]},
+            status=int(session_state["status"]),
+        )
 
     async def create_session(request):
         assert request.headers["Authorization"] == "Bearer upstream-secret"
@@ -125,6 +156,7 @@ async def upstream_client():
 
     app = web.Application()
     app.router.add_get("/health", health)
+    app.router.add_get("/health/detailed", detailed_health)
     app.router.add_get("/api/sessions", sessions)
     app.router.add_post("/api/sessions", create_session)
     app.router.add_patch("/api/sessions/{session_id}", update_session)
@@ -140,6 +172,9 @@ async def upstream_client():
     client.captured_completion_headers = captured_completion_headers
     client.release_chat = release_chat
     client.chat_started = chat_started
+    client.detailed_health_state = detailed_health_state
+    client.session_state = session_state
+    client.probe_counts = probe_counts
     await client.start_server()
     try:
         yield client
@@ -1022,6 +1057,201 @@ async def test_gateway_keeps_hermes_run_alive_after_mobile_disconnect(
             break
     assert body["status"] == "completed"
     assert body["active"] is False
+
+
+@pytest.mark.asyncio
+async def test_external_channel_run_is_exposed_as_non_stoppable_thinking(
+    gateway_client: TestClient,
+    upstream_client: TestClient,
+):
+    observer = gateway_client.server.app[EXTERNAL_RUN_OBSERVER_KEY]
+    observer.cache_seconds = 0.0
+    upstream_client.detailed_health_state["payload"] = {
+        "status": "ok",
+        "gateway_busy": True,
+        "active_agents": 0,
+    }
+    upstream_client.session_state["rows"] = [
+        {
+            "id": "qq-session",
+            "source": "qq",
+            "message_count": 8,
+            "last_active": time.time(),
+        }
+    ]
+
+    response = await gateway_client.get(
+        "/api/sessions/qq-session/run",
+        headers=await auth_headers(gateway_client),
+    )
+
+    assert response.status == 200
+    body = await response.json()
+    assert body["session_id"] == "qq-session"
+    assert body["status"] == "running"
+    assert body["active"] is True
+    assert body["phase"] == "thinking"
+    assert body["source"] == "hermes_gateway"
+    assert body["stoppable"] is False
+
+
+@pytest.mark.asyncio
+async def test_external_channel_busy_falls_back_to_unique_session_when_transcript_is_unchanged(
+    gateway_client: TestClient,
+    upstream_client: TestClient,
+):
+    observer = gateway_client.server.app[EXTERNAL_RUN_OBSERVER_KEY]
+    observer.cache_seconds = 0.0
+    upstream_client.session_state["rows"] = [
+        {
+            "id": "wechat-session",
+            "source": "wechat",
+            "message_count": 3,
+            "last_active": 100.0,
+        }
+    ]
+    headers = await auth_headers(gateway_client)
+
+    baseline = await gateway_client.get("/api/sessions/wechat-session/run", headers=headers)
+    assert (await baseline.json())["status"] == "idle"
+
+    upstream_client.detailed_health_state["payload"]["gateway_busy"] = True
+    running = await gateway_client.get("/api/sessions/wechat-session/run", headers=headers)
+    body = await running.json()
+
+    assert body["status"] == "running"
+    assert body["active"] is True
+    assert body["source"] == "hermes_gateway"
+
+
+@pytest.mark.asyncio
+async def test_external_channel_run_completes_then_returns_to_idle(
+    gateway_client: TestClient,
+    upstream_client: TestClient,
+):
+    observer = gateway_client.server.app[EXTERNAL_RUN_OBSERVER_KEY]
+    observer.cache_seconds = 0.0
+    observer.completion_seconds = 0.01
+    upstream_client.detailed_health_state["payload"]["gateway_busy"] = True
+    upstream_client.session_state["rows"] = [
+        {
+            "id": "qq-session",
+            "source": "qq",
+            "message_count": 1,
+            "last_active": time.time(),
+        }
+    ]
+    headers = await auth_headers(gateway_client)
+
+    running = await gateway_client.get("/api/sessions/qq-session/run", headers=headers)
+    assert (await running.json())["status"] == "running"
+
+    upstream_client.detailed_health_state["payload"]["gateway_busy"] = False
+    completed = await gateway_client.get("/api/sessions/qq-session/run", headers=headers)
+    completed_body = await completed.json()
+    assert completed_body["status"] == "completed"
+    assert completed_body["active"] is False
+    assert completed_body["stoppable"] is False
+
+    await asyncio.sleep(0.02)
+    idle = await gateway_client.get("/api/sessions/qq-session/run", headers=headers)
+    idle_body = await idle.json()
+    assert idle_body["status"] == "idle"
+    assert idle_body["active"] is False
+
+
+@pytest.mark.asyncio
+async def test_local_nexus_run_status_has_priority_over_external_observer(
+    gateway_client: TestClient,
+    upstream_client: TestClient,
+):
+    tracker = gateway_client.server.app[RUN_TRACKER_KEY]
+    tracker.start("session-1", "run-local")
+    upstream_client.detailed_health_state["payload"]["gateway_busy"] = True
+    before = dict(upstream_client.probe_counts)
+
+    response = await gateway_client.get(
+        "/api/sessions/session-1/run",
+        headers=await auth_headers(gateway_client),
+    )
+
+    body = await response.json()
+    assert body["run_id"] == "run-local"
+    assert body["source"] == "nexus_gateway"
+    assert body["stoppable"] is True
+    assert upstream_client.probe_counts == before
+
+
+@pytest.mark.asyncio
+async def test_external_observer_health_failure_clears_synthetic_active_state(
+    gateway_client: TestClient,
+    upstream_client: TestClient,
+):
+    observer = gateway_client.server.app[EXTERNAL_RUN_OBSERVER_KEY]
+    observer.cache_seconds = 0.0
+    upstream_client.detailed_health_state["payload"]["gateway_busy"] = True
+    upstream_client.session_state["rows"] = [
+        {
+            "id": "qq-session",
+            "source": "qq",
+            "message_count": 1,
+            "last_active": time.time(),
+        }
+    ]
+    headers = await auth_headers(gateway_client)
+
+    running = await gateway_client.get("/api/sessions/qq-session/run", headers=headers)
+    assert (await running.json())["active"] is True
+
+    upstream_client.detailed_health_state["status"] = 503
+    failed_probe = await gateway_client.get("/api/sessions/qq-session/run", headers=headers)
+    body = await failed_probe.json()
+    assert body["status"] == "idle"
+    assert body["active"] is False
+
+
+@pytest.mark.asyncio
+async def test_external_observer_does_not_guess_between_equally_likely_channels(
+    gateway_client: TestClient,
+    upstream_client: TestClient,
+):
+    observer = gateway_client.server.app[EXTERNAL_RUN_OBSERVER_KEY]
+    observer.cache_seconds = 0.0
+    upstream_client.detailed_health_state["payload"]["gateway_busy"] = True
+    upstream_client.session_state["rows"] = [
+        {"id": "qq-session", "source": "qq", "message_count": 1, "last_active": 100.0},
+        {"id": "wechat-session", "source": "wechat", "message_count": 1, "last_active": 100.0},
+    ]
+
+    response = await gateway_client.get(
+        "/api/sessions/qq-session/run",
+        headers=await auth_headers(gateway_client),
+    )
+
+    body = await response.json()
+    assert body["status"] == "idle"
+    assert body["active"] is False
+
+
+@pytest.mark.asyncio
+async def test_external_observer_short_cache_avoids_duplicate_upstream_probes(
+    gateway_client: TestClient,
+    upstream_client: TestClient,
+):
+    observer = gateway_client.server.app[EXTERNAL_RUN_OBSERVER_KEY]
+    observer.cache_seconds = 60.0
+    upstream_client.detailed_health_state["payload"]["gateway_busy"] = True
+    upstream_client.session_state["rows"] = [
+        {"id": "qq-session", "source": "qq", "message_count": 1, "last_active": time.time()}
+    ]
+    headers = await auth_headers(gateway_client)
+
+    await gateway_client.get("/api/sessions/qq-session/run", headers=headers)
+    first_counts = dict(upstream_client.probe_counts)
+    await gateway_client.get("/api/sessions/qq-session/run", headers=headers)
+
+    assert first_counts == {"health_detailed": 1, "sessions": 1}
+    assert upstream_client.probe_counts == first_counts
 
 
 @pytest.mark.asyncio

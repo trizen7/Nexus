@@ -175,7 +175,7 @@ class ConnectionStore(context: Context) {
         const val KEY_SELECTED_INFERENCE_MODEL = "selected_inference_model_id"
         const val KEY_SELECTED_REASONING_EFFORT = "selected_reasoning_effort"
         const val KEY_PERSONA_SELECTION_SCHEMA = "persona_selection_schema"
-        const val PERSONA_SELECTION_SCHEMA_VERSION = 1
+        const val PERSONA_SELECTION_SCHEMA_VERSION = 2
         const val KEY_RUNTIME_CONFIGS = "conversation_runtime_configs_v1"
         const val KEY_DRAFTS = "composer_drafts_v1"
     }

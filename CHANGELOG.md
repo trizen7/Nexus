@@ -6,6 +6,16 @@
 
 - 暂无。
 
+## 0.0.11｜Hermes 模型语义修正与外部渠道运行状态
+
+- 修复把 Hermes `/v1/models` 中 `parent` 为空的主推理模型误识别为人物的问题；人物列表现在只接受明确标记为 `persona` 的条目，升级后清除旧版本保存的错误人物选择；
+- 当前 Hermes 对外返回的主模型名称（例如“星禾”）不再出现在人物列表，默认人物恢复为 `Hermes 默认（default）`，请求不发送 `persona_model`；其子路由（例如 `gpt-5.6-sol`）仍保留在调用模型列表；
+- Gateway 通过原版 Hermes 的 `/health/detailed` 与 `/api/sessions` 公开 HTTP API，以只读、保守匹配方式观察 QQ、微信等其他渠道任务，使 Android App 可显示“思考中”并在完成后刷新消息；候选会话不唯一时不猜测；
+- 外部渠道任务标记为不可停止，Android 只显示进度指示器；Nexus 自己发起的任务仍保留停止按钮；Hermes 状态探测失败时会清除合成状态，避免永久卡在“思考中”；
+- 补充模型分类、旧人物选择迁移、运行状态兼容与外部渠道观察器回归测试；
+- 自动验证：Gateway `95 passed, 9 skipped`，Python 编译与网页 JavaScript 语法检查通过；Android 135 项单元测试全部通过，`lintDebug` 为 0 errors、1 个按需求允许 HTTP 的预期警告，Debug APK 构建通过；
+- 按强制边界，所有实现、测试、构建和部署只处理 Nexus 自有文件，并且仅通过原版 Hermes HTTP API 读取状态，不修改或管理任何 Hermes 文件、配置、数据、安装或进程。
+
 ## 0.0.10｜移动端附件上下文与输入体验优化
 
 - Android 聊天请求新增 `client_context`，明确声明 Android 手机端、不可直接访问 Hermes 主机路径且不支持桌面拖拽；人物模型、调用模型、推理深度和多附件字段保持兼容；

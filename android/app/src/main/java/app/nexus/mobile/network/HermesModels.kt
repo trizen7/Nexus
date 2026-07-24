@@ -101,22 +101,34 @@ data class SessionRunStatus(
     val phase: String = "idle",
     val snapshot: String = "",
     val toolName: String? = null,
-    val message: String? = null
+    val message: String? = null,
+    val source: String = "nexus_gateway",
+    val stoppable: Boolean = true
 )
 data class HermesModel(
     val id: String,
     val root: String? = null,
     val ownedBy: String? = null,
-    val parent: String? = null
+    val parent: String? = null,
+    val kind: String? = null,
+    val objectType: String? = null
 ) {
     val displayName: String
         get() = id.ifBlank { root.orEmpty() }
 
+    /**
+     * Hermes' OpenAI-compatible /v1/models endpoint uses parent to describe model
+     * routes. A null parent is the primary inference model, not a persona. Only an
+     * explicit persona marker may be exposed in the persona picker.
+     */
     val isPersona: Boolean
-        get() = parent.isNullOrBlank()
+        get() = kind.equals("persona", ignoreCase = true) ||
+            objectType.equals("persona", ignoreCase = true) ||
+            objectType.equals("hermes.persona", ignoreCase = true)
 
+    /** Selectable inference routes are the child entries returned by Hermes. */
     val isInferenceModel: Boolean
-        get() = !isPersona
+        get() = !isPersona && !parent.isNullOrBlank()
 }
 
 data class HermesCronSchedule(

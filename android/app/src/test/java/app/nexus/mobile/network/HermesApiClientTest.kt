@@ -146,7 +146,7 @@ class HermesApiClientTest {
             MockResponse()
                 .setResponseCode(200)
                 .setHeader("Content-Type", "application/json")
-                .setBody("""{"session_id":"session-1","run_id":"run-1","status":"running","active":true}""")
+                .setBody("""{"session_id":"session-1","run_id":"run-1","status":"running","active":true,"source":"hermes_gateway","stoppable":false}""")
         )
         val client = HermesApiClient(server.url("/").toString(), "test-token")
 
@@ -156,7 +156,25 @@ class HermesApiClientTest {
         assertEquals("run-1", status.runId)
         assertEquals("running", status.status)
         assertTrue(status.active)
+        assertEquals("hermes_gateway", status.source)
+        assertFalse(status.stoppable)
         assertEquals("/api/sessions/session-1/run", server.takeRequest().path)
+    }
+
+    @Test
+    fun `legacy active run status remains stoppable when capability is absent`() = runTest {
+        server.enqueue(
+            MockResponse()
+                .setResponseCode(200)
+                .setHeader("Content-Type", "application/json")
+                .setBody("""{"session_id":"session-1","status":"running","active":true}""")
+        )
+        val client = HermesApiClient(server.url("/").toString(), "test-token")
+
+        val status = client.getSessionRunStatus("session-1")
+
+        assertEquals("nexus_gateway", status.source)
+        assertTrue(status.stoppable)
     }
 
     @Test
@@ -525,19 +543,24 @@ class HermesApiClientTest {
             MockResponse()
                 .setResponseCode(200)
                 .setHeader("Content-Type", "application/json")
-                .setBody("""{"object":"list","data":[{"id":"profile-a","root":"profile-a","owned_by":"local","parent":null},{"id":"model-fast","root":"gpt-5.6-sol","owned_by":"remote","parent":"profile-a"}]}""")
+                .setBody("""{"object":"list","data":[{"id":"星禾","object":"model","root":"星禾","owned_by":"local","parent":null},{"id":"gpt-5.6-sol","object":"model","root":"gpt-5.6-sol","owned_by":"remote","parent":"星禾"},{"id":"assistant-profile","object":"hermes.persona","kind":"persona","root":"assistant-profile","owned_by":"local","parent":null}]}""")
         )
         val client = HermesApiClient(server.url("/").toString(), "test-token")
 
         val models = client.listModels()
 
-        assertEquals(listOf("profile-a", "model-fast"), models.map { it.id })
-        assertEquals("profile-a", models.first().root)
+        assertEquals(listOf("星禾", "gpt-5.6-sol", "assistant-profile"), models.map { it.id })
+        assertEquals("星禾", models.first().root)
         assertEquals("local", models.first().ownedBy)
         assertEquals(null, models.first().parent)
-        assertEquals("profile-a", models.last().parent)
-        assertEquals(true, models.first().isPersona)
-        assertEquals(true, models.last().isInferenceModel)
+        assertEquals(false, models.first().isPersona)
+        assertEquals(false, models.first().isInferenceModel)
+        assertEquals("星禾", models[1].parent)
+        assertEquals(true, models[1].isInferenceModel)
+        assertEquals("persona", models.last().kind)
+        assertEquals("hermes.persona", models.last().objectType)
+        assertEquals(true, models.last().isPersona)
+        assertEquals(false, models.last().isInferenceModel)
         assertEquals("/v1/models", server.takeRequest().path)
     }
 
@@ -651,6 +674,7 @@ class HermesApiClientTest {
         client.streamChat("mobile-session", "hello")
 
         val body = com.google.gson.JsonParser.parseString(server.takeRequest().body.readUtf8()).asJsonObject
+        assertFalse(body.has("persona_model"))
         assertFalse(body.has("reasoning_effort"))
         assertAndroidPhoneContext(body)
     }

@@ -43,6 +43,7 @@ AUTH_STATE_KEY = web.AppKey("auth_state", object)
 MEDIA_STORE_KEY = web.AppKey("media_store", object)
 HTTP_SESSION_KEY = web.AppKey("http_session", ClientSession)
 RUN_TRACKER_KEY = web.AppKey("run_tracker", object)
+EXTERNAL_RUN_OBSERVER_KEY = web.AppKey("external_run_observer", object)
 TRANSCRIBE_AUDIO_KEY = web.AppKey("transcribe_audio", object)
 REQUEST_ATTACHMENT_IDS_KEY = web.RequestKey("nexus_attachment_ids", list)
 LOGIN_RATE_LIMITER_KEY = web.AppKey("login_rate_limiter", object)
@@ -132,7 +133,7 @@ class RunTracker:
         temp.replace(self.state_file)
 
     def status(self, session_id: str) -> dict[str, Any]:
-        return dict(self.statuses.get(session_id) or {
+        status = dict(self.statuses.get(session_id) or {
             "session_id": session_id,
             "run_id": None,
             "status": "idle",
@@ -141,6 +142,9 @@ class RunTracker:
             "snapshot": "",
             "updated_at": time.time(),
         })
+        status.setdefault("source", "nexus_gateway")
+        status.setdefault("stoppable", bool(status.get("active")))
+        return status
 
     def start(self, session_id: str, run_id: str) -> None:
         self.statuses[session_id] = {
@@ -151,6 +155,8 @@ class RunTracker:
             "phase": "thinking",
             "snapshot": "",
             "tool_name": None,
+            "source": "nexus_gateway",
+            "stoppable": True,
             "updated_at": time.time(),
         }
         self.buffers[session_id] = ""
@@ -163,6 +169,8 @@ class RunTracker:
             active=False,
             phase=status,
             message=message,
+            source="nexus_gateway",
+            stoppable=False,
             updated_at=time.time(),
         )
         self._save()
@@ -234,6 +242,266 @@ class RunTracker:
             queues.discard(queue)
             if not queues:
                 self.subscribers.pop(session_id, None)
+
+
+class ExternalRunObserver:
+    """Best-effort, read-only observation of runs started outside Nexus."""
+
+    CHANNEL_EXCLUDED_SOURCES = {"", "api_server", "cron", "desktop", "cli", "tui"}
+
+    def __init__(
+        self,
+        *,
+        cache_seconds: float = 2.0,
+        freshness_seconds: float = 120.0,
+        completion_seconds: float = 12.0,
+        clock: Callable[[], float] = time.time,
+    ) -> None:
+        self.cache_seconds = max(0.0, cache_seconds)
+        self.freshness_seconds = max(0.0, freshness_seconds)
+        self.completion_seconds = max(0.0, completion_seconds)
+        self.clock = clock
+        self._lock = asyncio.Lock()
+        self._last_probe_at = 0.0
+        self._previous_sessions: dict[str, dict[str, Any]] = {}
+        self._active_session_id: str | None = None
+        self._active_status: dict[str, Any] | None = None
+        self._completed: dict[str, dict[str, Any]] = {}
+
+    async def status(self, app: web.Application, session_id: str) -> dict[str, Any] | None:
+        await self._refresh(app)
+        now = self.clock()
+        self._prune_completed(now)
+        if session_id == self._active_session_id and self._active_status is not None:
+            return dict(self._active_status)
+        completed = self._completed.get(session_id)
+        return dict(completed) if completed is not None else None
+
+    async def _refresh(self, app: web.Application) -> None:
+        now = self.clock()
+        if self._last_probe_at and now - self._last_probe_at < self.cache_seconds:
+            return
+        async with self._lock:
+            now = self.clock()
+            if self._last_probe_at and now - self._last_probe_at < self.cache_seconds:
+                return
+            self._last_probe_at = now
+            await self._probe(app, now)
+
+    async def _probe(self, app: web.Application, now: float) -> None:
+        health_result, sessions_result = await asyncio.gather(
+            self._fetch_json(app, "/health/detailed"),
+            self._fetch_json(app, "/api/sessions"),
+            return_exceptions=True,
+        )
+        health = health_result if isinstance(health_result, dict) else None
+        sessions_payload = sessions_result if isinstance(sessions_result, dict) else None
+        sessions = self._session_snapshot(sessions_payload) if sessions_payload is not None else None
+
+        if health is None:
+            # Unknown upstream state must never leave a synthetic run stuck active.
+            self._drop_active()
+            if sessions is not None:
+                self._previous_sessions = sessions
+            self._prune_completed(now)
+            return
+
+        gateway_busy = self._bool_value(health.get("gateway_busy"))
+        active_agents = self._int_value(health.get("active_agents"))
+        busy = gateway_busy or active_agents > 0
+        if not busy:
+            self._complete_active(now)
+            if sessions is not None:
+                self._previous_sessions = sessions
+            self._prune_completed(now)
+            return
+
+        if sessions is None:
+            # A global busy flag without session metadata cannot be mapped safely.
+            self._drop_active()
+            self._prune_completed(now)
+            return
+
+        candidate = self._candidate_session(
+            sessions,
+            now=now,
+            gateway_busy=gateway_busy,
+        )
+        self._previous_sessions = sessions
+        if candidate is None:
+            self._drop_active()
+        else:
+            self._activate(candidate, now)
+        self._prune_completed(now)
+
+    async def _fetch_json(self, app: web.Application, path: str) -> dict[str, Any] | None:
+        config = app[GATEWAY_CONFIG_KEY]
+        session = app[HTTP_SESSION_KEY]
+        headers = {"Authorization": f"Bearer {config.upstream_token}"}
+        try:
+            async with session.get(f"{config.upstream_url}{path}", headers=headers) as response:
+                if response.status != 200:
+                    return None
+                payload = await response.json(content_type=None)
+                return payload if isinstance(payload, dict) else None
+        except (asyncio.CancelledError, KeyboardInterrupt):
+            raise
+        except Exception:
+            return None
+
+    def _candidate_session(
+        self,
+        sessions: dict[str, dict[str, Any]],
+        *,
+        now: float,
+        gateway_busy: bool,
+    ) -> str | None:
+        eligible = [
+            item for item in sessions.values()
+            if (self._is_channel_session(item) if gateway_busy else self._is_agent_session(item))
+        ]
+        if not eligible:
+            return None
+
+        changed = [item for item in eligible if self._session_changed(item)]
+        if len(changed) == 1:
+            return str(changed[0]["id"])
+        if len(changed) > 1:
+            if self._active_session_id and any(item["id"] == self._active_session_id for item in changed):
+                return self._active_session_id
+            return self._unique_latest(changed)
+
+        if self._active_session_id and any(item["id"] == self._active_session_id for item in eligible):
+            return self._active_session_id
+
+        recent = [
+            item for item in eligible
+            if item["last_active"] > 0 and item["last_active"] >= now - self.freshness_seconds
+        ]
+        recent_candidate = self._unique_latest(recent)
+        if recent_candidate is not None:
+            return recent_candidate
+
+        # Hermes may persist a channel transcript only after the turn finishes. When
+        # its messaging gateway explicitly reports busy, the uniquely latest channel
+        # session is the safest available fallback even if last_active is unchanged.
+        return self._unique_latest(eligible) if gateway_busy else None
+
+    def _session_changed(self, current: dict[str, Any]) -> bool:
+        previous = self._previous_sessions.get(str(current["id"]))
+        if previous is None:
+            return bool(self._previous_sessions)
+        return (
+            current["message_count"] > previous["message_count"]
+            or current["last_active"] > previous["last_active"] + 0.001
+        )
+
+    @classmethod
+    def _session_snapshot(cls, payload: dict[str, Any]) -> dict[str, dict[str, Any]]:
+        rows = payload.get("data")
+        if not isinstance(rows, list):
+            return {}
+        snapshot: dict[str, dict[str, Any]] = {}
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            session_id = str(row.get("id", "")).strip()
+            if not session_id:
+                continue
+            snapshot[session_id] = {
+                "id": session_id,
+                "source": str(row.get("source", "")).strip().lower(),
+                "message_count": cls._int_value(row.get("message_count")),
+                "last_active": cls._timestamp_value(row.get("last_active")),
+            }
+        return snapshot
+
+    @classmethod
+    def _is_channel_session(cls, item: dict[str, Any]) -> bool:
+        return str(item.get("source", "")).lower() not in cls.CHANNEL_EXCLUDED_SOURCES
+
+    @staticmethod
+    def _is_agent_session(item: dict[str, Any]) -> bool:
+        return str(item.get("source", "")).lower() not in {"", "cron"}
+
+    @staticmethod
+    def _unique_latest(items: list[dict[str, Any]]) -> str | None:
+        if not items:
+            return None
+        ordered = sorted(items, key=lambda item: item["last_active"], reverse=True)
+        if len(ordered) > 1 and ordered[0]["last_active"] <= ordered[1]["last_active"] + 0.001:
+            return None
+        return str(ordered[0]["id"])
+
+    def _activate(self, session_id: str, now: float) -> None:
+        if session_id == self._active_session_id and self._active_status is not None:
+            return
+        self._active_session_id = session_id
+        self._completed.pop(session_id, None)
+        self._active_status = {
+            "session_id": session_id,
+            "run_id": f"hermes_gateway_{uuid.uuid4().hex}",
+            "status": "running",
+            "active": True,
+            "phase": "thinking",
+            "snapshot": "",
+            "tool_name": None,
+            "message": None,
+            "source": "hermes_gateway",
+            "stoppable": False,
+            "updated_at": now,
+        }
+
+    def _complete_active(self, now: float) -> None:
+        if self._active_session_id is None or self._active_status is None:
+            return
+        completed = dict(self._active_status)
+        completed.update(
+            status="completed",
+            active=False,
+            phase="completed",
+            stoppable=False,
+            updated_at=now,
+        )
+        self._completed[self._active_session_id] = completed
+        self._drop_active()
+
+    def _drop_active(self) -> None:
+        self._active_session_id = None
+        self._active_status = None
+
+    def _prune_completed(self, now: float) -> None:
+        expired = [
+            session_id for session_id, status in self._completed.items()
+            if now - float(status.get("updated_at", 0.0)) > self.completion_seconds
+        ]
+        for session_id in expired:
+            self._completed.pop(session_id, None)
+
+    @staticmethod
+    def _bool_value(value: Any) -> bool:
+        if isinstance(value, bool):
+            return value
+        if isinstance(value, (int, float)):
+            return value != 0
+        return str(value).strip().lower() in {"1", "true", "yes", "on"}
+
+    @staticmethod
+    def _int_value(value: Any) -> int:
+        try:
+            return max(0, int(value))
+        except (TypeError, ValueError):
+            return 0
+
+    @staticmethod
+    def _timestamp_value(value: Any) -> float:
+        try:
+            timestamp = float(value)
+        except (TypeError, ValueError):
+            return 0.0
+        if timestamp > 10_000_000_000:
+            timestamp /= 1000.0
+        return max(0.0, timestamp)
 
 
 @dataclass(frozen=True)
@@ -1154,7 +1422,11 @@ async def proxy(request: web.Request) -> web.StreamResponse:
     is_message_history = request.method == "GET" and re.fullmatch(r"/api/sessions/[^/]+/messages", request.path)
     if request.method == "GET" and re.fullmatch(r"/api/sessions/[^/]+/run", request.path):
         session_id = request.path.split("/")[3]
-        return web.json_response(request.app[RUN_TRACKER_KEY].status(session_id))
+        local_status = request.app[RUN_TRACKER_KEY].status(session_id)
+        if local_status.get("active") or local_status.get("status") in {"queued", "running", "stopping"}:
+            return web.json_response(local_status)
+        external_status = await request.app[EXTERNAL_RUN_OBSERVER_KEY].status(request.app, session_id)
+        return web.json_response(external_status or local_status)
     if request.method == "POST" and re.fullmatch(r"/api/sessions/[^/]+/run/stop", request.path):
         session_id = request.path.split("/")[3]
         tracker: RunTracker = request.app[RUN_TRACKER_KEY]
@@ -1706,6 +1978,7 @@ def create_app(
         min_free_disk_bytes,
     )
     app[RUN_TRACKER_KEY] = RunTracker(Path(storage_dir).resolve().parent / "run_status.json")
+    app[EXTERNAL_RUN_OBSERVER_KEY] = ExternalRunObserver()
     if transcribe_audio is None:
         try:
             from tools.transcription_tools import transcribe_audio as hermes_transcribe_audio

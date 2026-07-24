@@ -28,7 +28,7 @@ def test_compose_persists_data_and_does_not_embed_secrets():
     service = compose["services"]["nexus-gateway"]
 
     assert service["restart"] == "unless-stopped"
-    assert service["image"] == "nexus-mobile-gateway:0.0.10"
+    assert service["image"] == "nexus-mobile-gateway:0.0.11"
     assert service["ports"] == ["8787:8787"]
     assert service["volumes"] == ["./data:/data"]
     assert "env_file" not in service

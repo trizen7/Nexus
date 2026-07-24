@@ -71,6 +71,7 @@ data class MainUiState(
     val historyPrependToken: Long = 0L,
     val initialScrollToken: Long = 0L,
     val streaming: Boolean = false,
+    val runStoppable: Boolean = false,
     val thinking: Boolean = false,
     val toolStatus: String? = null,
     val answerStatus: AnswerStatus = AnswerStatus.IDLE,
@@ -322,7 +323,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         if (status.active || status.status in setOf("queued", "running", "stopping")) return@onSuccess
                         stopRequestedSessionId = null
                         observedActiveRuns.remove(sessionId)
-                        _uiState.update { it.copy(streaming = false, thinking = false, toolStatus = null) }
+                        _uiState.update { it.copy(streaming = false, runStoppable = false, thinking = false, toolStatus = null) }
                         showTransientAnswerStatus(AnswerStatus.STOPPED)
                         refreshCurrentMessages()
                         return@onSuccess
@@ -345,6 +346,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                                 )
                                 state.copy(
                                     streaming = true,
+                                    runStoppable = status.stoppable,
                                     thinking = status.phase !in setOf("generating", "tool"),
                                     toolStatus = status.toolName?.let { "正在使用 $it…" },
                                     answerStatus = answerStatus,
@@ -360,6 +362,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                             _uiState.update {
                                 it.copy(
                                     streaming = false,
+                                    runStoppable = false,
                                     thinking = false,
                                     toolStatus = null,
                                     messages = it.messages.filterNot { message -> message.id.startsWith("run-snapshot-") }
@@ -369,13 +372,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                             refreshCurrentMessages()
                         }
                         status.status == "failed" && observedActiveRuns.remove(sessionId) -> {
-                            _uiState.update { it.copy(streaming = false, thinking = false, toolStatus = null) }
+                            _uiState.update { it.copy(streaming = false, runStoppable = false, thinking = false, toolStatus = null) }
                             showTransientAnswerStatus(AnswerStatus.FAILED)
                             refreshCurrentMessages()
                         }
                         status.status == "stopped" && observedActiveRuns.remove(sessionId) -> {
                             stopRequestedSessionId = null
-                            _uiState.update { it.copy(streaming = false, thinking = false, toolStatus = null) }
+                            _uiState.update { it.copy(streaming = false, runStoppable = false, thinking = false, toolStatus = null) }
                             showTransientAnswerStatus(AnswerStatus.STOPPED)
                             refreshCurrentMessages()
                         }
@@ -392,6 +395,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                                 } else withoutSnapshot
                                 state.copy(
                                     streaming = false,
+                                    runStoppable = false,
                                     thinking = false,
                                     toolStatus = null,
                                     answerStatus = AnswerStatus.FAILED,
@@ -400,8 +404,19 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                                 )
                             }
                         }
-                        else -> _uiState.update {
-                            it.copy(streaming = false, thinking = false, toolStatus = null, answerStatus = AnswerStatus.IDLE)
+                        else -> {
+                            val wasObserved = observedActiveRuns.remove(sessionId)
+                            _uiState.update {
+                                it.copy(
+                                    streaming = false,
+                                    runStoppable = false,
+                                    thinking = false,
+                                    toolStatus = null,
+                                    answerStatus = AnswerStatus.IDLE,
+                                    messages = it.messages.filterNot { message -> message.id.startsWith("run-snapshot-") }
+                                )
+                            }
+                            if (wasObserved) refreshCurrentMessages()
                         }
                     }
                 }
@@ -1050,6 +1065,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 pendingImages = emptyList(),
                 pendingFiles = emptyList(),
                 streaming = true,
+                runStoppable = true,
                 thinking = true,
                 toolStatus = null,
                 answerStatus = AnswerStatus.THINKING,
@@ -1124,7 +1140,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 persistAllDrafts()
                 _uiState.update {
                     if (it.activeSessionId == originSessionId) {
-                        it.copy(pendingFiles = emptyList(), streaming = false, thinking = false, toolStatus = null, uploadProgress = null)
+                        it.copy(
+                            pendingFiles = emptyList(),
+                            streaming = false,
+                            runStoppable = false,
+                            thinking = false,
+                            toolStatus = null,
+                            uploadProgress = null
+                        )
                     } else it
                 }
                 refreshSessions()
@@ -1151,6 +1174,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                             pendingImages = if (!stoppedByUser && current.pendingImages.isEmpty()) images else current.pendingImages,
                             pendingFiles = restoredFiles,
                             streaming = false,
+                            runStoppable = false,
                             thinking = false,
                             toolStatus = null,
                             uploadProgress = null
@@ -1167,8 +1191,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun stopStreaming() {
+        val state = _uiState.value
+        if (!state.streaming || !state.runStoppable) return
         val api = client
-        val sessionId = _uiState.value.activeSessionId
+        val sessionId = state.activeSessionId
         stopRequestedSessionId = sessionId
         runStatusJob?.cancel()
         streamJob?.cancel()
@@ -1181,7 +1207,15 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
         observedActiveRuns.remove(sessionId)
         showTransientAnswerStatus(AnswerStatus.STOPPED)
-        _uiState.update { it.copy(streaming = false, thinking = false, toolStatus = null, uploadProgress = null) }
+        _uiState.update {
+            it.copy(
+                streaming = false,
+                runStoppable = false,
+                thinking = false,
+                toolStatus = null,
+                uploadProgress = null
+            )
+        }
     }
 
     private fun showTransientAnswerStatus(status: AnswerStatus) {
