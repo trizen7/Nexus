@@ -65,28 +65,22 @@ fun SettingsScreen(state: MainUiState, viewModel: MainViewModel) {
         ) {
             item {
                 SettingsSection(
-                    title = "AI 与模型",
-                    description = "控制人物角色、实际调用模型和推理深度"
+                    title = "AI 与人物",
+                    description = "选择 Hermes 人物设定"
                 ) {
                     SettingsActionRow(
                         icon = Icons.Filled.AutoAwesome,
                         title = "人物模型",
                         value = state.selectedPersonaModelLabel,
-                        onClick = viewModel::openModelPicker
+                        onClick = viewModel::openPersonaModelPicker
                     )
                     SettingsDivider()
-                    SettingsActionRow(
-                        icon = Icons.Filled.AutoAwesome,
-                        title = "调用模型",
-                        value = state.selectedInferenceModelLabel,
-                        onClick = viewModel::openModelPicker
-                    )
-                    SettingsDivider()
-                    SettingsActionRow(
-                        icon = Icons.Filled.AutoAwesome,
-                        title = "推理深度",
-                        value = state.selectedReasoningEffort.label,
-                        onClick = viewModel::openModelPicker
+                    Text(
+                        "调用模型和推理深度已移到对话页右上角，可以为每个对话单独设置。",
+                        modifier = Modifier.padding(horizontal = 18.dp, vertical = 14.dp),
+                        color = MaterialTheme.colorScheme.onSurfaceVariant,
+                        fontSize = 13.sp,
+                        lineHeight = 19.sp
                     )
                 }
             }

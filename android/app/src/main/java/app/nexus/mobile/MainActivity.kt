@@ -33,10 +33,13 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.imePadding
+import androidx.compose.foundation.layout.WindowInsets
+import androidx.compose.foundation.layout.isImeVisible
 import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
+import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.horizontalScroll
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.lazy.LazyColumn
@@ -62,7 +65,8 @@ import androidx.compose.material.icons.filled.Keyboard
 import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material.icons.filled.Settings
-import androidx.compose.material.icons.filled.AddComment
+import androidx.compose.material.icons.filled.Psychology
+import androidx.compose.material.icons.filled.Tune
 import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.StopCircle
 import androidx.compose.material.icons.filled.Close
@@ -118,6 +122,7 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import coil.compose.AsyncImage
+import app.nexus.mobile.network.ChatFile
 import app.nexus.mobile.network.ChatImage
 import app.nexus.mobile.network.ChatMessage
 import app.nexus.mobile.network.ChatRole
@@ -156,14 +161,14 @@ private val DarkScheme = darkColorScheme(
     secondaryContainer = Color(0xFF155F58),
     onSecondaryContainer = Color(0xFFD0F7F1),
     tertiary = Color(0xFF9EC1FF),
-    background = Color(0xFF111119),
+    background = Color(0xFF000000),
     onBackground = Color(0xFFE7E7F0),
-    surface = Color(0xFF1A1A24),
+    surface = Color(0xFF08080C),
     onSurface = Color(0xFFE8E7F1),
-    surfaceVariant = Color(0xFF272833),
+    surfaceVariant = Color(0xFF14141A),
     onSurfaceVariant = Color(0xFFC7C7D4),
     outline = Color(0xFF454653),
-    outlineVariant = Color(0xFF30313D),
+    outlineVariant = Color(0xFF1F2028),
     error = Color(0xFFFFB4AB),
     errorContainer = Color(0xFF5F211B),
     onErrorContainer = Color(0xFFFFDAD5)
@@ -415,11 +420,11 @@ private fun ConnectionScreen(state: MainUiState, viewModel: MainViewModel) {
                 .statusBarsPadding()
                 .navigationBarsPadding()
                 .imePadding()
-                .padding(horizontal = 20.dp, vertical = 28.dp),
-            verticalArrangement = Arrangement.Center
+                .padding(horizontal = 20.dp, vertical = 16.dp),
+            verticalArrangement = Arrangement.Top
         ) {
             Surface(
-                modifier = Modifier.size(62.dp),
+                modifier = Modifier.size(54.dp),
                 shape = RoundedCornerShape(21.dp),
                 color = MaterialTheme.colorScheme.primary,
                 shadowElevation = 8.dp
@@ -428,14 +433,14 @@ private fun ConnectionScreen(state: MainUiState, viewModel: MainViewModel) {
                     Text("N", color = MaterialTheme.colorScheme.onPrimary, fontSize = 27.sp, fontWeight = FontWeight.Bold)
                 }
             }
-            Spacer(Modifier.height(20.dp))
+            Spacer(Modifier.height(14.dp))
             Text("欢迎使用 Nexus", style = MaterialTheme.typography.headlineLarge)
             Text(
                 "连接 Hermes，随时继续你的工作",
                 color = mutedInk(),
                 style = MaterialTheme.typography.bodyLarge
             )
-            Spacer(Modifier.height(28.dp))
+            Spacer(Modifier.height(18.dp))
 
             Card(
                 shape = RoundedCornerShape(28.dp),
@@ -538,9 +543,10 @@ private fun ConnectionScreen(state: MainUiState, viewModel: MainViewModel) {
     }
 }
 
+@OptIn(androidx.compose.foundation.layout.ExperimentalLayoutApi::class)
 @Composable
 private fun ChatScreen(state: MainUiState, viewModel: MainViewModel) {
-    Column(Modifier.fillMaxSize()) {
+    Column(Modifier.fillMaxSize().imePadding()) {
         Surface(
             color = MaterialTheme.colorScheme.surface.copy(alpha = 0.98f),
             tonalElevation = 2.dp,
@@ -573,7 +579,7 @@ private fun ChatScreen(state: MainUiState, viewModel: MainViewModel) {
                         )
                         Spacer(Modifier.width(6.dp))
                         Text(
-                            state.answerStatus.label ?: state.selectedModelSummary,
+                            state.answerStatus.label ?: state.selectedRuntimeSummary,
                             color = when (state.answerStatus) {
                                 AnswerStatus.COMPLETED -> MaterialTheme.colorScheme.secondary
                                 AnswerStatus.FAILED -> MaterialTheme.colorScheme.error
@@ -590,9 +596,16 @@ private fun ChatScreen(state: MainUiState, viewModel: MainViewModel) {
                         }
                     }
                 }
-                IconButton(onClick = viewModel::createSession) {
-                    Icon(Icons.Filled.AddComment, contentDescription = "新建对话")
-                }
+                ChatTopAction(
+                    icon = Icons.Filled.Tune,
+                    label = "模型",
+                    onClick = viewModel::openInferenceModelPicker
+                )
+                ChatTopAction(
+                    icon = Icons.Filled.Psychology,
+                    label = "推理",
+                    onClick = viewModel::openReasoningPicker
+                )
                 IconButton(onClick = viewModel::openSettings) {
                     Icon(Icons.Filled.Settings, contentDescription = "设置")
                 }
@@ -609,6 +622,12 @@ private fun ChatScreen(state: MainUiState, viewModel: MainViewModel) {
             LaunchedEffect(state.initialScrollToken) {
                 userHasScrolledHistory = false
                 if (state.messages.isNotEmpty()) listState.scrollToItem(latestLazyListIndex(state.messages.size))
+            }
+            val imeVisible = WindowInsets.isImeVisible
+            LaunchedEffect(imeVisible) {
+                if (imeVisible && state.messages.isNotEmpty()) {
+                    listState.scrollToItem(latestLazyListIndex(state.messages.size))
+                }
             }
             LaunchedEffect(listState) {
                 snapshotFlow { listState.isScrollInProgress }.collect { scrolling ->
@@ -653,7 +672,7 @@ private fun ChatScreen(state: MainUiState, viewModel: MainViewModel) {
                 if (!state.loading && state.messages.isNotEmpty() &&
                     (state.streaming || state.thinking) && closeToBottom && !state.loadingOlder
                 ) {
-                    listState.animateScrollToItem(latestLazyListIndex(state.messages.size))
+                    listState.scrollToItem(latestLazyListIndex(state.messages.size))
                 }
             }
             val visibleMessages = remember(state.messages) { state.messages.filter(::shouldRenderMessageBubble) }
@@ -712,6 +731,16 @@ private fun ChatScreen(state: MainUiState, viewModel: MainViewModel) {
 }
 
 @Composable
+private fun ChatTopAction(icon: ImageVector, label: String, onClick: () -> Unit) {
+    IconButton(onClick = onClick) {
+        Column(horizontalAlignment = Alignment.CenterHorizontally) {
+            Icon(icon, contentDescription = label, modifier = Modifier.size(19.dp))
+            Text(label, fontSize = 9.sp, lineHeight = 10.sp)
+        }
+    }
+}
+
+@Composable
 private fun ChatComposer(state: MainUiState, viewModel: MainViewModel) {
     val context = LocalContext.current
     val keyboardController = LocalSoftwareKeyboardController.current
@@ -745,15 +774,15 @@ private fun ChatComposer(state: MainUiState, viewModel: MainViewModel) {
     val galleryLauncher = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
         uri?.let(viewModel::prepareImage)
     }
-    val fileLauncher = rememberLauncherForActivityResult(ActivityResultContracts.OpenDocument()) { uri ->
-        uri?.let {
+    val fileLauncher = rememberLauncherForActivityResult(ActivityResultContracts.OpenMultipleDocuments()) { uris ->
+        uris.forEach { uri ->
             val persisted = runCatching {
                 context.contentResolver.takePersistableUriPermission(
-                    it,
+                    uri,
                     android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION
                 )
             }.isSuccess
-            viewModel.prepareFile(it, selectedUriStorage(persisted))
+            viewModel.prepareFile(uri, selectedUriStorage(persisted))
         }
     }
     var cameraUri by remember { mutableStateOf<android.net.Uri?>(null) }
@@ -769,7 +798,6 @@ private fun ChatComposer(state: MainUiState, viewModel: MainViewModel) {
             .background(composerSurface())
             .clip(RoundedCornerShape(topStart = 28.dp, topEnd = 28.dp))
             .border(1.dp, MaterialTheme.colorScheme.outlineVariant, RoundedCornerShape(topStart = 28.dp, topEnd = 28.dp))
-            .then(if (state.featurePanelOpen) Modifier else Modifier.imePadding())
             .navigationBarsPadding()
     ) {
         if (state.pendingImages.isNotEmpty() || state.preparingImage) {
@@ -782,33 +810,12 @@ private fun ChatComposer(state: MainUiState, viewModel: MainViewModel) {
                 viewModel::retryImageUpload
             )
         }
-        state.pendingFile?.let { file ->
-            Row(
-                Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 5.dp),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                Icon(Icons.Filled.AttachFile, contentDescription = null, tint = primaryInk())
-                Spacer(Modifier.width(8.dp))
-                Column(Modifier.weight(1f)) {
-                    Text(file.name, maxLines = 1, color = primaryInk())
-                    Text(
-                        when (val upload = file.uploadState) {
-                            AttachmentUploadState.Local -> FileProcessor.formatSize(file.size)
-                            is AttachmentUploadState.Uploading -> "正在上传 ${upload.progress}%"
-                            is AttachmentUploadState.Paused -> "已暂停 · ${upload.progress}%"
-                            is AttachmentUploadState.Ready -> "${FileProcessor.formatSize(file.size)} · 已上传"
-                            is AttachmentUploadState.Failed -> "上传失败 · 点击重试"
-                        },
-                        fontSize = 11.sp,
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        modifier = Modifier.clickable(
-                            enabled = file.uploadState is AttachmentUploadState.Failed,
-                            onClick = viewModel::retryFileUpload
-                        )
-                    )
-                }
-                Text("移除", color = primaryInk(), modifier = Modifier.clickable(onClick = viewModel::removeFile).padding(8.dp))
-            }
+        if (state.pendingFiles.isNotEmpty()) {
+            PendingFileStrip(
+                files = state.pendingFiles,
+                onRetry = viewModel::retryFileUpload,
+                onRemove = viewModel::removeFile
+            )
         }
         Row(
             modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
@@ -934,13 +941,67 @@ private fun ChatTextInput(
                 IconButton(onClick = viewModel::stopStreaming) {
                     Icon(Icons.Filled.StopCircle, contentDescription = "停止生成", tint = primaryInk())
                 }
-            } else if (canSendComposition(input, state.pendingImages.map { it.id }, state.pendingFile != null)) {
+            } else if (canSendComposition(input, state.pendingImages.map(ChatImage::id), state.pendingFiles.map { it.id })) {
                 IconButton(onClick = viewModel::send) {
                     Icon(Icons.AutoMirrored.Filled.Send, contentDescription = "发送", tint = primaryInk())
                 }
             }
         }
     )
+}
+
+@Composable
+private fun PendingFileStrip(
+    files: List<ChatFile>,
+    onRetry: (String) -> Unit,
+    onRemove: (String) -> Unit
+) {
+    LazyRow(
+        modifier = Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 6.dp),
+        horizontalArrangement = Arrangement.spacedBy(8.dp)
+    ) {
+        items(files, key = ChatFile::id) { file ->
+            Surface(
+                modifier = Modifier.widthIn(min = 220.dp, max = 280.dp),
+                shape = RoundedCornerShape(16.dp),
+                color = MaterialTheme.colorScheme.surfaceVariant
+            ) {
+                Row(
+                    modifier = Modifier.padding(start = 12.dp, top = 9.dp, bottom = 9.dp, end = 4.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    Icon(Icons.Filled.AttachFile, contentDescription = null, tint = primaryInk())
+                    Spacer(Modifier.width(8.dp))
+                    Column(Modifier.weight(1f)) {
+                        Text(file.name, maxLines = 1, color = MaterialTheme.colorScheme.onSurface)
+                        Text(
+                            when (val upload = file.uploadState) {
+                                AttachmentUploadState.Local -> FileProcessor.formatSize(file.size)
+                                is AttachmentUploadState.Uploading -> "正在上传 ${upload.progress}%"
+                                is AttachmentUploadState.Paused -> "已暂停 · ${upload.progress}%"
+                                is AttachmentUploadState.Ready -> "${FileProcessor.formatSize(file.size)} · 已上传"
+                                is AttachmentUploadState.Failed -> "上传失败 · 点击重试"
+                            },
+                            fontSize = 11.sp,
+                            maxLines = 1,
+                            color = if (file.uploadState is AttachmentUploadState.Failed) {
+                                MaterialTheme.colorScheme.error
+                            } else {
+                                MaterialTheme.colorScheme.onSurfaceVariant
+                            },
+                            modifier = Modifier.clickable(
+                                enabled = file.uploadState is AttachmentUploadState.Failed,
+                                onClick = { onRetry(file.id) }
+                            )
+                        )
+                    }
+                    IconButton(onClick = { onRemove(file.id) }, modifier = Modifier.size(36.dp)) {
+                        Icon(Icons.Filled.Close, contentDescription = "移除 ${file.name}", modifier = Modifier.size(18.dp))
+                    }
+                }
+            }
+        }
+    }
 }
 
 @Composable
@@ -1238,7 +1299,8 @@ private fun SessionDrawer(
     Column(
         Modifier
             .fillMaxHeight()
-            .fillMaxWidth(0.88f)
+            .fillMaxWidth(0.76f)
+            .widthIn(max = 304.dp)
             .clip(RoundedCornerShape(topEnd = 28.dp, bottomEnd = 28.dp))
             .background(MaterialTheme.colorScheme.surface)
             .statusBarsPadding()

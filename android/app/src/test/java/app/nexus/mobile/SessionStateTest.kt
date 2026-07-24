@@ -179,11 +179,11 @@ class SessionStateTest {
     }
 
     @Test
-    fun `composition can send with text image or text file`() {
-        assertEquals(false, canSendComposition("", emptyList(), false))
-        assertEquals(true, canSendComposition("你好", emptyList(), false))
-        assertEquals(true, canSendComposition("", listOf("image"), false))
-        assertEquals(true, canSendComposition("", emptyList(), true))
+    fun `composition can send with text images or multiple files`() {
+        assertEquals(false, canSendComposition("", emptyList(), emptyList()))
+        assertEquals(true, canSendComposition("你好", emptyList(), emptyList()))
+        assertEquals(true, canSendComposition("", listOf("image"), emptyList()))
+        assertEquals(true, canSendComposition("", emptyList(), listOf("file-1", "file-2")))
     }
 
     @Test
@@ -220,10 +220,11 @@ class SessionStateTest {
             uploadedId = "server-file",
             downloadUrl = "/api/files/server-file"
         )
-        val message = optimisticUserMessage("说明文字", emptyList(), file)
+        val secondFile = file.copy(id = "local-2", name = "notes.txt", uploadedId = "server-file-2")
+        val message = optimisticUserMessage("说明文字", emptyList(), listOf(file, secondFile))
 
         assertEquals("说明文字", message.content)
-        assertEquals(listOf(file), message.files)
+        assertEquals(listOf(file, secondFile), message.files)
     }
 
     @Test
@@ -276,11 +277,14 @@ class SessionStateTest {
     @Test
     fun `each conversation retains an independent composer draft`() {
         val drafts = ConversationDrafts()
-            .save("one", ComposerDraft("第一条", emptyList(), null))
-            .save("two", ComposerDraft("第二条", emptyList(), null))
+            .save("one", ComposerDraft("第一条", emptyList(), listOf("file-one")))
+            .save("two", ComposerDraft("第二条", emptyList(), listOf("file-two", "file-three")))
 
         assertEquals("第一条", drafts.load("one").text)
         assertEquals("第二条", drafts.load("two").text)
+        assertEquals(listOf("file-one"), drafts.load("one").fileIds)
+        assertEquals(listOf("file-two", "file-three"), drafts.load("two").fileIds)
+        assertEquals(setOf("one", "two"), drafts.keys())
         assertEquals("", drafts.load("missing").text)
     }
 
@@ -434,25 +438,56 @@ class SessionStateTest {
     }
 
     @Test
-    fun `draft bundle persists text and uploaded attachment metadata`() {
+    fun `draft bundle persists multiple uploaded files`() {
+        val files = listOf(
+            PersistedDraftFile("file-1", "plan.md", "text/markdown", 123, "", "file-1", "/api/files/file-1"),
+            PersistedDraftFile("file-2", "report.pdf", "application/pdf", 456, "", "file-2", "/api/files/file-2")
+        )
         val bundle = PersistedDraftBundle(
             localDraftKey = "local-1",
             drafts = mapOf(
                 "session-1" to PersistedComposerDraft(
-                    text = "未发送内容",
+                    text = "pending",
                     images = listOf(PersistedDraftImage("image-1", "https://server/api/files/image-1", "image-1")),
-                    file = PersistedDraftFile(
-                        "file-1", "计划.md", "text/markdown", 123, "", "file-1", "/api/files/file-1"
-                    )
+                    files = files
                 )
             )
         )
 
         val restored = decodeDraftBundle(encodeDraftBundle(bundle))
+        val restoredDraft = restored.drafts.getValue("session-1")
 
         assertEquals(bundle, restored)
-        assertEquals(true, restored.drafts.getValue("session-1").images.single().toImage().uploadState.readyToSend)
-        assertEquals(true, restored.drafts.getValue("session-1").file!!.toFile().uploadState.readyToSend)
+        assertEquals(true, restoredDraft.images.single().toImage().uploadState.readyToSend)
+        assertEquals(listOf("file-1", "file-2"), restoredDraft.resolvedFiles().map { it.id })
+        assertTrue(restoredDraft.resolvedFiles().all { it.toFile().uploadState.readyToSend })
+    }
+
+    @Test
+    fun `legacy single file draft json migrates to the file list`() {
+        val legacyJson = """{
+            "localDraftKey":"local-legacy",
+            "drafts":{
+                "session-1":{
+                    "text":"pending",
+                    "images":[],
+                    "file":{
+                        "id":"legacy-file",
+                        "name":"legacy.txt",
+                        "mimeType":"text/plain",
+                        "size":12,
+                        "uri":"content://legacy",
+                        "uploadedId":"uploaded-legacy",
+                        "downloadUrl":"/api/files/uploaded-legacy"
+                    }
+                }
+            }
+        }"""
+
+        val restored = decodeDraftBundle(legacyJson).drafts.getValue("session-1")
+
+        assertEquals(listOf("legacy-file"), restored.resolvedFiles().map { it.id })
+        assertEquals(true, restored.resolvedFiles().single().toFile().uploadState.readyToSend)
     }
 
     @Test
@@ -537,13 +572,13 @@ class SessionStateTest {
     }
 
     @Test
-    fun `persona falls back to first profile while inference falls back to Hermes default`() {
+    fun `persona and inference fall back to Hermes defaults when selection is missing`() {
         val personas = listOf(HermesModel("profile-a"), HermesModel("profile-b"))
         val inference = listOf(HermesModel("model-fast", parent = "profile-a"))
 
         assertEquals("profile-b", resolveSelectedPersonaModelId(personas, "profile-b"))
-        assertEquals("profile-a", resolveSelectedPersonaModelId(personas, "missing"))
-        assertEquals("profile-a", resolveSelectedPersonaModelId(personas, null))
+        assertEquals(null, resolveSelectedPersonaModelId(personas, "missing"))
+        assertEquals(null, resolveSelectedPersonaModelId(personas, null))
         assertEquals(null, resolveSelectedPersonaModelId(emptyList(), "missing"))
         assertEquals("model-fast", resolveSelectedInferenceModelId(inference, "model-fast"))
         assertEquals(null, resolveSelectedInferenceModelId(inference, "missing"))
@@ -589,6 +624,99 @@ class SessionStateTest {
         assertEquals("3", editor.repeatText)
         assertEquals(1, editor.completedRuns)
         assertEquals(false, editor.enabled)
+    }
+
+    @Test
+    fun `chat attachment payload includes every uploaded image and file`() {
+        val images = listOf(
+            app.nexus.mobile.network.ChatImage("image-local-1", "content://image-1", uploadedId = "image-1"),
+            app.nexus.mobile.network.ChatImage("image-local-2", "content://image-2", uploadedId = "image-2")
+        )
+        val files = listOf(
+            app.nexus.mobile.network.ChatFile("file-local-1", "one.txt", "text/plain", 1, "content://file-1", uploadedId = "file-1"),
+            app.nexus.mobile.network.ChatFile("file-local-2", "two.pdf", "application/pdf", 2, "content://file-2", uploadedId = "file-2")
+        )
+
+        val payload = chatAttachmentPayload(images, files)
+
+        assertEquals(listOf("image-1", "image-2", "file-1", "file-2"), payload.ids)
+        assertEquals(mapOf("file-1" to "file", "file-2" to "file"), payload.kinds)
+    }
+
+    @Test
+    fun `removing one pending file keeps every other file`() {
+        val files = listOf(
+            app.nexus.mobile.network.ChatFile("one", "one.txt", "text/plain", 1, "content://one"),
+            app.nexus.mobile.network.ChatFile("two", "two.txt", "text/plain", 2, "content://two"),
+            app.nexus.mobile.network.ChatFile("three", "three.txt", "text/plain", 3, "content://three")
+        )
+
+        assertEquals(listOf("one", "three"), removeFileAttachment(files, "two").map { it.id })
+        assertEquals(files, removeFileAttachment(files, "missing"))
+    }
+
+    @Test
+    fun `conversation runtime configs round trip independently`() {
+        val bundle = PersistedRuntimeConfigBundle(
+            schemaVersion = RUNTIME_CONFIG_SCHEMA_VERSION,
+            localDraftKey = "draft-1",
+            configs = mapOf(
+                "session-a" to ConversationRuntimeConfig("gpt-fast", ReasoningEffort.LOW).toPersistedRuntimeConfig(),
+                "session-b" to ConversationRuntimeConfig("gpt-deep", ReasoningEffort.XHIGH).toPersistedRuntimeConfig()
+            )
+        )
+
+        val restored = decodeRuntimeConfigBundle(encodeRuntimeConfigBundle(bundle))
+
+        assertEquals(bundle, restored)
+        assertEquals("gpt-fast", restored.configs.getValue("session-a").toRuntimeConfig().inferenceModelId)
+        assertEquals(ReasoningEffort.XHIGH, restored.configs.getValue("session-b").toRuntimeConfig().reasoningEffort)
+    }
+
+    @Test
+    fun `legacy runtime selection migrates exactly once`() {
+        val first = migrateRuntimeConfigBundle(
+            bundle = PersistedRuntimeConfigBundle(),
+            activeSessionId = "session-a",
+            localDraftKey = "draft-1",
+            legacyInferenceModelId = "gpt-legacy",
+            legacyReasoningEffort = ReasoningEffort.HIGH
+        )
+        val second = migrateRuntimeConfigBundle(
+            bundle = first,
+            activeSessionId = "session-b",
+            localDraftKey = "draft-1",
+            legacyInferenceModelId = "should-not-migrate-again",
+            legacyReasoningEffort = ReasoningEffort.XHIGH
+        )
+
+        assertEquals(RUNTIME_CONFIG_SCHEMA_VERSION, second.schemaVersion)
+        assertEquals(setOf("session-a"), second.configs.keys)
+        assertEquals("gpt-legacy", second.configs.getValue("session-a").inferenceModelId)
+        assertEquals("HIGH", second.configs.getValue("session-a").reasoningEffort)
+    }
+
+    @Test
+    fun `live assistant id never creates a recovery snapshot bubble`() {
+        val messages = listOf(
+            app.nexus.mobile.network.ChatMessage("user", app.nexus.mobile.network.ChatRole.USER, "prompt")
+        )
+
+        val reconciled = reconcileRunSnapshot(messages, "assistant-live", "run-1", "snapshot")
+
+        assertEquals(listOf("user"), reconciled.map { it.id })
+    }
+
+    @Test
+    fun `removing a conversation draft does not affect other drafts`() {
+        val drafts = ConversationDrafts()
+            .save("one", ComposerDraft(text = "one", fileIds = listOf("file-one")))
+            .save("two", ComposerDraft(text = "two", fileIds = listOf("file-two")))
+            .remove("one")
+
+        assertEquals(ComposerDraft(), drafts.load("one"))
+        assertEquals("two", drafts.load("two").text)
+        assertEquals(listOf("file-two"), drafts.load("two").fileIds)
     }
 
 }

@@ -42,7 +42,7 @@ data class MainUiState(
     val selectedInferenceModelId: String? = null,
     val selectedReasoningEffort: ReasoningEffort = ReasoningEffort.DEFAULT,
     val modelsLoading: Boolean = false,
-    val modelPickerOpen: Boolean = false,
+    val modelPicker: ModelPickerKind? = null,
     val cronManagerOpen: Boolean = false,
     val cronJobs: List<HermesCronJob> = emptyList(),
     val cronJobsLoading: Boolean = false,
@@ -52,7 +52,7 @@ data class MainUiState(
     val cronNotice: String? = null,
     val messages: List<ChatMessage> = emptyList(),
     val pendingImages: List<ChatImage> = emptyList(),
-    val pendingFile: ChatFile? = null,
+    val pendingFiles: List<ChatFile> = emptyList(),
     val uploadProgress: Int? = null,
     val preparingImage: Boolean = false,
     val drawerOpen: Boolean = false,
@@ -90,13 +90,13 @@ data class MainUiState(
         get() = inferenceModels.firstOrNull { it.id == selectedInferenceModelId }
 
     val selectedPersonaModelLabel: String
-        get() = selectedPersonaModel?.displayName ?: selectedPersonaModelId ?: "当前人物"
+        get() = selectedPersonaModel?.displayName ?: selectedPersonaModelId ?: "Hermes 默认（default）"
 
     val selectedInferenceModelLabel: String
         get() = selectedInferenceModel?.displayName ?: selectedInferenceModelId ?: "Hermes 默认"
 
-    val selectedModelSummary: String
-        get() = "$selectedPersonaModelLabel / $selectedInferenceModelLabel · 推理 ${selectedReasoningEffort.label}"
+    val selectedRuntimeSummary: String
+        get() = "$selectedInferenceModelLabel · 推理 ${selectedReasoningEffort.label}"
 
 }
 
@@ -110,6 +110,23 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
     private val connectionStore = ConnectionStore(application)
     private val savedConnection = connectionStore.load()
+    private val persistedDraftBundle = connectionStore.loadDrafts()
+    private val persistedRuntimeConfigBundle = connectionStore.loadRuntimeConfigs()
+    private var localDraftKey = persistedDraftBundle.localDraftKey
+        .ifBlank { persistedRuntimeConfigBundle.localDraftKey }
+        .ifBlank { "local-draft-${UUID.randomUUID()}" }
+    private val migratedRuntimeConfigBundle = migrateRuntimeConfigBundle(
+        bundle = persistedRuntimeConfigBundle,
+        activeSessionId = savedConnection.activeSessionId,
+        localDraftKey = localDraftKey,
+        legacyInferenceModelId = savedConnection.selectedInferenceModelId,
+        legacyReasoningEffort = savedConnection.selectedReasoningEffort
+    )
+    private var runtimeConfigs = migratedRuntimeConfigBundle.configs
+        .mapValues { it.value.toRuntimeConfig() }
+        .toMutableMap()
+    private val initialRuntimeConfig = runtimeConfigs[savedConnection.activeSessionId ?: localDraftKey]
+        ?: ConversationRuntimeConfig()
     private val _input = MutableStateFlow("")
     val input: StateFlow<String> = _input.asStateFlow()
 
@@ -121,8 +138,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             token = savedConnection.token,
             activeSessionId = savedConnection.activeSessionId,
             selectedPersonaModelId = savedConnection.selectedPersonaModelId,
-            selectedInferenceModelId = savedConnection.selectedInferenceModelId,
-            selectedReasoningEffort = savedConnection.selectedReasoningEffort,
+            selectedInferenceModelId = initialRuntimeConfig.inferenceModelId,
+            selectedReasoningEffort = initialRuntimeConfig.reasoningEffort,
             autoRefresh = savedConnection.autoRefresh,
             themeMode = savedConnection.themeMode,
             connectionStatus = if (savedConnection.isUsable) ConnectionStatus.CONNECTING else ConnectionStatus.NOT_CONFIGURED
@@ -133,7 +150,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private var client: HermesApiClient? = null
     private var streamJob: Job? = null
     private var answerStatusJob: Job? = null
-    private var uploadJob: Job? = null
+    private val fileUploadJobs = mutableMapOf<String, Job>()
     private val imageUploadJobs = mutableMapOf<String, Job>()
     private val downloadJobs = mutableMapOf<String, Job>()
     private val downloadGenerations = mutableMapOf<String, Long>()
@@ -145,13 +162,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private var stopRequestedSessionId: String? = null
     private var sessionLoadGeneration = 0L
     private val observedActiveRuns = mutableSetOf<String>()
-    private val persistedDraftBundle = connectionStore.loadDrafts()
     private var drafts = ConversationDrafts()
-    private var localDraftKey = persistedDraftBundle.localDraftKey.ifBlank { "local-draft-${UUID.randomUUID()}" }
     private val draftImages = mutableMapOf<String, List<ChatImage>>()
-    private val draftFiles = mutableMapOf<String, ChatFile?>()
+    private val draftFiles = mutableMapOf<String, List<ChatFile>>()
 
     init {
+        persistRuntimeConfigs()
+        connectionStore.clearLegacyRuntimeSelections()
         restorePersistedDraftBundle()
         if (savedConnection.isUsable) connect()
     }
@@ -202,17 +219,20 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             }.onSuccess { (accessToken, health, sessions) ->
                 val selected = resolveVisibleActiveSessionId(sessions, _uiState.value.activeSessionId)
                 connectionStore.saveLogin(normalizedUrl, snapshot.username, accessToken, selected)
-                _uiState.update {
-                    it.copy(
-                        password = "",
-                        token = accessToken,
-                        connectionStatus = ConnectionStatus.CONNECTED,
-                        gatewayVersion = health.gatewayVersion,
-                        hermesVersion = health.hermesVersion,
-                        sessions = sessions,
-                        activeSessionId = selected,
-                        loading = false,
-                        error = null
+                _uiState.update { state ->
+                    applyRuntimeConfig(
+                        state.copy(
+                            password = "",
+                            token = accessToken,
+                            connectionStatus = ConnectionStatus.CONNECTED,
+                            gatewayVersion = health.gatewayVersion,
+                            hermesVersion = health.hermesVersion,
+                            sessions = sessions,
+                            activeSessionId = selected,
+                            loading = false,
+                            error = null
+                        ),
+                        selected
                     )
                 }
                 refreshModels(showErrors = false)
@@ -250,15 +270,21 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         chooseFirstWhenMissing = currentSessionId != null
                     )
                     _uiState.update { state ->
-                        state.copy(
+                        val updated = state.copy(
                             sessions = sessions,
                             activeSessionId = selected,
                             messages = if (currentSessionId != selected && selected == null) emptyList() else state.messages
                         )
+                        if (currentSessionId != selected) applyRuntimeConfig(updated, selected) else updated
                     }
                     if (currentSessionId != selected) {
                         connectionStore.saveActiveSession(selected)
-                        if (selected != null) loadSession(selected)
+                        if (selected != null) {
+                            restoreDraft(selected)
+                            loadSession(selected)
+                        } else {
+                            createSession()
+                        }
                     }
                 }
                 .onFailure { showError(it) }
@@ -432,22 +458,27 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun createSession() {
         saveCurrentDraft()
         streamJob?.cancel()
+        liveAssistantMessageId = null
         connectionStore.saveActiveSession(null)
         localDraftKey = "local-draft-${UUID.randomUUID()}"
-        _uiState.update {
-            it.copy(
-                activeSessionId = null,
-                messages = emptyList(),
-                pendingImages = emptyList(),
-                pendingFile = null,
-                drawerOpen = false,
-                featurePanelOpen = false,
-                voiceInputMode = false,
-                loading = false,
-                streaming = false,
-                thinking = false,
-                toolStatus = null,
-                error = null
+        persistRuntimeConfigs()
+        _uiState.update { state ->
+            applyRuntimeConfig(
+                state.copy(
+                    activeSessionId = null,
+                    messages = emptyList(),
+                    pendingImages = emptyList(),
+                    pendingFiles = emptyList(),
+                    drawerOpen = false,
+                    featurePanelOpen = false,
+                    voiceInputMode = false,
+                    loading = false,
+                    streaming = false,
+                    thinking = false,
+                    toolStatus = null,
+                    error = null
+                ),
+                null
             )
         }
         restoreDraft(null)
@@ -455,7 +486,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     private suspend fun persistDraftSession(): String {
         val api = client ?: error("尚未连接 Hermes")
+        val draftRuntimeKey = localDraftKey
         val session = api.createSession()
+        moveRuntimeConfig(draftRuntimeKey, session.id)
         connectionStore.saveActiveSession(session.id)
         _uiState.update {
             it.copy(
@@ -468,18 +501,22 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun selectSession(sessionId: String) {
         saveCurrentDraft()
+        liveAssistantMessageId = null
         connectionStore.saveActiveSession(sessionId)
-        _uiState.update {
-            it.copy(
-                drawerOpen = false,
-                featurePanelOpen = false,
-                pendingImages = emptyList(),
-                pendingFile = null,
-                preparingImage = false,
-                streaming = false,
-                thinking = false,
-                toolStatus = null,
-                answerStatus = AnswerStatus.IDLE
+        _uiState.update { state ->
+            applyRuntimeConfig(
+                state.copy(
+                    drawerOpen = false,
+                    featurePanelOpen = false,
+                    pendingImages = emptyList(),
+                    pendingFiles = emptyList(),
+                    preparingImage = false,
+                    streaming = false,
+                    thinking = false,
+                    toolStatus = null,
+                    answerStatus = AnswerStatus.IDLE
+                ),
+                sessionId
             )
         }
         restoreDraft(sessionId)
@@ -536,18 +573,36 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         return@onSuccess
                     }
                     val state = _uiState.value
+                    val wasActive = state.activeSessionId == session.id
                     val remaining = state.sessions.filterNot { it.id == session.id }
-                    val next = if (state.activeSessionId == session.id) remaining.firstOrNull()?.id else state.activeSessionId
+                    val next = if (wasActive) remaining.firstOrNull()?.id else state.activeSessionId
+                    connectionStore.clearMessageCache(session.id)
+                    removeRuntimeConfig(session.id)
+                    drafts = drafts.remove(session.id)
+                    draftImages.remove(session.id)
+                    draftFiles.remove(session.id)
+                    persistAllDrafts()
                     connectionStore.saveActiveSession(next)
-                    _uiState.update {
-                        it.copy(
+                    _uiState.update { current ->
+                        val updated = current.copy(
                             sessions = remaining,
                             activeSessionId = next,
-                            messages = if (state.activeSessionId == session.id) emptyList() else it.messages,
+                            messages = if (wasActive) emptyList() else current.messages,
+                            pendingImages = if (wasActive) emptyList() else current.pendingImages,
+                            pendingFiles = if (wasActive) emptyList() else current.pendingFiles,
                             sessionToDelete = null
                         )
+                        if (wasActive) applyRuntimeConfig(updated, next) else updated
                     }
-                    if (next != null && state.activeSessionId == session.id) loadSession(next)
+                    if (wasActive) {
+                        if (next != null) {
+                            restoreDraft(next)
+                            loadSession(next)
+                        } else {
+                            _input.value = ""
+                            createSession()
+                        }
+                    }
                 }
                 .onFailure { showError(it) }
         }
@@ -559,17 +614,20 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         sessionLoadJob?.cancel()
         val generation = ++sessionLoadGeneration
         val cached = connectionStore.loadMessageCache(sessionId)
-        _uiState.update {
-            it.copy(
-                activeSessionId = sessionId,
-                messages = cached,
-                loading = cached.isEmpty(),
-                loadingOlder = false,
-                loadedMessageCount = cached.size,
-                hasMoreMessages = true,
-                historyPrependCount = 0,
-                initialScrollToken = it.initialScrollToken + 1,
-                error = null
+        _uiState.update { state ->
+            applyRuntimeConfig(
+                state.copy(
+                    activeSessionId = sessionId,
+                    messages = cached,
+                    loading = cached.isEmpty(),
+                    loadingOlder = false,
+                    loadedMessageCount = cached.size,
+                    hasMoreMessages = true,
+                    historyPrependCount = 0,
+                    initialScrollToken = state.initialScrollToken + 1,
+                    error = null
+                ),
+                sessionId
             )
         }
         refreshActiveRunStatus()
@@ -642,14 +700,63 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         saveCurrentDraft(persistImmediately = false)
     }
 
+    private fun runtimeKey(sessionId: String? = _uiState.value.activeSessionId): String = sessionId ?: localDraftKey
+
+    private fun runtimeConfig(sessionId: String? = _uiState.value.activeSessionId): ConversationRuntimeConfig =
+        runtimeConfigs[runtimeKey(sessionId)] ?: ConversationRuntimeConfig()
+
+    private fun applyRuntimeConfig(state: MainUiState, sessionId: String?): MainUiState {
+        val config = runtimeConfig(sessionId)
+        return state.copy(
+            selectedInferenceModelId = config.inferenceModelId,
+            selectedReasoningEffort = config.reasoningEffort
+        )
+    }
+
+    private fun saveRuntimeConfig(key: String, config: ConversationRuntimeConfig) {
+        if (config.isDefault) runtimeConfigs.remove(key) else runtimeConfigs[key] = config
+        persistRuntimeConfigs()
+    }
+
+    private fun moveRuntimeConfig(fromKey: String, toKey: String) {
+        val config = runtimeConfigs.remove(fromKey)
+        if (config != null && !config.isDefault) runtimeConfigs[toKey] = config
+        persistRuntimeConfigs()
+    }
+
+    private fun removeRuntimeConfig(key: String) {
+        runtimeConfigs.remove(key)
+        persistRuntimeConfigs()
+    }
+
+    private fun persistRuntimeConfigs() {
+        val stored = runtimeConfigs
+            .filterValues { !it.isDefault }
+            .mapValues { it.value.toPersistedRuntimeConfig() }
+        connectionStore.saveRuntimeConfigs(
+            PersistedRuntimeConfigBundle(
+                schemaVersion = RUNTIME_CONFIG_SCHEMA_VERSION,
+                localDraftKey = localDraftKey,
+                configs = stored
+            )
+        )
+    }
+
     private fun draftKey(sessionId: String? = _uiState.value.activeSessionId): String = sessionId ?: localDraftKey
 
     private fun saveCurrentDraft(persistImmediately: Boolean = true) {
         val state = _uiState.value
         val key = draftKey()
-        drafts = drafts.save(key, ComposerDraft(_input.value, state.pendingImages.map { it.id }, state.pendingFile?.id))
+        drafts = drafts.save(
+            key,
+            ComposerDraft(
+                text = _input.value,
+                imageIds = state.pendingImages.map(ChatImage::id),
+                fileIds = state.pendingFiles.map(ChatFile::id)
+            )
+        )
         draftImages[key] = state.pendingImages
-        draftFiles[key] = state.pendingFile
+        draftFiles[key] = state.pendingFiles
         if (persistImmediately) flushDrafts() else scheduleDraftPersistence()
     }
 
@@ -673,11 +780,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val draft = drafts.load(key)
         _input.value = draft.text
         val images = draftImages[key].orEmpty()
-        val file = draftFiles[key]
+        val files = draftFiles[key].orEmpty()
         _uiState.update {
             it.copy(
                 pendingImages = images,
-                pendingFile = file,
+                pendingFiles = files,
                 preparingImage = false
             )
         }
@@ -686,10 +793,17 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private fun restorePersistedDraftBundle() {
         persistedDraftBundle.drafts.forEach { (key, stored) ->
             val images = stored.images.map(PersistedDraftImage::toImage)
-            val file = stored.file?.toFile()
-            drafts = drafts.save(key, ComposerDraft(stored.text, images.map { it.id }, file?.id))
+            val files = stored.resolvedFiles().map(PersistedDraftFile::toFile)
+            drafts = drafts.save(
+                key,
+                ComposerDraft(
+                    text = stored.text,
+                    imageIds = images.map(ChatImage::id),
+                    fileIds = files.map(ChatFile::id)
+                )
+            )
             draftImages[key] = images
-            draftFiles[key] = file
+            draftFiles[key] = files
         }
         if (savedConnection.activeSessionId != null) {
             restoreDraft(savedConnection.activeSessionId)
@@ -699,7 +813,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     private fun persistAllDrafts() {
-        val keys = (draftImages.keys + draftFiles.keys + listOf(draftKey())).toSet()
+        val keys = (drafts.keys() + draftImages.keys + draftFiles.keys + draftKey()).toSet()
         val stored = keys.associateWith { key ->
             val draft = drafts.load(key)
             PersistedComposerDraft(
@@ -707,11 +821,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 images = draftImages[key].orEmpty().map {
                     PersistedDraftImage(it.id, it.previewUri, it.uploadedId)
                 },
-                file = draftFiles[key]?.let {
+                files = draftFiles[key].orEmpty().map {
                     PersistedDraftFile(it.id, it.name, it.mimeType, it.size, it.uri, it.uploadedId, it.downloadUrl)
                 }
             )
-        }.filterValues { it.text.isNotBlank() || it.images.isNotEmpty() || it.file != null }
+        }.filterValues { it.text.isNotBlank() || it.images.isNotEmpty() || it.files.isNotEmpty() }
         connectionStore.saveDrafts(PersistedDraftBundle(localDraftKey, stored))
     }
 
@@ -801,77 +915,114 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun prepareFile(uri: Uri, storage: SelectedUriStorage = SelectedUriStorage.PERSISTED_URI) {
-        uploadJob?.cancel()
-        uploadJob = viewModelScope.launch {
+        viewModelScope.launch {
             runCatching { FileProcessor.prepare(getApplication(), uri, storage) }
                 .onSuccess { localFile ->
-                    _uiState.update {
-                        it.copy(
-                            pendingFile = localFile.copy(uploadState = AttachmentUploadState.Uploading(0)),
+                    val queued = localFile.copy(uploadState = AttachmentUploadState.Uploading(0))
+                    _uiState.update { state ->
+                        state.copy(
+                            pendingFiles = state.pendingFiles + queued,
                             featurePanelOpen = false,
                             error = null
                         )
                     }
-                    uploadPendingFile(localFile)
+                    saveCurrentDraft()
+                    uploadFile(queued)
                 }
-                .onFailure { showImageError(it.message ?: "文件处理失败") }
+                .onFailure { error ->
+                    _uiState.update { it.copy(error = error.message ?: "文件处理失败") }
+                }
         }
     }
 
-    private suspend fun uploadPendingFile(file: ChatFile) {
-        val api = client ?: return
-        val app = getApplication<Application>()
-        runCatching {
-            val source = FileProcessor.uploadSource(getApplication(), file)
-            api.uploadStream(source.name, source.mimeType, source.size, source.openStream) { progress ->
-                NotificationHelper.showTransfer(app, file.id, file.name, progress, uploading = true)
-                _uiState.update { state ->
-                    if (state.pendingFile?.id != file.id) state
-                    else state.copy(pendingFile = state.pendingFile.copy(uploadState = AttachmentUploadState.Uploading(progress)))
-                }
-            }
-        }.onSuccess { uploaded ->
-            NotificationHelper.finishTransfer(app, file.id, file.name, uploading = true, success = true)
+    private fun uploadFile(file: ChatFile) {
+        val api = client ?: run {
             _uiState.update { state ->
-                if (state.pendingFile?.id != file.id) state
-                else state.copy(
-                    pendingFile = state.pendingFile.copy(
-                        name = uploaded.name,
-                        mimeType = uploaded.mimeType ?: state.pendingFile.mimeType,
-                        size = uploaded.size,
-                        uploadedId = uploaded.id,
-                        downloadUrl = uploaded.downloadUrl,
-                        uploadState = AttachmentUploadState.Ready(uploaded.id)
-                    )
+                state.copy(
+                    pendingFiles = state.pendingFiles.map { pending ->
+                        if (pending.id == file.id) pending.copy(uploadState = AttachmentUploadState.Failed("尚未连接 Hermes")) else pending
+                    }
                 )
             }
-            saveCurrentDraft()
-        }.onFailure { error ->
-            if (error is kotlinx.coroutines.CancellationException) return@onFailure
-            NotificationHelper.finishTransfer(app, file.id, file.name, uploading = true, success = false)
-            _uiState.update { state ->
-                if (state.pendingFile?.id != file.id) state
-                else state.copy(pendingFile = state.pendingFile.copy(uploadState = AttachmentUploadState.Failed(friendlyNetworkError(error))))
+            return
+        }
+        val app = getApplication<Application>()
+        fileUploadJobs.remove(file.id)?.cancel()
+        fileUploadJobs[file.id] = viewModelScope.launch {
+            runCatching {
+                val source = FileProcessor.uploadSource(getApplication(), file)
+                api.uploadStream(source.name, source.mimeType, source.size, source.openStream) { progress ->
+                    NotificationHelper.showTransfer(app, file.id, file.name, progress, uploading = true)
+                    _uiState.update { state ->
+                        state.copy(
+                            pendingFiles = state.pendingFiles.map { pending ->
+                                if (pending.id == file.id) pending.copy(
+                                    uploadState = AttachmentUploadState.Uploading(progress)
+                                ) else pending
+                            }
+                        )
+                    }
+                }
+            }.onSuccess { uploaded ->
+                fileUploadJobs.remove(file.id)
+                NotificationHelper.finishTransfer(app, file.id, file.name, uploading = true, success = true)
+                _uiState.update { state ->
+                    state.copy(
+                        pendingFiles = state.pendingFiles.map { pending ->
+                            if (pending.id == file.id) pending.copy(
+                                name = uploaded.name,
+                                mimeType = uploaded.mimeType ?: pending.mimeType,
+                                size = uploaded.size,
+                                uploadedId = uploaded.id,
+                                downloadUrl = uploaded.downloadUrl,
+                                uploadState = AttachmentUploadState.Ready(uploaded.id)
+                            ) else pending
+                        }
+                    )
+                }
+                saveCurrentDraft()
+            }.onFailure { error ->
+                if (error is kotlinx.coroutines.CancellationException) return@onFailure
+                fileUploadJobs.remove(file.id)
+                NotificationHelper.finishTransfer(app, file.id, file.name, uploading = true, success = false)
+                _uiState.update { state ->
+                    state.copy(
+                        pendingFiles = state.pendingFiles.map { pending ->
+                            if (pending.id == file.id) pending.copy(
+                                uploadState = AttachmentUploadState.Failed(friendlyNetworkError(error))
+                            ) else pending
+                        }
+                    )
+                }
+                saveCurrentDraft()
             }
         }
     }
 
-    fun retryFileUpload() {
-        val file = _uiState.value.pendingFile ?: return
-        uploadJob?.cancel()
-        uploadJob = viewModelScope.launch {
-            _uiState.update { it.copy(pendingFile = file.copy(uploadState = AttachmentUploadState.Uploading(0))) }
-            uploadPendingFile(file)
+    fun retryFileUpload(fileId: String) {
+        val file = _uiState.value.pendingFiles.firstOrNull { it.id == fileId } ?: return
+        fileUploadJobs.remove(fileId)?.cancel()
+        _uiState.update { state ->
+            state.copy(
+                pendingFiles = state.pendingFiles.map { pending ->
+                    if (pending.id == fileId) pending.copy(uploadState = AttachmentUploadState.Uploading(0)) else pending
+                },
+                error = null
+            )
         }
+        uploadFile(file)
     }
 
-    fun removeFile() {
-        uploadJob?.cancel()
-        val pending = _uiState.value.pendingFile
-        val fileId = pending?.uploadedId
-        _uiState.update { it.copy(pendingFile = null) }
-        pending?.id?.let { NotificationHelper.cancelTransfer(getApplication(), it) }
-        if (fileId != null) viewModelScope.launch { runCatching { client?.deleteFile(fileId) } }
+    fun removeFile(fileId: String) {
+        fileUploadJobs.remove(fileId)?.cancel()
+        val pending = _uiState.value.pendingFiles.firstOrNull { it.id == fileId } ?: return
+        _uiState.update { state ->
+            state.copy(pendingFiles = removeFileAttachment(state.pendingFiles, fileId))
+        }
+        NotificationHelper.cancelTransfer(getApplication(), fileId)
+        pending.uploadedId?.let { uploadedId ->
+            viewModelScope.launch { runCatching { client?.deleteFile(uploadedId) } }
+        }
         saveCurrentDraft()
     }
 
@@ -882,10 +1033,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val originalDraftKey = draftKey()
         val text = originalInput.trim()
         val images = state.pendingImages
-        val originalFile = state.pendingFile
-        if (!canSendComposition(text, images.map { it.id }, originalFile != null) || state.streaming) return
-        if (originalFile != null && !originalFile.uploadState.readyToSend) {
-            _uiState.update { it.copy(error = "请等待文件上传完成") }
+        val files = state.pendingFiles
+        if (!canSendComposition(text, images.map(ChatImage::id), files.map(ChatFile::id)) || state.streaming) return
+        if (files.any { !it.uploadState.readyToSend }) {
+            _uiState.update { it.copy(error = "请等待所有文件上传完成") }
             return
         }
         if (images.any { !it.uploadState.readyToSend }) {
@@ -897,7 +1048,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         _uiState.update {
             it.copy(
                 pendingImages = emptyList(),
-                pendingFile = null,
+                pendingFiles = emptyList(),
                 streaming = true,
                 thinking = true,
                 toolStatus = null,
@@ -914,8 +1065,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 val wasDraft = state.activeSessionId == null
                 val sessionId = state.activeSessionId ?: persistDraftSession()
                 originSessionId = sessionId
+                val firstFileName = files.firstOrNull()?.name
                 if (wasDraft) {
-                    val title = deriveSessionTitle(text, originalFile?.name, images.isNotEmpty())
+                    val title = deriveSessionTitle(text, firstFileName, images.isNotEmpty())
                     val renamed = api.renameSession(sessionId, title)
                     _uiState.update { current ->
                         current.copy(sessions = current.sessions.map { if (it.id == sessionId) renamed else it })
@@ -927,28 +1079,33 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     state.serverUrl,
                     state.token,
                     sessionId,
-                    state.activeSession?.displayTitle ?: deriveSessionTitle(text, originalFile?.name, images.isNotEmpty())
+                    state.activeSession?.displayTitle ?: deriveSessionTitle(text, firstFileName, images.isNotEmpty())
                 )
-                val uploadedFileId = originalFile?.uploadedId
-                val sentFile = originalFile?.copy(
-                    downloadUrl = originalFile.downloadUrl?.let { resolveDownloadUrl(state.serverUrl, it) }
-                )
-                val userMessage = optimisticUserMessage(text, images, sentFile)
+                val sentFiles = files.map { file ->
+                    file.copy(downloadUrl = file.downloadUrl?.let { resolveDownloadUrl(state.serverUrl, it) })
+                }
+                val userMessage = optimisticUserMessage(text, images, sentFiles)
                 val assistantId = UUID.randomUUID().toString()
                 val assistantMessage = ChatMessage(assistantId, ChatRole.ASSISTANT, "")
                 liveAssistantMessageId = assistantId
                 stopRequestedSessionId = null
                 optimisticUserId = userMessage.id
                 optimisticAssistantId = assistantId
-                _uiState.update {
-                    if (it.activeSessionId == sessionId) it.copy(messages = it.messages + userMessage + assistantMessage) else it
+                _uiState.update { current ->
+                    if (current.activeSessionId != sessionId) current
+                    else {
+                        val baseMessages = current.messages.filterNot { message ->
+                            message.id.startsWith("run-snapshot-")
+                        }
+                        current.copy(messages = baseMessages + userMessage + assistantMessage)
+                    }
                 }
-                val uploadedImageIds = images.mapNotNull(ChatImage::uploadedId)
+                val payload = chatAttachmentPayload(images, files)
                 api.streamChat(
                     sessionId = sessionId,
                     message = text,
-                    attachmentIds = uploadedImageIds + uploadedFileId?.let(::listOf).orEmpty(),
-                    attachmentKinds = uploadedFileId?.let { mapOf(it to "file") }.orEmpty(),
+                    attachmentIds = payload.ids,
+                    attachmentKinds = payload.kinds,
                     personaModel = state.selectedPersonaModelId,
                     inferenceModel = state.selectedInferenceModelId,
                     reasoningEffort = state.selectedReasoningEffort.wireValue
@@ -957,14 +1114,17 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             }.onSuccess {
                 liveAssistantMessageId = null
                 images.forEach { NotificationHelper.cancelTransfer(getApplication(), it.id) }
-                originalFile?.id?.let { NotificationHelper.cancelTransfer(getApplication(), it) }
+                files.forEach {
+                    fileUploadJobs.remove(it.id)?.cancel()
+                    NotificationHelper.cancelTransfer(getApplication(), it.id)
+                }
                 drafts = drafts.save(originalDraftKey, ComposerDraft())
                 draftImages.remove(originalDraftKey)
                 draftFiles.remove(originalDraftKey)
                 persistAllDrafts()
                 _uiState.update {
                     if (it.activeSessionId == originSessionId) {
-                        it.copy(pendingFile = null, streaming = false, thinking = false, toolStatus = null, uploadProgress = null)
+                        it.copy(pendingFiles = emptyList(), streaming = false, thinking = false, toolStatus = null, uploadProgress = null)
                     } else it
                 }
                 refreshSessions()
@@ -976,6 +1136,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         val restore = error !is kotlinx.coroutines.CancellationException
                         val restoredInput = draftTextAfterRunFailure(_input.value, originalInput, restore)
                         _input.value = restoredInput
+                        val restoredFiles = if (stoppedByUser) {
+                            current.pendingFiles
+                        } else {
+                            (files + current.pendingFiles).distinctBy(ChatFile::id)
+                        }
                         current.copy(
                             messages = messagesAfterSendTermination(
                                 current.messages,
@@ -984,7 +1149,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                                 if (stoppedByUser) SendTermination.STOPPED_BY_USER else SendTermination.FAILED
                             ),
                             pendingImages = if (!stoppedByUser && current.pendingImages.isEmpty()) images else current.pendingImages,
-                            pendingFile = if (!stoppedByUser) current.pendingFile ?: originalFile else current.pendingFile,
+                            pendingFiles = restoredFiles,
                             streaming = false,
                             thinking = false,
                             toolStatus = null,
@@ -993,6 +1158,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     }
                 }
                 if (error !is kotlinx.coroutines.CancellationException && _uiState.value.activeSessionId == originSessionId) {
+                    saveCurrentDraft()
                     showTransientAnswerStatus(AnswerStatus.FAILED)
                     showError(error)
                 }
@@ -1189,41 +1355,71 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         _uiState.update { it.copy(featurePanelOpen = false, error = "${feature}将在后续版本开放") }
     }
 
-    fun openModelPicker() {
-        _uiState.update { it.copy(modelPickerOpen = true, error = null) }
+    fun openPersonaModelPicker() {
+        openModelPicker(ModelPickerKind.PERSONA)
+    }
+
+    fun openInferenceModelPicker() {
+        openModelPicker(ModelPickerKind.INFERENCE)
+    }
+
+    fun openReasoningPicker() {
+        openModelPicker(ModelPickerKind.REASONING)
+    }
+
+    private fun openModelPicker(kind: ModelPickerKind) {
+        _uiState.update { it.copy(modelPicker = kind, error = null) }
         val state = _uiState.value
-        if (state.personaModels.isEmpty() && state.inferenceModels.isEmpty() && !state.modelsLoading) refreshModels()
+        if (kind != ModelPickerKind.REASONING &&
+            state.personaModels.isEmpty() &&
+            state.inferenceModels.isEmpty() &&
+            !state.modelsLoading
+        ) {
+            refreshModels()
+        }
     }
 
     fun closeModelPicker() {
-        _uiState.update { it.copy(modelPickerOpen = false) }
+        _uiState.update { it.copy(modelPicker = null) }
     }
 
     fun refreshModels(showErrors: Boolean = true) {
         val api = client ?: return
         if (_uiState.value.modelsLoading) return
+        val requestedRuntimeKey = runtimeKey()
         _uiState.update { it.copy(modelsLoading = true) }
         viewModelScope.launch {
             runCatching { api.listModels() }
                 .onSuccess { models ->
                     val personas = personaModels(models)
                     val inference = inferenceModels(models)
+                    val currentState = _uiState.value
                     val selectedPersona = resolveSelectedPersonaModelId(
                         personas,
-                        _uiState.value.selectedPersonaModelId
+                        currentState.selectedPersonaModelId
                     )
+                    val requestedConfig = runtimeConfigs[requestedRuntimeKey] ?: ConversationRuntimeConfig()
                     val selectedInference = resolveSelectedInferenceModelId(
                         inference,
-                        _uiState.value.selectedInferenceModelId
+                        requestedConfig.inferenceModelId
                     )
                     connectionStore.saveSelectedPersonaModel(selectedPersona)
-                    connectionStore.saveSelectedInferenceModel(selectedInference)
-                    _uiState.update {
-                        it.copy(
+                    saveRuntimeConfig(
+                        requestedRuntimeKey,
+                        requestedConfig.copy(inferenceModelId = selectedInference)
+                    )
+                    _uiState.update { state ->
+                        val stateRuntimeKey = runtimeKey(state.activeSessionId)
+                        state.copy(
                             personaModels = personas,
                             selectedPersonaModelId = selectedPersona,
                             inferenceModels = inference,
-                            selectedInferenceModelId = selectedInference,
+                            selectedInferenceModelId = if (stateRuntimeKey == requestedRuntimeKey) {
+                                selectedInference
+                            } else {
+                                runtimeConfig(state.activeSessionId).inferenceModelId
+                            },
+                            selectedReasoningEffort = runtimeConfig(state.activeSessionId).reasoningEffort,
                             modelsLoading = false
                         )
                     }
@@ -1243,12 +1439,16 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun selectInferenceModel(modelId: String?) {
         if (modelId != null && _uiState.value.inferenceModels.none { it.id == modelId }) return
-        connectionStore.saveSelectedInferenceModel(modelId)
+        val key = runtimeKey()
+        val updated = runtimeConfig().copy(inferenceModelId = modelId)
+        saveRuntimeConfig(key, updated)
         _uiState.update { it.copy(selectedInferenceModelId = modelId, error = null) }
     }
 
     fun selectReasoningEffort(effort: ReasoningEffort) {
-        connectionStore.saveSelectedReasoningEffort(effort)
+        val key = runtimeKey()
+        val updated = runtimeConfig().copy(reasoningEffort = effort)
+        saveRuntimeConfig(key, updated)
         _uiState.update { it.copy(selectedReasoningEffort = effort, error = null) }
     }
 
@@ -1500,8 +1700,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 answerStatusJob = null
             },
             cancelUploads = {
-                uploadJob?.cancel()
-                uploadJob = null
+                fileUploadJobs.values.forEach(Job::cancel)
+                fileUploadJobs.clear()
                 imageUploadJobs.values.forEach(Job::cancel)
                 imageUploadJobs.clear()
             },
@@ -1516,6 +1716,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         connectionStore.clear()
         client = null
         drafts = ConversationDrafts()
+        runtimeConfigs.clear()
         draftImages.clear()
         draftFiles.clear()
         localDraftKey = "local-draft-${UUID.randomUUID()}"

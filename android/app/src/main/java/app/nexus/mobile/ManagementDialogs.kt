@@ -56,8 +56,8 @@ import app.nexus.mobile.network.HermesCronJob
 
 @Composable
 internal fun ManagementDialogs(state: MainUiState, viewModel: MainViewModel) {
-    if (state.modelPickerOpen) {
-        ModelPickerDialog(state, viewModel)
+    state.modelPicker?.let { kind ->
+        ModelPickerDialog(kind, state, viewModel)
     }
     if (state.cronManagerOpen) {
         CronManagerDialog(state, viewModel)
@@ -71,10 +71,20 @@ internal fun ManagementDialogs(state: MainUiState, viewModel: MainViewModel) {
 }
 
 @Composable
-private fun ModelPickerDialog(state: MainUiState, viewModel: MainViewModel) {
+private fun ModelPickerDialog(kind: ModelPickerKind, state: MainUiState, viewModel: MainViewModel) {
+    val title = when (kind) {
+        ModelPickerKind.PERSONA -> "人物模型"
+        ModelPickerKind.INFERENCE -> "调用模型"
+        ModelPickerKind.REASONING -> "推理深度"
+    }
+    val description = when (kind) {
+        ModelPickerKind.PERSONA -> "人物模型仅负责角色设定、记忆和工具，不决定实际调用的推理模型。"
+        ModelPickerKind.INFERENCE -> "仅为当前对话选择实际调用的模型，新对话使用 Hermes 默认值。"
+        ModelPickerKind.REASONING -> "仅为当前对话设置推理量；是否生效由 Hermes 和当前调用模型决定。"
+    }
     AlertDialog(
         onDismissRequest = viewModel::closeModelPicker,
-        title = { Text("人物、调用模型与推理深度") },
+        title = { Text(title) },
         text = {
             Column(
                 Modifier
@@ -84,137 +94,19 @@ private fun ModelPickerDialog(state: MainUiState, viewModel: MainViewModel) {
                 verticalArrangement = Arrangement.spacedBy(8.dp)
             ) {
                 Text(
-                    "人物模型保留角色设定、记忆和工具；调用模型决定实际推理模型；推理深度控制支持该参数的模型投入的推理量。",
+                    description,
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     fontSize = 13.sp
                 )
-                if (state.modelsLoading) {
+                if (kind != ModelPickerKind.REASONING && state.modelsLoading) {
                     Box(Modifier.fillMaxWidth().height(120.dp), contentAlignment = Alignment.Center) {
                         CircularProgressIndicator(modifier = Modifier.size(28.dp), strokeWidth = 2.dp)
                     }
                 } else {
-                    Text("人物模型", fontWeight = FontWeight.SemiBold)
-                    if (state.personaModels.isEmpty()) {
-                        Text(
-                            "服务器没有返回可用的人物模型。",
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            fontSize = 12.sp
-                        )
-                    } else {
-                        state.personaModels.forEach { model ->
-                            Row(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .clickable { viewModel.selectPersonaModel(model.id) }
-                                    .padding(vertical = 6.dp),
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                RadioButton(
-                                    selected = state.selectedPersonaModelId == model.id,
-                                    onClick = { viewModel.selectPersonaModel(model.id) }
-                                )
-                                Column(Modifier.weight(1f)) {
-                                    Text(model.displayName, fontWeight = FontWeight.SemiBold)
-                                    Text(
-                                        "Hermes Profile · 保留人物设定",
-                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                        fontSize = 12.sp
-                                    )
-                                }
-                            }
-                        }
-                    }
-
-                    HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.45f))
-                    Text("调用模型", fontWeight = FontWeight.SemiBold)
-                    Row(
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .clickable { viewModel.selectInferenceModel(null) }
-                            .padding(vertical = 6.dp),
-                        verticalAlignment = Alignment.CenterVertically
-                    ) {
-                        RadioButton(
-                            selected = state.selectedInferenceModelId == null,
-                            onClick = { viewModel.selectInferenceModel(null) }
-                        )
-                        Column(Modifier.weight(1f)) {
-                            Text("Hermes 默认", fontWeight = FontWeight.SemiBold)
-                            Text(
-                                "使用 Hermes 当前配置的默认推理模型",
-                                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                fontSize = 12.sp
-                            )
-                        }
-                    }
-                    if (state.inferenceModels.isEmpty()) {
-                        Text(
-                            "服务器还没有配置其他可切换的调用模型。",
-                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                            fontSize = 12.sp
-                        )
-                    } else {
-                        state.inferenceModels.forEach { model ->
-                            Row(
-                                modifier = Modifier
-                                    .fillMaxWidth()
-                                    .clickable { viewModel.selectInferenceModel(model.id) }
-                                    .padding(vertical = 6.dp),
-                                verticalAlignment = Alignment.CenterVertically
-                            ) {
-                                RadioButton(
-                                    selected = state.selectedInferenceModelId == model.id,
-                                    onClick = { viewModel.selectInferenceModel(model.id) }
-                                )
-                                Column(Modifier.weight(1f)) {
-                                    Text(model.displayName, fontWeight = FontWeight.SemiBold)
-                                    val details = buildList {
-                                        model.root?.takeIf { it.isNotBlank() && it != model.id }?.let { add(it) }
-                                        model.parent?.takeIf { it.isNotBlank() }?.let { add("继承人物：$it") }
-                                        model.ownedBy?.takeIf { it.isNotBlank() }?.let(::add)
-                                    }.joinToString(" · ")
-                                    if (details.isNotBlank()) {
-                                        Text(
-                                            details,
-                                            color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                            fontSize = 12.sp
-                                        )
-                                    }
-                                }
-                            }
-                        }
-                    }
-
-                    HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.45f))
-                    Text("推理深度", fontWeight = FontWeight.SemiBold)
-                    Text(
-                        "Nexus 会把该值透传给 Hermes；是否生效取决于当前 Hermes 和调用模型是否支持。",
-                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                        fontSize = 12.sp
-                    )
-                    ReasoningEffort.entries.forEach { effort ->
-                        Row(
-                            modifier = Modifier
-                                .fillMaxWidth()
-                                .clickable { viewModel.selectReasoningEffort(effort) }
-                                .padding(vertical = 4.dp),
-                            verticalAlignment = Alignment.CenterVertically
-                        ) {
-                            RadioButton(
-                                selected = state.selectedReasoningEffort == effort,
-                                onClick = { viewModel.selectReasoningEffort(effort) }
-                            )
-                            Column(Modifier.weight(1f)) {
-                                Text(effort.label, fontWeight = FontWeight.SemiBold)
-                                if (effort == ReasoningEffort.DEFAULT) {
-                                    Text(
-                                        "不发送 reasoning_effort，由 Hermes 使用默认行为",
-                                        color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                        fontSize = 12.sp
-                                    )
-                                }
-                            }
-                        }
+                    when (kind) {
+                        ModelPickerKind.PERSONA -> PersonaModelOptions(state, viewModel)
+                        ModelPickerKind.INFERENCE -> InferenceModelOptions(state, viewModel)
+                        ModelPickerKind.REASONING -> ReasoningOptions(state, viewModel)
                     }
                 }
                 state.error?.let {
@@ -222,13 +114,109 @@ private fun ModelPickerDialog(state: MainUiState, viewModel: MainViewModel) {
                 }
             }
         },
-        confirmButton = { TextButton(onClick = viewModel::closeModelPicker) { Text("完成") } },
-        dismissButton = {
-            TextButton(onClick = { viewModel.refreshModels() }, enabled = !state.modelsLoading) {
-                Text("刷新模型")
+        confirmButton = {
+            TextButton(onClick = viewModel::closeModelPicker) { Text("完成") }
+        },
+        dismissButton = if (kind == ModelPickerKind.REASONING) null else {
+            {
+                TextButton(onClick = { viewModel.refreshModels() }, enabled = !state.modelsLoading) {
+                    Text("刷新模型")
+                }
             }
         }
     )
+}
+
+@Composable
+private fun PersonaModelOptions(state: MainUiState, viewModel: MainViewModel) {
+    ModelOptionRow(
+        selected = state.selectedPersonaModelId == null,
+        title = "Hermes 默认（default）",
+        subtitle = "不发送 persona_model，使用 Hermes 当前默认人物",
+        onClick = { viewModel.selectPersonaModel(null) }
+    )
+    if (state.personaModels.isEmpty()) {
+        Text(
+            "服务器没有返回其他可用的人物模型。",
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            fontSize = 12.sp
+        )
+    } else {
+        state.personaModels.forEach { model ->
+            ModelOptionRow(
+                selected = state.selectedPersonaModelId == model.id,
+                title = model.displayName,
+                subtitle = null,
+                onClick = { viewModel.selectPersonaModel(model.id) }
+            )
+        }
+    }
+}
+
+@Composable
+private fun InferenceModelOptions(state: MainUiState, viewModel: MainViewModel) {
+    ModelOptionRow(
+        selected = state.selectedInferenceModelId == null,
+        title = "Hermes 默认",
+        subtitle = null,
+        onClick = { viewModel.selectInferenceModel(null) }
+    )
+    if (state.inferenceModels.isEmpty()) {
+        Text(
+            "服务器还没有配置其他可切换的调用模型。",
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            fontSize = 12.sp
+        )
+    } else {
+        state.inferenceModels.forEach { model ->
+            ModelOptionRow(
+                selected = state.selectedInferenceModelId == model.id,
+                title = model.displayName,
+                subtitle = null,
+                onClick = { viewModel.selectInferenceModel(model.id) }
+            )
+        }
+    }
+}
+
+@Composable
+private fun ReasoningOptions(state: MainUiState, viewModel: MainViewModel) {
+    ReasoningEffort.entries.forEach { effort ->
+        ModelOptionRow(
+            selected = state.selectedReasoningEffort == effort,
+            title = effort.label,
+            subtitle = if (effort == ReasoningEffort.DEFAULT) {
+                "不发送 reasoning_effort，由 Hermes 使用默认行为"
+            } else {
+                null
+            },
+            onClick = { viewModel.selectReasoningEffort(effort) }
+        )
+    }
+}
+
+@Composable
+private fun ModelOptionRow(
+    selected: Boolean,
+    title: String,
+    subtitle: String?,
+    onClick: () -> Unit
+) {
+    Row(
+        modifier = Modifier
+            .fillMaxWidth()
+            .clickable(onClick = onClick)
+            .padding(vertical = 6.dp),
+        verticalAlignment = Alignment.CenterVertically
+    ) {
+        RadioButton(selected = selected, onClick = onClick)
+        Column(Modifier.weight(1f)) {
+            Text(title, fontWeight = FontWeight.SemiBold)
+            subtitle?.let {
+                Text(it, color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 12.sp)
+            }
+        }
+    }
 }
 
 @Composable

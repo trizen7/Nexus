@@ -1,5 +1,7 @@
 package app.nexus.mobile
 
+import app.nexus.mobile.network.ChatFile
+import app.nexus.mobile.network.ChatImage
 import app.nexus.mobile.network.ChatMessage
 import app.nexus.mobile.network.ChatRole
 import app.nexus.mobile.network.HermesCronJob
@@ -34,7 +36,7 @@ fun inferenceModels(models: List<HermesModel>): List<HermesModel> =
     models.filter(HermesModel::isInferenceModel)
 
 fun resolveSelectedPersonaModelId(models: List<HermesModel>, preferredModelId: String?): String? =
-    preferredModelId?.takeIf { id -> models.any { it.id == id } } ?: models.firstOrNull()?.id
+    preferredModelId?.takeIf { id -> models.any { it.id == id } }
 
 fun resolveSelectedInferenceModelId(models: List<HermesModel>, preferredModelId: String?): String? =
     preferredModelId?.takeIf { id -> models.any { it.id == id } }
@@ -63,6 +65,16 @@ fun toggleChannel(expanded: Set<SessionChannel>, channel: SessionChannel): Set<S
     if (channel in expanded) expanded - channel else expanded + channel
 
 fun defaultServerUrl(): String = ""
+
+data class ConversationRuntimeConfig(
+    val inferenceModelId: String? = null,
+    val reasoningEffort: ReasoningEffort = ReasoningEffort.DEFAULT
+) {
+    val isDefault: Boolean
+        get() = inferenceModelId.isNullOrBlank() && reasoningEffort == ReasoningEffort.DEFAULT
+}
+
+enum class ModelPickerKind { PERSONA, INFERENCE, REASONING }
 
 enum class ReasoningEffort(val wireValue: String?, val label: String) {
     DEFAULT(null, "Hermes 默认"),
@@ -235,6 +247,7 @@ fun reconcileRunSnapshot(
             if (message.id == liveAssistantId) message.copy(content = snapshot) else message
         }
     }
+    if (liveAssistantId != null) return withoutRecoverySnapshots
     val snapshotId = "run-snapshot-${runId ?: "active"}"
     return withoutRecoverySnapshots + ChatMessage(snapshotId, ChatRole.ASSISTANT, snapshot)
 }
@@ -320,8 +333,8 @@ fun isTextAttachment(name: String, mimeType: String?): Boolean {
     return mimeType.orEmpty().startsWith("text/") || extension in setOf("txt", "md", "json", "csv", "xml", "yaml", "yml")
 }
 
-fun canSendComposition(text: String, imageIds: List<String>, hasFile: Boolean): Boolean =
-    text.isNotBlank() || imageIds.isNotEmpty() || hasFile
+fun canSendComposition(text: String, imageIds: List<String>, fileIds: List<String>): Boolean =
+    text.isNotBlank() || imageIds.isNotEmpty() || fileIds.isNotEmpty()
 
 fun friendlySpeechError(code: Int): String = when (code) {
     4, 5, 8, 10, 11, 12, 13 -> "语音识别服务暂不可用"
@@ -343,15 +356,32 @@ fun restoreDraftForSession(
 
 fun optimisticUserMessage(
     text: String,
-    images: List<app.nexus.mobile.network.ChatImage>,
-    file: app.nexus.mobile.network.ChatFile?
+    images: List<ChatImage>,
+    files: List<ChatFile>
 ): ChatMessage = ChatMessage(
     id = java.util.UUID.randomUUID().toString(),
     role = app.nexus.mobile.network.ChatRole.USER,
     content = text,
     images = images,
-    files = file?.let(::listOf).orEmpty()
+    files = files
 )
+
+data class ChatAttachmentPayload(
+    val ids: List<String>,
+    val kinds: Map<String, String>
+)
+
+fun chatAttachmentPayload(images: List<ChatImage>, files: List<ChatFile>): ChatAttachmentPayload {
+    val imageIds = images.mapNotNull(ChatImage::uploadedId)
+    val fileIds = files.mapNotNull(ChatFile::uploadedId)
+    return ChatAttachmentPayload(
+        ids = imageIds + fileIds,
+        kinds = fileIds.associateWith { "file" }
+    )
+}
+
+fun removeFileAttachment(files: List<ChatFile>, fileId: String): List<ChatFile> =
+    files.filterNot { it.id == fileId }
 
 sealed interface AttachmentUploadState {
     val readyToSend: Boolean
@@ -398,7 +428,7 @@ fun downloadTransferNotificationId(state: FileDownloadState): Int {
 data class ComposerDraft(
     val text: String = "",
     val imageIds: List<String> = emptyList(),
-    val fileId: String? = null
+    val fileIds: List<String> = emptyList()
 )
 
 data class ConversationDrafts(private val values: Map<String, ComposerDraft> = emptyMap()) {
@@ -406,6 +436,10 @@ data class ConversationDrafts(private val values: Map<String, ComposerDraft> = e
         copy(values = values + (sessionKey to draft))
 
     fun load(sessionKey: String): ComposerDraft = values[sessionKey] ?: ComposerDraft()
+
+    fun keys(): Set<String> = values.keys
+
+    fun remove(sessionKey: String): ConversationDrafts = copy(values = values - sessionKey)
 }
 
 fun deriveSessionTitle(text: String, fileName: String? = null, hasImage: Boolean = false): String {

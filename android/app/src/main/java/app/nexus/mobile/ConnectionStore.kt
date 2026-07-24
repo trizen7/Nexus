@@ -22,6 +22,7 @@ class ConnectionStore(context: Context) {
     private val tokenCipher = TokenCipher()
 
     fun load(): SavedConnection {
+        migratePersonaSelection()
         val storedServerUrl = preferences.getString(KEY_SERVER_URL, "").orEmpty()
         val migratedServerUrl = migrateStoredServerUrl(storedServerUrl)
         if (migratedServerUrl != storedServerUrl) {
@@ -75,7 +76,9 @@ class ConnectionStore(context: Context) {
     }
 
     fun saveSelectedPersonaModel(modelId: String?) {
-        val editor = preferences.edit().remove(KEY_LEGACY_SELECTED_MODEL)
+        val editor = preferences.edit()
+            .remove(KEY_LEGACY_SELECTED_MODEL)
+            .putInt(KEY_PERSONA_SELECTION_SCHEMA, PERSONA_SELECTION_SCHEMA_VERSION)
         if (modelId.isNullOrBlank()) {
             editor.remove(KEY_SELECTED_PERSONA_MODEL)
         } else {
@@ -102,6 +105,22 @@ class ConnectionStore(context: Context) {
             editor.putString(KEY_SELECTED_REASONING_EFFORT, effort.name)
         }
         editor.apply()
+    }
+
+    fun loadRuntimeConfigs(): PersistedRuntimeConfigBundle {
+        val json = preferences.getString(KEY_RUNTIME_CONFIGS, null) ?: return PersistedRuntimeConfigBundle()
+        return decodeRuntimeConfigBundle(json)
+    }
+
+    fun saveRuntimeConfigs(bundle: PersistedRuntimeConfigBundle) {
+        preferences.edit().putString(KEY_RUNTIME_CONFIGS, encodeRuntimeConfigBundle(bundle)).apply()
+    }
+
+    fun clearLegacyRuntimeSelections() {
+        preferences.edit()
+            .remove(KEY_SELECTED_INFERENCE_MODEL)
+            .remove(KEY_SELECTED_REASONING_EFFORT)
+            .apply()
     }
 
     fun loadDrafts(): PersistedDraftBundle {
@@ -132,6 +151,15 @@ class ConnectionStore(context: Context) {
 
     private fun cacheKey(sessionId: String): String = messageCacheKey(sessionId)
 
+    private fun migratePersonaSelection() {
+        if (preferences.getInt(KEY_PERSONA_SELECTION_SCHEMA, 0) >= PERSONA_SELECTION_SCHEMA_VERSION) return
+        preferences.edit()
+            .remove(KEY_SELECTED_PERSONA_MODEL)
+            .remove(KEY_LEGACY_SELECTED_MODEL)
+            .putInt(KEY_PERSONA_SELECTION_SCHEMA, PERSONA_SELECTION_SCHEMA_VERSION)
+            .apply()
+    }
+
     private companion object {
         const val MESSAGE_CACHE_SIZE = 10
         const val KEY_SERVER_URL = "server_url"
@@ -146,6 +174,9 @@ class ConnectionStore(context: Context) {
         const val KEY_SELECTED_PERSONA_MODEL = "selected_persona_model_id"
         const val KEY_SELECTED_INFERENCE_MODEL = "selected_inference_model_id"
         const val KEY_SELECTED_REASONING_EFFORT = "selected_reasoning_effort"
+        const val KEY_PERSONA_SELECTION_SCHEMA = "persona_selection_schema"
+        const val PERSONA_SELECTION_SCHEMA_VERSION = 1
+        const val KEY_RUNTIME_CONFIGS = "conversation_runtime_configs_v1"
         const val KEY_DRAFTS = "composer_drafts_v1"
     }
 }
@@ -159,6 +190,64 @@ fun sessionIdFromMessageCacheKey(key: String): String? = runCatching {
     String(JavaBase64.getUrlDecoder().decode(encoded), StandardCharsets.UTF_8)
 }.getOrNull()
 
+const val RUNTIME_CONFIG_SCHEMA_VERSION = 1
+
+data class PersistedRuntimeConfigBundle(
+    val schemaVersion: Int = 0,
+    val localDraftKey: String = "",
+    val configs: Map<String, PersistedConversationRuntimeConfig> = emptyMap()
+)
+
+data class PersistedConversationRuntimeConfig(
+    val inferenceModelId: String? = null,
+    val reasoningEffort: String? = null
+) {
+    fun toRuntimeConfig(): ConversationRuntimeConfig = ConversationRuntimeConfig(
+        inferenceModelId = inferenceModelId?.takeIf(String::isNotBlank),
+        reasoningEffort = ReasoningEffort.fromStored(reasoningEffort)
+    )
+}
+
+fun ConversationRuntimeConfig.toPersistedRuntimeConfig(): PersistedConversationRuntimeConfig =
+    PersistedConversationRuntimeConfig(
+        inferenceModelId = inferenceModelId?.takeIf(String::isNotBlank),
+        reasoningEffort = reasoningEffort.takeUnless { it == ReasoningEffort.DEFAULT }?.name
+    )
+
+fun migrateRuntimeConfigBundle(
+    bundle: PersistedRuntimeConfigBundle,
+    activeSessionId: String?,
+    localDraftKey: String,
+    legacyInferenceModelId: String?,
+    legacyReasoningEffort: ReasoningEffort
+): PersistedRuntimeConfigBundle {
+    val resolvedLocalDraftKey = localDraftKey.ifBlank { bundle.localDraftKey }
+    if (bundle.schemaVersion >= RUNTIME_CONFIG_SCHEMA_VERSION) {
+        return bundle.copy(localDraftKey = resolvedLocalDraftKey)
+    }
+    val configs = bundle.configs.toMutableMap()
+    val legacyConfig = ConversationRuntimeConfig(
+        inferenceModelId = legacyInferenceModelId?.takeIf(String::isNotBlank),
+        reasoningEffort = legacyReasoningEffort
+    )
+    val targetKey = activeSessionId ?: resolvedLocalDraftKey
+    if (!legacyConfig.isDefault && targetKey.isNotBlank() && targetKey !in configs) {
+        configs[targetKey] = legacyConfig.toPersistedRuntimeConfig()
+    }
+    return PersistedRuntimeConfigBundle(
+        schemaVersion = RUNTIME_CONFIG_SCHEMA_VERSION,
+        localDraftKey = resolvedLocalDraftKey,
+        configs = configs
+    )
+}
+
+fun encodeRuntimeConfigBundle(bundle: PersistedRuntimeConfigBundle): String = Gson().toJson(bundle)
+
+fun decodeRuntimeConfigBundle(json: String): PersistedRuntimeConfigBundle = runCatching {
+    val type = object : TypeToken<PersistedRuntimeConfigBundle>() {}.type
+    Gson().fromJson<PersistedRuntimeConfigBundle>(json, type) ?: PersistedRuntimeConfigBundle()
+}.getOrDefault(PersistedRuntimeConfigBundle())
+
 data class PersistedDraftBundle(
     val localDraftKey: String = "",
     val drafts: Map<String, PersistedComposerDraft> = emptyMap()
@@ -167,8 +256,12 @@ data class PersistedDraftBundle(
 data class PersistedComposerDraft(
     val text: String = "",
     val images: List<PersistedDraftImage> = emptyList(),
+    val files: List<PersistedDraftFile> = emptyList(),
+    // Kept only to migrate drafts written by Nexus 0.0.8 and earlier.
     val file: PersistedDraftFile? = null
-)
+) {
+    fun resolvedFiles(): List<PersistedDraftFile> = files.ifEmpty { listOfNotNull(file) }
+}
 
 data class PersistedDraftImage(
     val id: String,
