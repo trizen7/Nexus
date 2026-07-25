@@ -6,6 +6,14 @@
 
 - 暂无。
 
+## 0.0.15｜Nexus 空白对话标识与历史品牌清理
+
+- 新建对话的空白页不再显示遗留的单字人物标识，改为直接显示 Nexus 项目标识；
+- 清理 README、品牌说明、部署迁移说明、历史更新记录与测试样例中的旧人物品牌信息，避免用户误以为该人物由 Nexus 固定或从 Hermes 自动读取；
+- 人物模型功能保持不变：只有 Hermes API 明确返回的人物条目才会显示，未选择时继续使用 `Hermes 默认（default）`；
+- 自动验证：Android 143 项单元测试通过，`lintDebug` 为 `0 errors, 1 warning`，Debug APK 构建通过；Gateway `95 passed, 9 skipped`，Python 编译与网页 JavaScript 语法检查通过；
+- 版本升级到 0.0.15，并继续遵守 Hermes 原版只读边界。
+
 ## 0.0.14｜输入法即时布局与动画卡顿修复
 
 - 删除 0.0.13 为等待输入法动画稳定而加入的 300ms 固定延迟，键盘开始显示时立即把消息区定位到最新内容；
@@ -36,7 +44,7 @@
 ## 0.0.11｜Hermes 模型语义修正与外部渠道运行状态
 
 - 修复把 Hermes `/v1/models` 中 `parent` 为空的主推理模型误识别为人物的问题；人物列表现在只接受明确标记为 `persona` 的条目，升级后清除旧版本保存的错误人物选择；
-- 当前 Hermes 对外返回的主模型名称（例如“星禾”）不再出现在人物列表，默认人物恢复为 `Hermes 默认（default）`，请求不发送 `persona_model`；其子路由（例如 `gpt-5.6-sol`）仍保留在调用模型列表；
+- 当前 Hermes 对外返回的主推理模型不再出现在人物列表，默认人物恢复为 `Hermes 默认（default）`，请求不发送 `persona_model`；其子路由（例如 `gpt-5.6-sol`）仍保留在调用模型列表；
 - Gateway 通过原版 Hermes 的 `/health/detailed` 与 `/api/sessions` 公开 HTTP API，以只读、保守匹配方式观察 QQ、微信等其他渠道任务，使 Android App 可显示“思考中”并在完成后刷新消息；候选会话不唯一时不猜测；
 - 外部渠道任务标记为不可停止，Android 只显示进度指示器；Nexus 自己发起的任务仍保留停止按钮；Hermes 状态探测失败时会清除合成状态，避免永久卡在“思考中”；
 - 补充模型分类、旧人物选择迁移、运行状态兼容与外部渠道观察器回归测试；
@@ -127,7 +135,7 @@
 - Gateway 新增可选内置 HTTPS 监听、最低 TLS 1.2、网页 HTTP→HTTPS 跳转和本地 CA 下载接口；
 - 独立成品测试环境使用 HTTP `18787` 提供 Android/兼容 API、HTTPS `18788` 提供网页，并持久保存本地 CA；
 - 测试环境控制文件纳入 `scripts/product-test-environment/` 维护，安全同步只更新控制脚本，不修改账号、配置、媒体、虚拟环境、日志或状态；
-- Hermes 本地测试配置新增 `gpt-5.6-sol` 调用模型路由，人物模型“星禾”继续保留。
+- 验证 `gpt-5.6-sol` 调用模型路由与 Hermes 默认人物的兼容性。
 - 自动验证：Gateway 68 项通过、9 项按环境跳过，Python 编译和网页契约通过；Android 116 项 JVM 测试通过，Lint 无 Error，Debug APK 构建成功；
 - 独立环境完成两轮无损升级，账号、Nexus 保存的 Hermes 上游连接配置副本、媒体和 3 个 Hermes 定时任务保持不变，本地 CA 指纹在第二轮升级中保持一致；本机与局域网 HTTPS、HTTP 跳转、双端口监听和 LocalSubnet 防火墙规则均验证通过。
 
@@ -165,6 +173,5 @@
 - 提供 Android 多会话、附件、下载、通知、草稿和长会话分页能力；
 - 提供 Nexus Gateway 账号认证、Hermes 会话代理、SSE、媒体和 Web 管理能力；
 - 增加 Dockerfile、Docker Compose、容器健康检查、非 root 用户、持久化目录和日志轮转；
-- 增加飞牛 NAS 部署、备份、更新及旧星禾网关迁移说明；
+- 增加飞牛 NAS 部署、备份、更新及旧网关迁移说明；
 - 增加 Android、网关、网页契约和 Docker 构建 CI；
-- 星禾移动端 v0.0.20 冻结为历史最终版，后续开发统一进入 Nexus。

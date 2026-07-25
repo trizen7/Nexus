@@ -35,10 +35,10 @@ class HermesStreamParserTest {
             parser.accept("data: {\"session_id\":\"mobile\",\"run_id\":\"run-1\"}"),
             parser.accept(""),
             parser.accept("event: assistant.delta"),
-            parser.accept("data: {\"delta\":\"星\"}"),
+            parser.accept("data: {\"delta\":\"你\"}"),
             parser.accept(""),
             parser.accept("event: assistant.delta"),
-            parser.accept("data: {\"delta\":\"禾\"}"),
+            parser.accept("data: {\"delta\":\"好\"}"),
             parser.accept(""),
             parser.accept("event: run.completed"),
             parser.accept("data: {\"completed\":true}"),
@@ -48,8 +48,8 @@ class HermesStreamParserTest {
         assertEquals(
             listOf(
                 HermesStreamEvent.RunStarted,
-                HermesStreamEvent.TextDelta("星"),
-                HermesStreamEvent.TextDelta("禾"),
+                HermesStreamEvent.TextDelta("你"),
+                HermesStreamEvent.TextDelta("好"),
                 HermesStreamEvent.Completed
             ),
             events

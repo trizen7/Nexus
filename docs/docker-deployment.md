@@ -209,7 +209,7 @@ Compose 已配置 Docker `json-file` 日志轮转：
 
 默认存储保护：单文件上限 50 MiB、媒体总配额 10 GiB、磁盘至少保留 512 MiB。可通过 `NEXUS_MAX_UPLOAD_BYTES`、`NEXUS_MAX_TOTAL_STORAGE_BYTES`、`NEXUS_MIN_FREE_DISK_BYTES` 调整；登录限速可通过 `NEXUS_LOGIN_RATE_LIMIT` 和 `NEXUS_LOGIN_RATE_WINDOW_SECONDS` 调整。
 
-## 8. 从旧星禾或旧 HTTPS Gateway 迁移
+## 8. 从旧版 Gateway 迁移
 
 建议迁移方式：
 
@@ -223,7 +223,6 @@ Compose 已配置 Docker `json-file` 日志轮转：
 8. 用 `/health`、登录、会话列表、流式回答和文件下载逐项验证；
 9. 确认稳定后再删除旧容器或旧 Windows 启动项。
 
-Android 的 Nexus 包名为 `app.nexus.mobile`，它会与旧星禾版并存，不会覆盖旧 App。完成迁移后可手动卸载旧星禾版。旧 App 中的本地草稿和缓存不会自动迁移到 Nexus App。
 
 ## 9. 安全边界
 

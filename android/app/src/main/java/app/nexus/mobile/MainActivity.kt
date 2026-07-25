@@ -18,6 +18,7 @@ import androidx.core.view.WindowInsetsCompat
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import androidx.lifecycle.compose.LocalLifecycleOwner
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.clickable
@@ -120,6 +121,7 @@ import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -1176,12 +1178,11 @@ private fun EmptyConversation() {
         modifier = Modifier.fillMaxWidth().padding(top = 72.dp, start = 24.dp, end = 24.dp),
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
-        Box(
-            Modifier.size(54.dp).background(userBubble(), RoundedCornerShape(18.dp)),
-            contentAlignment = Alignment.Center
-        ) {
-            Text("禾", color = primaryInk(), fontSize = 22.sp, fontWeight = FontWeight.SemiBold)
-        }
+        Image(
+            painter = painterResource(R.drawable.ic_launcher_foreground),
+            contentDescription = "Nexus",
+            modifier = Modifier.size(54.dp)
+        )
         Spacer(Modifier.height(16.dp))
         Text("开始一段新的对话", fontSize = 20.sp, color = primaryInk(), fontWeight = FontWeight.SemiBold)
         Spacer(Modifier.height(7.dp))

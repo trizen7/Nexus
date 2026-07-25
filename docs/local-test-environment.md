@@ -143,12 +143,12 @@ powershell -NoProfile -ExecutionPolicy Bypass -File ".\成品\本地测试环境
 
 普通升级后账号、Nexus 保存的 Hermes 上游连接配置副本、媒体和历史 TLS 文件哈希必须保持不变，同时验证 `18787` 正在监听、`18788` 未监听、`process.json` 记录的 PID 与实际监听进程一致。
 
-## 0.0.14 成品
+## 0.0.15 成品
 
 当前成品文件：
 
-- `成品/Nexus-Android-0.0.14-debug.apk`；
-- `成品/Nexus-Gateway-0.0.14.zip`；
+- `成品/Nexus-Android-0.0.15-debug.apk`；
+- `成品/Nexus-Gateway-0.0.15.zip`；
 - `成品/SHA256SUMS.txt`。
 
 Debug APK 不内嵌本地 CA。App 可连接 HTTP 或由 Android 系统信任链验证的 HTTPS；公网 HTTP 不再由客户端拦截，但仅建议用于明确可接受明文传输风险的环境。

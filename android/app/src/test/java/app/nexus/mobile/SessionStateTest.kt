@@ -589,8 +589,8 @@ class SessionStateTest {
     @Test
     fun `Hermes primary model is not mistaken for a persona`() {
         val models = listOf(
-            HermesModel("星禾"),
-            HermesModel("gpt-5.6-sol", root = "gpt-5.6-sol", parent = "星禾")
+            HermesModel("primary-model"),
+            HermesModel("gpt-5.6-sol", root = "gpt-5.6-sol", parent = "primary-model")
         )
 
         assertEquals(emptyList<String>(), personaModels(models).map { it.id })
@@ -600,9 +600,9 @@ class SessionStateTest {
     @Test
     fun `persona picker accepts only explicit persona metadata`() {
         val models = listOf(
-            HermesModel("星禾"),
+            HermesModel("primary-model"),
             HermesModel("assistant-profile", kind = "persona"),
-            HermesModel("model-fast", parent = "星禾")
+            HermesModel("model-fast", parent = "primary-model")
         )
 
         assertEquals(listOf("assistant-profile"), personaModels(models).map { it.id })
