@@ -160,6 +160,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private var sessionLoadJob: Job? = null
     private var runStatusJob: Job? = null
     private var draftPersistJob: Job? = null
+    private var draftPersistRevision = 0L
     private var liveAssistantMessageId: String? = null
     private var stopRequestedSessionId: String? = null
     private var sessionLoadGeneration = 0L
@@ -715,7 +716,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun updateInput(value: String) {
         _input.value = value
-        saveCurrentDraft(persistImmediately = false)
+        scheduleDraftPersistence()
     }
 
     private fun runtimeKey(sessionId: String? = _uiState.value.activeSessionId): String = sessionId ?: localDraftKey
@@ -762,7 +763,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     private fun draftKey(sessionId: String? = _uiState.value.activeSessionId): String = sessionId ?: localDraftKey
 
-    private fun saveCurrentDraft(persistImmediately: Boolean = true) {
+    private fun captureCurrentDraft() {
         val state = _uiState.value
         val key = draftKey()
         drafts = drafts.save(
@@ -775,27 +776,44 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         )
         draftImages[key] = state.pendingImages
         draftFiles[key] = state.pendingFiles
-        if (persistImmediately) flushDrafts() else scheduleDraftPersistence()
+    }
+
+    private fun saveCurrentDraft() {
+        captureCurrentDraft()
+        flushDrafts(captureLatest = false)
     }
 
     private fun scheduleDraftPersistence() {
-        draftPersistJob?.cancel()
+        draftPersistRevision += 1
+        if (draftPersistJob?.isActive == true) return
         draftPersistJob = viewModelScope.launch {
-            delay(DRAFT_PERSIST_DEBOUNCE_MILLIS)
+            var observedRevision: Long
+            do {
+                observedRevision = draftPersistRevision
+                delay(DRAFT_PERSIST_DEBOUNCE_MILLIS)
+            } while (observedRevision != draftPersistRevision)
+            captureCurrentDraft()
             persistAllDrafts()
             draftPersistJob = null
         }
     }
 
     fun flushDrafts() {
+        flushDrafts(captureLatest = true)
+    }
+
+    private fun flushDrafts(captureLatest: Boolean) {
         draftPersistJob?.cancel()
         draftPersistJob = null
+        draftPersistRevision = 0L
+        if (captureLatest) captureCurrentDraft()
         persistAllDrafts()
     }
 
     private fun clearSubmittedDraft(key: String) {
         draftPersistJob?.cancel()
         draftPersistJob = null
+        draftPersistRevision = 0L
         drafts = drafts.clear(key)
         draftImages.remove(key)
         draftFiles.remove(key)
@@ -1753,6 +1771,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         stopPolling()
         draftPersistJob?.cancel()
         draftPersistJob = null
+        draftPersistRevision = 0L
         performLocalLogoutCleanup(
             cancelStream = {
                 streamJob?.cancel()

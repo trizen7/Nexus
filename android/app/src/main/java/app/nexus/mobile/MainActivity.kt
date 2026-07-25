@@ -91,6 +91,7 @@ import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.SideEffect
+import androidx.compose.runtime.Stable
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.getValue
@@ -116,7 +117,6 @@ import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.vector.ImageVector
-import androidx.compose.ui.input.pointer.PointerEventPass
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalConfiguration
@@ -131,6 +131,10 @@ import app.nexus.mobile.network.ChatImage
 import app.nexus.mobile.network.ChatMessage
 import app.nexus.mobile.network.ChatRole
 import app.nexus.mobile.network.HermesSession
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.StateFlow
+
+private const val IME_SETTLE_DELAY_MILLIS = 300L
 
 private val LightScheme = lightColorScheme(
     primary = Color(0xFF4F46E5),
@@ -546,7 +550,7 @@ private fun ConnectionScreen(state: MainUiState, viewModel: MainViewModel) {
 @OptIn(androidx.compose.foundation.layout.ExperimentalLayoutApi::class)
 @Composable
 private fun ChatScreen(state: MainUiState, viewModel: MainViewModel) {
-    Column(Modifier.fillMaxSize().imePadding()) {
+    Column(Modifier.fillMaxSize()) {
         Surface(
             color = MaterialTheme.colorScheme.surface.copy(alpha = 0.98f),
             tonalElevation = 2.dp,
@@ -626,7 +630,9 @@ private fun ChatScreen(state: MainUiState, viewModel: MainViewModel) {
             val imeVisible = WindowInsets.isImeVisible
             LaunchedEffect(imeVisible) {
                 if (imeVisible && state.messages.isNotEmpty()) {
-                    listState.requestScrollToItem(latestLazyListIndex(state.messages.size))
+                    delay(IME_SETTLE_DELAY_MILLIS)
+                    val lastItemIndex = (listState.layoutInfo.totalItemsCount - 1).coerceAtLeast(0)
+                    listState.requestScrollToItem(lastItemIndex)
                 }
             }
             LaunchedEffect(listState) {
@@ -745,6 +751,15 @@ private fun ChatComposer(state: MainUiState, viewModel: MainViewModel) {
     val context = LocalContext.current
     val keyboardController = LocalSoftwareKeyboardController.current
     val focusManager = LocalFocusManager.current
+    val inputController = remember(viewModel) {
+        ChatInputController(
+            input = viewModel.input,
+            onInputChanged = viewModel::updateInput,
+            onCloseFeaturePanel = viewModel::closeFeaturePanel,
+            onStopStreaming = viewModel::stopStreaming,
+            onSend = viewModel::send
+        )
+    }
     var speechController by remember { mutableStateOf<SpeechInputController?>(null) }
     DisposableEffect(Unit) {
         onDispose {
@@ -799,6 +814,7 @@ private fun ChatComposer(state: MainUiState, viewModel: MainViewModel) {
             .clip(RoundedCornerShape(topStart = 28.dp, topEnd = 28.dp))
             .border(1.dp, MaterialTheme.colorScheme.outlineVariant, RoundedCornerShape(topStart = 28.dp, topEnd = 28.dp))
             .navigationBarsPadding()
+            .imePadding()
     ) {
         if (state.pendingImages.isNotEmpty() || state.preparingImage) {
             PendingImageStrip(
@@ -878,8 +894,11 @@ private fun ChatComposer(state: MainUiState, viewModel: MainViewModel) {
             } else {
                 ChatTextInput(
                     modifier = Modifier.weight(1f),
-                    state = state,
-                    viewModel = viewModel
+                    controller = inputController,
+                    featurePanelOpen = state.featurePanelOpen,
+                    streaming = state.streaming,
+                    runStoppable = state.runStoppable,
+                    hasPendingAttachments = state.pendingImages.isNotEmpty() || state.pendingFiles.isNotEmpty()
                 )
             }
             IconButton(onClick = {
@@ -919,15 +938,25 @@ private fun ChatComposer(state: MainUiState, viewModel: MainViewModel) {
     }
 }
 
+@Stable
+private class ChatInputController(
+    val input: StateFlow<String>,
+    val onInputChanged: (String) -> Unit,
+    val onCloseFeaturePanel: () -> Unit,
+    val onStopStreaming: () -> Unit,
+    val onSend: () -> Unit
+)
+
 @Composable
 private fun ChatTextInput(
     modifier: Modifier,
-    state: MainUiState,
-    viewModel: MainViewModel
+    controller: ChatInputController,
+    featurePanelOpen: Boolean,
+    streaming: Boolean,
+    runStoppable: Boolean,
+    hasPendingAttachments: Boolean
 ) {
-    val input by viewModel.input.collectAsState()
-    val focusRequester = remember { FocusRequester() }
-    val keyboardController = LocalSoftwareKeyboardController.current
+    val input by controller.input.collectAsState()
     var focused by remember { mutableStateOf(false) }
     val shape = RoundedCornerShape(20.dp)
     val cursorColor = MaterialTheme.colorScheme.primary
@@ -935,25 +964,11 @@ private fun ChatTextInput(
 
     BasicTextField(
         value = input,
-        onValueChange = viewModel::updateInput,
-        modifier = modifier
-            .focusRequester(focusRequester)
-            .onFocusChanged { focusState ->
-                focused = focusState.isFocused
-                if (focusState.isFocused && state.featurePanelOpen) viewModel.closeFeaturePanel()
-            }
-            .pointerInput(state.featurePanelOpen) {
-                awaitPointerEventScope {
-                    while (true) {
-                        val event = awaitPointerEvent(PointerEventPass.Initial)
-                        if (event.changes.any { change -> change.pressed && !change.previousPressed }) {
-                            if (state.featurePanelOpen) viewModel.closeFeaturePanel()
-                            focusRequester.requestFocus()
-                            keyboardController?.show()
-                        }
-                    }
-                }
-            },
+        onValueChange = controller.onInputChanged,
+        modifier = modifier.onFocusChanged { focusState ->
+            focused = focusState.isFocused
+            if (focusState.isFocused && featurePanelOpen) controller.onCloseFeaturePanel()
+        },
         textStyle = MaterialTheme.typography.bodyLarge.copy(color = MaterialTheme.colorScheme.onSurface),
         cursorBrush = SolidColor(cursorColor),
         minLines = 1,
@@ -983,11 +998,11 @@ private fun ChatTextInput(
                     }
                     innerTextField()
                 }
-                if (state.streaming && state.runStoppable) {
-                    IconButton(onClick = viewModel::stopStreaming) {
+                if (streaming && runStoppable) {
+                    IconButton(onClick = controller.onStopStreaming) {
                         Icon(Icons.Filled.StopCircle, contentDescription = "停止生成", tint = primaryInk())
                     }
-                } else if (state.streaming) {
+                } else if (streaming) {
                     Box(
                         modifier = Modifier.size(48.dp),
                         contentAlignment = Alignment.Center
@@ -997,8 +1012,8 @@ private fun ChatTextInput(
                             strokeWidth = 2.dp
                         )
                     }
-                } else if (canSendComposition(input, state.pendingImages.map(ChatImage::id), state.pendingFiles.map { it.id })) {
-                    IconButton(onClick = viewModel::send) {
+                } else if (input.isNotBlank() || hasPendingAttachments) {
+                    IconButton(onClick = controller.onSend) {
                         Icon(Icons.AutoMirrored.Filled.Send, contentDescription = "发送", tint = primaryInk())
                     }
                 }
@@ -1181,10 +1196,14 @@ private fun MessageBubble(
 ) {
     val context = LocalContext.current
     val user = message.role == ChatRole.USER
-    val downloads = if (user) emptyList() else extractDownloadableLinks(message.content)
-    val visibleText = downloads.fold(message.content) { text, url -> text.replace(url, "") }
-        .replace(Regex("\\n{3,}"), "\n\n")
-        .trim()
+    val downloads = remember(user, message.content) {
+        if (user) emptyList() else extractDownloadableLinks(message.content)
+    }
+    val visibleText = remember(message.content, downloads) {
+        downloads.fold(message.content) { text, url -> text.replace(url, "") }
+            .replace(Regex("\\n{3,}"), "\n\n")
+            .trim()
+    }
 
     Row(Modifier.fillMaxWidth(), horizontalArrangement = if (user) Arrangement.End else Arrangement.Start) {
         Card(
@@ -1275,8 +1294,9 @@ private fun MessageBubble(
 @Composable
 private fun MarkdownMessage(text: String) {
     val context = LocalContext.current
+    val blocks = remember(text) { parseMarkdownBlocks(text) }
     Column(verticalArrangement = Arrangement.spacedBy(6.dp)) {
-        parseMarkdownBlocks(text).forEach { block ->
+        blocks.forEach { block ->
             when (block) {
                 is MarkdownBlock.Heading -> SelectionContainer {
                     Text(
