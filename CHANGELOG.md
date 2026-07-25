@@ -13,10 +13,10 @@
 - Gateway 初始化配置写入与回滚进一步加固：配置文件或账号文件为符号链接时直接拒绝，回滚删除前同时核对 inode、大小与 SHA-256，避免 Linux inode 复用时误删外部替换内容；
 - 开发测试依赖升级到 `pytest 9.1.1` 与 `pytest-asyncio 1.4.0`，修复依赖安全告警；
 - 独立成品测试环境升级时保留日志，并在每次启动前把已有非空 stdout/stderr 日志归档，避免 `Start-Process` 重定向截断历史记录；
-- 发布前 Gateway 本地回归测试为 `98 passed, 9 skipped`，Python 编译、网页 JavaScript 语法和网页契约检查均通过。
+- 发布前 Gateway 本地回归测试为 `100 passed, 9 skipped`，Python 编译、网页 JavaScript 语法和网页契约检查均通过；
 - 建立 Apache License 2.0 开源发布资料，补充隐私说明、第三方依赖说明、贡献、安全、行为准则、品牌边界、Issue/PR 模板与维护者规则；
-- 建立仓库与 Git 历史敏感信息扫描、确定性 Gateway ZIP、Android Release APK/AAB 正式签名、签名校验、SHA-256 清单和发布清单；
-- 增加 tag 驱动的 GitHub Actions 发布工作流、Dependabot 和普通 CI Release 编译检查；
+- 建立仓库与 Git 历史敏感信息扫描、跨平台字节稳定的 Gateway ZIP、Android Release APK/AAB 正式签名、签名校验、SHA-256 清单和发布清单；Gateway ZIP 会统一 LF、固定条目元数据并使用 `ZIP_STORED`，不受 Windows 换行或 zlib 版本影响；
+- 增加 tag 驱动的 GitHub Actions 发布工作流、Dependabot 和普通 CI Release 编译检查；修复 Release 工作流从仓库根目录运行 Gateway pytest 导致包导入失败的问题，并加入对应契约测试；
 - 版本升级到 0.1.0（Android versionCode 16），暂不发布到应用商店。
 
 ## 0.0.15｜Nexus 空白对话标识与历史品牌清理

@@ -107,21 +107,23 @@ def sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+def canonical_gateway_bytes(source: Path) -> bytes:
+    """Return platform-independent bytes for text-only Gateway release files."""
+    return source.read_bytes().replace(b"\r\n", b"\n")
+
+
 def deterministic_zip(target: Path) -> None:
-    with zipfile.ZipFile(target, "w", compression=zipfile.ZIP_DEFLATED, compresslevel=9) as archive:
+    # Stored entries avoid zlib-version differences; all release inputs are text files.
+    with zipfile.ZipFile(target, "w", compression=zipfile.ZIP_STORED) as archive:
         for relative in GATEWAY_FILES:
             source = REPO_ROOT / relative
             if not source.is_file():
                 raise RuntimeError(f"missing Gateway release file: {relative}")
             info = zipfile.ZipInfo(relative, date_time=(1980, 1, 1, 0, 0, 0))
-            info.compress_type = zipfile.ZIP_DEFLATED
+            info.compress_type = zipfile.ZIP_STORED
+            info.create_system = 3
             info.external_attr = 0o100644 << 16
-            archive.writestr(
-                info,
-                source.read_bytes(),
-                compress_type=zipfile.ZIP_DEFLATED,
-                compresslevel=9,
-            )
+            archive.writestr(info, canonical_gateway_bytes(source))
 
 
 def find_apksigner() -> Path:

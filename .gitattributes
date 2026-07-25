@@ -3,6 +3,9 @@
 .gitattributes text eol=lf
 .gitignore text eol=lf
 .dockerignore text eol=lf
+**/.dockerignore text eol=lf
+LICENSE text eol=lf
+NOTICE text eol=lf
 *.example text eol=lf
 *.ini text eol=lf
 
