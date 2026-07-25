@@ -43,15 +43,25 @@ jobs:
           python scripts/scan_repository_secrets.py
           python scripts/build_release.py --validate-only
 
-      - name: Test Gateway
+      - name: Install Gateway test dependencies
+        run: pip install -r gateway/requirements-dev.txt
+
+      - name: Test Gateway Python
+        working-directory: gateway
         run: |
-          pip install -r gateway/requirements-dev.txt
-          python -m pytest gateway/tests -q
-          python -m compileall -q gateway/nexus_gateway
+          python -m pytest tests -q
+          python -m compileall -q nexus_gateway
+
+      - name: Validate Gateway web
+        run: |
           node --check gateway/nexus_gateway/web/app.js
           node gateway/tests/web_contract_test.js
-          docker build -t nexus-mobile-gateway:release gateway
-          docker compose config
+
+      - name: Validate Gateway Docker image
+        run: docker build -t nexus-mobile-gateway:release gateway
+
+      - name: Validate Compose configuration
+        run: docker compose config
 
       - name: Decode Android signing store
         env:
