@@ -574,6 +574,24 @@ function Wait-ForSetupStatus {
     throw "Gateway did not become ready. Check the files in $LogDir"
 }
 
+function Archive-ExistingLog([string]$Path) {
+    $fullPath = [System.IO.Path]::GetFullPath($Path)
+    $logRoot = $LogDir.TrimEnd("\") + "\"
+    if (-not $fullPath.StartsWith($logRoot, [System.StringComparison]::OrdinalIgnoreCase)) {
+        throw "Refusing to archive a log outside the managed log directory: $fullPath"
+    }
+    if (-not (Test-Path -LiteralPath $fullPath -PathType Leaf)) { return }
+    $item = Get-Item -LiteralPath $fullPath
+    if ($item.Length -eq 0) { return }
+    $timestamp = (Get-Date).ToUniversalTime().ToString("yyyyMMddTHHmmssfffZ")
+    $baseName = [System.IO.Path]::GetFileNameWithoutExtension($item.Name)
+    $extension = [System.IO.Path]::GetExtension($item.Name)
+    $archiveName = "{0}.{1}.{2}{3}" -f $baseName, $timestamp, [Guid]::NewGuid().ToString("N"), $extension
+    $archivePath = Join-Path $LogDir $archiveName
+    Move-Item -LiteralPath $fullPath -Destination $archivePath
+}
+
+
 function Start-Gateway {
     $owned = Get-OwnedProcess
     if ($null -ne $owned) {
@@ -603,6 +621,8 @@ function Start-Gateway {
     $workingDirectory = Join-Path $AppDir "gateway"
     $stdoutLog = Join-Path $LogDir "gateway.stdout.log"
     $stderrLog = Join-Path $LogDir "gateway.stderr.log"
+    Archive-ExistingLog $stdoutLog
+    Archive-ExistingLog $stderrLog
     $launchEnvironment = [ordered]@{
         PYTHONUTF8 = "1"
         PYTHONUNBUFFERED = "1"

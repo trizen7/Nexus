@@ -41,12 +41,12 @@ Android 连接
 - 02-查看状态.cmd：显示成品版本、HTTP 地址和 18787/18788 端口状态；不显示密码或 Key。
 - 03-停止测试环境.cmd：只停止本目录拥有的 Gateway 进程，不查找、停止或重启 Hermes。
 - 04-清空并重新开始.cmd：删除账号、密码哈希、Nexus 保存的 Hermes 上游连接配置副本、Session Secret、媒体、日志和整个 Nexus data 后按当前成品重新启动；不会删除任何 Hermes 文件。只有明确需要全流程重测时才使用。
-- 05-升级到最新成品.cmd：递归部署成品目录中版本号最高的 Nexus-Gateway-*.zip，保留账号、Nexus 上游连接配置副本、媒体和历史 data\tls；不会读取或修改 Hermes 定时任务文件。
+- 05-升级到最新成品.cmd：递归部署成品目录中版本号最高的 Nexus-Gateway-*.zip，保留账号、Nexus 上游连接配置副本、媒体、历史 data\tls 和日志；启动前会把已有非空 gateway.stdout.log / gateway.stderr.log 归档后再创建当前日志，避免覆盖历史记录；不会读取或修改 Hermes 定时任务文件。
 - 06-查看反向代理说明.cmd：打开本说明。
 
 升级约定
 - 每次发布新成品后，先同步控制文件，再从本运行目录执行 upgrade；不要用源码目录替代本环境。
-- upgrade 只替换 Nexus app 并同步 Nexus 运行依赖，不清理 data、媒体或历史 TLS 文件，也不更新或管理 Hermes。
+- upgrade 只替换 Nexus app 并同步 Nexus 运行依赖，不清理 data、媒体、历史 TLS 文件或日志；每次启动前会归档已有非空 stdout/stderr 日志，也不更新或管理 Hermes。
 - data\tls 是旧版本遗留数据，普通升级保留但 Gateway 不再读取；reset 会随整个 data 一并删除。
 - 管理脚本只会安全接管并停止本环境记录的 Nexus Gateway 旧 18788 进程，不会终止无法确认归属的其他进程，更不会操作 Hermes 进程。
 

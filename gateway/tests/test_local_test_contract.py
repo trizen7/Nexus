@@ -49,6 +49,10 @@ def test_product_test_controller_has_valid_paths_and_safe_process_recovery():
     assert '"PYTHONPATH", "PYTHONHOME"' in script
     assert 'Get-ChildItem -LiteralPath $ProductRoot -Filter "Nexus-Gateway-*.zip" -File -Recurse' in script
     assert '$sumFile = Join-Path $Artifact.DirectoryName "SHA256SUMS.txt"' in script
+    assert "function Archive-ExistingLog" in script
+    assert "Move-Item -LiteralPath $fullPath -Destination $archivePath" in script
+    assert "Archive-ExistingLog $stdoutLog" in script
+    assert "Archive-ExistingLog $stderrLog" in script
 
 
 def test_windows_release_script_preserves_the_chinese_product_path():

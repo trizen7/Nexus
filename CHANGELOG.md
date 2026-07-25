@@ -10,6 +10,10 @@
 
 - 将 0.0.2—0.0.15 已完成的 Android 移动会话、人物模型、按对话调用模型与推理深度、定时任务、多文件附件、后台状态、锁屏断线续接和现代化界面整合为首个公开版本；
 - Gateway 继续只通过原版 Hermes HTTP API 集成，提供 Nexus 自有账号、附件、运行状态、管理页和 HTTP 源站，不修改、安装、升级、停止、启动或管理 Hermes；
+- Gateway 初始化配置写入与回滚进一步加固：配置文件或账号文件为符号链接时直接拒绝，回滚删除前同时核对 inode、大小与 SHA-256，避免 Linux inode 复用时误删外部替换内容；
+- 开发测试依赖升级到 `pytest 9.1.1` 与 `pytest-asyncio 1.4.0`，修复依赖安全告警；
+- 独立成品测试环境升级时保留日志，并在每次启动前把已有非空 stdout/stderr 日志归档，避免 `Start-Process` 重定向截断历史记录；
+- 发布前 Gateway 本地回归测试为 `98 passed, 9 skipped`，Python 编译、网页 JavaScript 语法和网页契约检查均通过。
 - 建立 Apache License 2.0 开源发布资料，补充隐私说明、第三方依赖说明、贡献、安全、行为准则、品牌边界、Issue/PR 模板与维护者规则；
 - 建立仓库与 Git 历史敏感信息扫描、确定性 Gateway ZIP、Android Release APK/AAB 正式签名、签名校验、SHA-256 清单和发布清单；
 - 增加 tag 驱动的 GitHub Actions 发布工作流、Dependabot 和普通 CI Release 编译检查；
