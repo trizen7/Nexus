@@ -348,11 +348,11 @@ class HermesApiClientTest {
     }
 
     @Test
-    fun `unknown host points local users to HTTP product test port`() {
+    fun `unknown host asks users to verify the configured address`() {
         val message = friendlyNetworkError(java.net.UnknownHostException("nexus.local"))
 
         assertTrue(message.contains("http://"))
-        assertTrue(message.contains("18787"))
+        assertTrue(message.contains("端口"))
     }
 
     @Test

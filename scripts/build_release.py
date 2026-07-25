@@ -5,7 +5,6 @@ from __future__ import annotations
 
 import argparse
 import hashlib
-import json
 import os
 import re
 import shutil
@@ -16,7 +15,6 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 GATEWAY_FILES = (
-    "CHANGELOG.md",
     "compose.yaml",
     "LICENSE",
     "NOTICE",
@@ -158,24 +156,6 @@ def verify_apk(apk: Path) -> str:
     return parse_fingerprint(result.stdout + "\n" + result.stderr, "APK signer")
 
 
-def verify_aab(aab: Path) -> str:
-    subprocess.run(
-        ["jarsigner", "-verify", str(aab)],
-        check=True,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-    )
-    result = subprocess.run(
-        ["keytool", "-printcert", "-jarfile", str(aab)],
-        check=True,
-        capture_output=True,
-        text=True,
-        encoding="utf-8",
-        errors="replace",
-    )
-    return parse_fingerprint(result.stdout + "\n" + result.stderr, "AAB signer")
-
-
 def copy_required(source: str | None, target: Path, label: str) -> Path:
     if not source:
         raise RuntimeError(f"{label} path is required")
@@ -190,7 +170,6 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--output", default=str(REPO_ROOT / "dist"))
     parser.add_argument("--apk")
-    parser.add_argument("--aab")
     parser.add_argument("--require-android", action="store_true")
     parser.add_argument("--verify-signatures", action="store_true")
     parser.add_argument("--certificate-sha256", default="")
@@ -207,66 +186,32 @@ def main() -> int:
     output.mkdir(parents=True, exist_ok=True)
     gateway_zip = output / f"Nexus-Gateway-{version}.zip"
     apk_target = output / f"Nexus-Android-{version}-release.apk"
-    aab_target = output / f"Nexus-Android-{version}-release.aab"
-    manifest_path = output / "release-manifest.json"
     checksums = output / "SHA256SUMS.txt"
-    for stale in (gateway_zip, apk_target, aab_target, manifest_path, checksums, output / "THIRD_PARTY_NOTICES.md"):
+    for stale in (gateway_zip, apk_target, checksums):
         stale.unlink(missing_ok=True)
 
     deterministic_zip(gateway_zip)
     artifacts = [gateway_zip]
     if args.require_android or args.apk:
         artifacts.append(copy_required(args.apk, apk_target, "release APK"))
-    if args.require_android or args.aab:
-        artifacts.append(copy_required(args.aab, aab_target, "release AAB"))
 
     expected_fingerprint = normalize_fingerprint(args.certificate_sha256)
-    actual_fingerprint = ""
     if args.verify_signatures:
-        if not apk_target.is_file() or not aab_target.is_file():
-            raise RuntimeError("signature verification requires both the release APK and AAB")
+        if not apk_target.is_file():
+            raise RuntimeError("signature verification requires the release APK")
         apk_fingerprint = verify_apk(apk_target)
-        aab_fingerprint = verify_aab(aab_target)
-        if apk_fingerprint != aab_fingerprint:
-            raise RuntimeError("APK and AAB are signed by different certificates")
         if expected_fingerprint and apk_fingerprint != expected_fingerprint:
             raise RuntimeError("Android release certificate does not match the configured fingerprint")
-        actual_fingerprint = apk_fingerprint
-    elif expected_fingerprint:
-        actual_fingerprint = expected_fingerprint
 
-    notices = REPO_ROOT / "THIRD_PARTY_NOTICES.md"
-    notice_target = output / notices.name
-    shutil.copy2(notices, notice_target)
-    artifacts.append(notice_target)
-
-    manifest = {
-        "version": version,
-        "tag": f"v{version}",
-        "android_version_code": version_code,
-        "gateway_file_count": len(GATEWAY_FILES),
-        "android_certificate_sha256": actual_fingerprint,
-        "artifacts": [
-            {"name": path.name, "bytes": path.stat().st_size, "sha256": sha256(path)}
-            for path in sorted(artifacts, key=lambda item: item.name)
-        ],
-    }
-    manifest_path.write_text(
-        json.dumps(manifest, ensure_ascii=False, indent=2) + "\n",
-        encoding="utf-8",
-        newline="\n",
-    )
-    checksum_targets = [*artifacts, manifest_path]
     checksum_lines = [
         f"{sha256(path)}  {path.name}"
-        for path in sorted(checksum_targets, key=lambda item: item.name)
+        for path in sorted(artifacts, key=lambda item: item.name)
     ]
     checksums.write_text("\n".join(checksum_lines) + "\n", encoding="utf-8", newline="\n")
 
     print(f"output={output}")
     for artifact in artifacts:
         print(f"artifact={artifact.name}")
-    print(f"artifact={manifest_path.name}")
     print(f"artifact={checksums.name}")
     return 0
 

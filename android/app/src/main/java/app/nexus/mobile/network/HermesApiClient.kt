@@ -571,14 +571,14 @@ fun friendlyNetworkError(error: Throwable, serverUrl: String? = null): String {
         causes.any { it is SSLHandshakeException || it is SSLPeerUnverifiedException ||
             it is CertPathValidatorException || it is CertificateException } -> certificateConnectionMessage(serverUrl)
         causes.any { it is UnknownHostException } ->
-            "找不到服务器，请检查地址；局域网直连地址通常为 http://电脑局域网IP:18787"
+            "找不到服务器，请检查地址；局域网直连地址通常为 http://电脑局域网IP:端口"
         causes.any { it is ConnectException || it is NoRouteToHostException } ->
             "无法连接服务器，请确认电脑和手机在同一网络，并检查 IP、端口及 Gateway 是否运行"
         causes.any { it is SocketTimeoutException } ->
             "连接服务器超时，请检查局域网、IP 地址和端口"
         isConnectionAbort(error) -> app.nexus.mobile.genericConnectionInterruptedMessage()
         error is IllegalArgumentException ->
-            "服务器地址格式不正确，请填写例如 http://10.0.0.123:18787 或 https://你的域名"
+            "服务器地址格式不正确，请填写例如 http://10.0.0.123:端口 或 https://你的域名"
         error is IOException -> "网络连接异常，请稍后重试"
         else -> error.message ?: "发生未知错误"
     }

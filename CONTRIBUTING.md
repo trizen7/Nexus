@@ -25,7 +25,7 @@
 python scripts/scan_repository_secrets.py
 
 cd android
-./gradlew testDebugUnitTest lintDebug assembleDebug assembleRelease bundleRelease
+./gradlew testDebugUnitTest lintDebug assembleDebug assembleRelease
 
 cd ../gateway
 python -m pytest tests -q

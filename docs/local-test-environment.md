@@ -24,7 +24,7 @@ Nexus 提供两套与正式部署隔离的非 Docker 测试环境，均连接已
 - 反向代理应转发 `Host` 与 `X-Forwarded-Proto`、关闭响应缓冲并设置较长读取超时，以支持 SSE/流式回答。
 - Gateway 不盲目信任 `X-Forwarded-*`，源站仍必须通过监听地址、防火墙或网络拓扑隔离。
 
-Android 接受显式 HTTP 或 HTTPS 地址，不再阻止公网 HTTP，也不再要求安装证书或显示 HTTPS 强制提示。遗漏协议时统一补全 `http://`；裸私网地址未写端口时补全 `18787`。旧保存的私网 `https://IP:18788` 会自动迁移到 `http://IP:18787`。公网部署仍建议由反向代理提供受信任的 HTTPS。
+Android 接受显式 HTTP 或 HTTPS 地址，不阻止公网 HTTP，也不要求安装证书或显示 HTTPS 强制提示。遗漏协议时只补全 `http://`，不猜测端口，也不改写已保存地址。公网部署仍建议由反向代理提供受信任的 HTTPS。
 
 ## 独立成品验收环境
 
@@ -145,9 +145,9 @@ powershell -NoProfile -ExecutionPolicy Bypass -File ".\成品\本地测试环境
 
 ## 0.1.0 开源正式版成品
 
-正式成品由发布脚本生成到被 Git 忽略的 `成品/v0.1.0/`，包含官方签名 Release APK、AAB、Gateway ZIP、`SHA256SUMS.txt`、`release-manifest.json` 与第三方依赖说明。独立验收环境仍只部署 Gateway ZIP，不读取源码、不运行 Docker，也不接触签名私钥。
+正式成品由发布脚本生成到被 Git 忽略的 `成品/v0.1.0/`，包含官方签名 Release APK、Gateway ZIP 与 `SHA256SUMS.txt`。第三方许可声明保留在 Gateway ZIP 中。独立验收环境仍只部署 Gateway ZIP，不读取源码、不运行 Docker，也不接触签名私钥。
 
-手机验收应安装 `Nexus-Android-0.1.0-release.apk`；升级已有官方版本前核对发布清单中的签名证书 SHA-256 指纹保持一致。
+手机验收应安装 `Nexus-Android-0.1.0-release.apk`；升级已有官方版本前应确认 APK 签名来自同一官方发布密钥。
 
 ## 0.0.15 成品
 

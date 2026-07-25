@@ -96,14 +96,13 @@ jobs:
           NEXUS_RELEASE_STORE_PASSWORD: ${{ secrets.NEXUS_RELEASE_STORE_PASSWORD }}
           NEXUS_RELEASE_KEY_ALIAS: ${{ secrets.NEXUS_RELEASE_KEY_ALIAS }}
           NEXUS_RELEASE_KEY_PASSWORD: ${{ secrets.NEXUS_RELEASE_KEY_PASSWORD }}
-        run: ./gradlew testDebugUnitTest lintDebug assembleRelease bundleRelease --no-daemon
+        run: ./gradlew testDebugUnitTest lintDebug assembleRelease --no-daemon
 
       - name: Package and verify release artifacts
         run: |
           python scripts/build_release.py \
             --output dist \
             --apk android/app/build/outputs/apk/release/app-release.apk \
-            --aab android/app/build/outputs/bundle/release/app-release.aab \
             --require-android \
             --verify-signatures
 

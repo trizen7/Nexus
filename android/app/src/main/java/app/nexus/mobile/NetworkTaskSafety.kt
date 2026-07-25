@@ -4,8 +4,6 @@ import java.net.Inet6Address
 import java.net.InetAddress
 import java.net.URI
 
-private const val PRODUCT_TEST_HTTP_PORT = 18787
-private const val LEGACY_PRODUCT_TEST_HTTPS_PORT = 18788
 
 fun shouldAttachBearerToken(serverUrl: String, resourceUrl: String): Boolean {
     val normalizedServer = normalizeServerUrl(serverUrl)
@@ -29,48 +27,20 @@ fun normalizeServerUrl(serverUrl: String): String {
     val trimmed = serverUrl.trim()
     if (trimmed.isEmpty()) return ""
     val withoutTrailingSlash = trimmed.trimEnd('/')
-    val withScheme = when {
+    return when {
         trimmed.startsWith("http://", ignoreCase = true) ||
             trimmed.startsWith("https://", ignoreCase = true) ||
             "://" in trimmed -> withoutTrailingSlash
         looksLikeBareIpv6Address(withoutTrailingSlash) -> "http://[$withoutTrailingSlash]"
         else -> "http://$withoutTrailingSlash"
     }
-    val uri = runCatching { URI(withScheme) }.getOrNull() ?: return withScheme
-    if (!uri.scheme.equals("http", ignoreCase = true) || uri.port >= 0 || !isLocalGatewayHost(uri.host)) {
-        return withScheme
-    }
-    return runCatching {
-        URI(
-            uri.scheme,
-            uri.userInfo,
-            uri.host,
-            PRODUCT_TEST_HTTP_PORT,
-            uri.path,
-            uri.query,
-            uri.fragment,
-        ).toString().trimEnd('/')
-    }.getOrDefault(withScheme)
-}
-
-fun migrateStoredServerUrl(serverUrl: String): String {
-    val trimmed = serverUrl.trim().trimEnd('/')
-    val uri = runCatching { URI(trimmed) }.getOrNull() ?: return serverUrl
-    if (!uri.scheme.equals("https", ignoreCase = true) || uri.port != LEGACY_PRODUCT_TEST_HTTPS_PORT ||
-        !isLocalGatewayHost(uri.host) || uri.userInfo != null || uri.rawQuery != null || uri.rawFragment != null
-    ) {
-        return serverUrl
-    }
-    return runCatching {
-        URI("http", null, uri.host, PRODUCT_TEST_HTTP_PORT, uri.path, null, null).toString().trimEnd('/')
-    }.getOrDefault(serverUrl)
 }
 
 fun serverUrlValidationError(serverUrl: String): String? {
     val normalized = normalizeServerUrl(serverUrl)
     if (normalized.isBlank()) return "请填写服务器地址"
     val parsed = parseHttpUri(normalized)
-        ?: return "服务器地址格式不正确，请填写例如 http://10.0.0.123:18787 或 https://你的域名"
+        ?: return "服务器地址格式不正确，请填写例如 http://10.0.0.123:端口 或 https://你的域名"
     if (parsed.userInfo != null || parsed.rawQuery != null || parsed.rawFragment != null) {
         return "服务器地址不能包含账号、查询参数或锚点"
     }
@@ -85,35 +55,6 @@ private fun parseHttpUri(value: String): URI? = runCatching { URI(value.trim()) 
 private fun looksLikeBareIpv6Address(value: String): Boolean =
     !value.startsWith("[") && value.count { it == ':' } >= 2 &&
         runCatching { InetAddress.getByName(value.substringBefore('%')) is Inet6Address }.getOrDefault(false)
-
-private fun isLocalGatewayHost(host: String?): Boolean {
-    if (host.isNullOrBlank()) return false
-    val normalized = host.trim().removePrefix("[").removeSuffix("]")
-    val withoutScope = normalized.substringBefore('%')
-    if (withoutScope.equals("localhost", ignoreCase = true) ||
-        withoutScope.equals("localhost.localdomain", ignoreCase = true) ||
-        withoutScope.endsWith(".local", ignoreCase = true)
-    ) {
-        return true
-    }
-    if (withoutScope.contains(':')) {
-        val address = runCatching { InetAddress.getByName(withoutScope) }.getOrNull() as? Inet6Address
-            ?: return false
-        val firstByte = address.address.firstOrNull()?.toInt()?.and(0xFF) ?: return false
-        return address.isLoopbackAddress || address.isLinkLocalAddress || address.isSiteLocalAddress ||
-            firstByte and 0xFE == 0xFC
-    }
-    val parts = withoutScope.split('.')
-    if (parts.size != 4) return false
-    val octets = parts.map { it.toIntOrNull() ?: return false }
-    if (octets.any { it !in 0..255 }) return false
-    return octets[0] == 10 ||
-        octets[0] == 127 ||
-        (octets[0] == 100 && octets[1] in 64..127) ||
-        (octets[0] == 192 && octets[1] == 168) ||
-        (octets[0] == 172 && octets[1] in 16..31) ||
-        (octets[0] == 169 && octets[1] == 254)
-}
 
 private fun effectivePort(uri: URI): Int = when {
     uri.port >= 0 -> uri.port

@@ -477,7 +477,7 @@ private fun ConnectionScreen(state: MainUiState, viewModel: MainViewModel, windo
                         onValueChange = { serverUrl = it; clearVisibleError() },
                         modifier = Modifier.fillMaxWidth(),
                         label = { Text("Nexus 地址") },
-                        placeholder = { Text("http://服务器地址:18787") },
+                        placeholder = { Text("http://服务器地址:端口") },
                         singleLine = true,
                         keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri, imeAction = ImeAction.Next),
                         keyboardActions = KeyboardActions(onNext = { usernameFocusRequester.requestFocus() }),

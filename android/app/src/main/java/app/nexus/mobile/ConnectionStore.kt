@@ -24,12 +24,8 @@ class ConnectionStore(context: Context) {
     fun load(): SavedConnection {
         migratePersonaSelection()
         val storedServerUrl = preferences.getString(KEY_SERVER_URL, "").orEmpty()
-        val migratedServerUrl = migrateStoredServerUrl(storedServerUrl)
-        if (migratedServerUrl != storedServerUrl) {
-            preferences.edit().putString(KEY_SERVER_URL, migratedServerUrl).apply()
-        }
         return SavedConnection(
-            serverUrl = migratedServerUrl,
+            serverUrl = storedServerUrl,
             username = preferences.getString(KEY_USERNAME, "").orEmpty(),
             token = tokenCipher.decrypt(preferences.getString(KEY_TOKEN, "").orEmpty()),
             activeSessionId = preferences.getString(KEY_ACTIVE_SESSION, null),

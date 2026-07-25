@@ -60,4 +60,4 @@ jobs:
           cache: gradle
       - uses: android-actions/setup-android@v3
       - working-directory: android
-        run: ./gradlew testDebugUnitTest lintDebug assembleDebug assembleRelease bundleRelease --no-daemon
+        run: ./gradlew testDebugUnitTest lintDebug assembleDebug assembleRelease --no-daemon

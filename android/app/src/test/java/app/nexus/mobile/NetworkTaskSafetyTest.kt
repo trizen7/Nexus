@@ -43,36 +43,17 @@ class NetworkTaskSafetyTest {
     }
 
     @Test
-    fun `bare local address defaults to HTTP product test port`() {
-        assertEquals("http://10.0.0.123:18787", normalizeServerUrl(" 10.0.0.123/ "))
+    fun `bare addresses default to HTTP without guessing a port`() {
+        assertEquals("http://10.0.0.123", normalizeServerUrl(" 10.0.0.123/ "))
         assertEquals("http://10.0.0.123:9443", normalizeServerUrl("10.0.0.123:9443"))
         assertEquals("http://nexus-box", normalizeServerUrl("nexus-box"))
-        assertEquals("http://nexus.local:18787", normalizeServerUrl("nexus.local"))
-        assertEquals("http://[::1]:18787", normalizeServerUrl("::1"))
-        assertEquals("http://[fd00::1]:18787", normalizeServerUrl("[fd00::1]"))
+        assertEquals("http://nexus.local", normalizeServerUrl("nexus.local"))
+        assertEquals("http://[::1]", normalizeServerUrl("::1"))
+        assertEquals("http://[fd00::1]", normalizeServerUrl("[fd00::1]"))
         assertEquals("http://nexus.example.com", normalizeServerUrl("nexus.example.com"))
+        assertEquals("https://10.0.0.123:18788", normalizeServerUrl("https://10.0.0.123:18788"))
         assertNull(serverUrlValidationError("10.0.0.123"))
         assertNull(serverUrlValidationError("[fd00::1]"))
-    }
-
-    @Test
-    fun `stored legacy local HTTPS address migrates back to HTTP 18787 only`() {
-        assertEquals(
-            "http://10.0.0.123:18787",
-            migrateStoredServerUrl("https://10.0.0.123:18788")
-        )
-        assertEquals(
-            "https://nexus.example.com:18788",
-            migrateStoredServerUrl("https://nexus.example.com:18788")
-        )
-        assertEquals(
-            "https://10.0.0.123:9443",
-            migrateStoredServerUrl("https://10.0.0.123:9443")
-        )
-        assertEquals(
-            "http://10.0.0.123:18787",
-            migrateStoredServerUrl("http://10.0.0.123:18787")
-        )
     }
 
     @Test
@@ -85,22 +66,6 @@ class NetworkTaskSafetyTest {
         assertTrue(serverUrlValidationError("https://nexus.example.com/#fragment") != null)
         assertTrue(serverUrlValidationError("https://nexus.example.com:0") != null)
         assertTrue(serverUrlValidationError("https://nexus.example.com:65536") != null)
-    }
-
-    @Test
-    fun `legacy migration does not rewrite unsafe or unrelated addresses`() {
-        assertEquals(
-            "https://user@10.0.0.123:18788",
-            migrateStoredServerUrl("https://user@10.0.0.123:18788")
-        )
-        assertEquals(
-            "https://10.0.0.123:18788?token=secret",
-            migrateStoredServerUrl("https://10.0.0.123:18788?token=secret")
-        )
-        assertEquals(
-            "https://10.0.0.123:18788#fragment",
-            migrateStoredServerUrl("https://10.0.0.123:18788#fragment")
-        )
     }
 
     @Test

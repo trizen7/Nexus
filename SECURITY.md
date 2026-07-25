@@ -14,8 +14,8 @@
 
 ## 发布物验证
 
-- 正式 Release 提供 `SHA256SUMS.txt` 和 `release-manifest.json`；
-- Android APK/AAB 由项目持久发布密钥签名，证书 SHA-256 指纹记录在发布清单中；
+- 正式 Release 提供 `SHA256SUMS.txt`，用于核对发布附件完整性；
+- Android APK 由项目持久发布密钥签名，发布流程会校验签名证书；
 - 签名私钥与密码不得进入 Git、Actions 日志、Release 附件或 Gateway ZIP；
 - 仓库 CI 会扫描当前工作树和所有可达 Git 历史中的常见凭据与签名材料。
 

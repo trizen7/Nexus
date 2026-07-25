@@ -87,8 +87,10 @@ if ([string]::IsNullOrWhiteSpace($env:ANDROID_SDK_ROOT)) {
 try {
     Push-Location (Join-Path $RepoRoot "android")
     try {
-        & .\gradlew.bat testDebugUnitTest lintDebug assembleRelease bundleRelease --no-daemon --max-workers=1 "-Dkotlin.compiler.execution.strategy=in-process"
-        if ($LASTEXITCODE -ne 0) { throw "Android release build failed." }
+        foreach ($task in @("testDebugUnitTest", "lintDebug", "assembleRelease")) {
+            & .\gradlew.bat $task --no-daemon --max-workers=1 "-Pkotlin.compiler.execution.strategy=in-process"
+            if ($LASTEXITCODE -ne 0) { throw "Android release build failed during $task." }
+        }
     } finally {
         Pop-Location
     }
@@ -98,7 +100,6 @@ try {
         (Join-Path $RepoRoot "scripts\build_release.py"),
         "--output", $OutputDirectory,
         "--apk", (Join-Path $RepoRoot "android\app\build\outputs\apk\release\app-release.apk"),
-        "--aab", (Join-Path $RepoRoot "android\app\build\outputs\bundle\release\app-release.aab"),
         "--require-android",
         "--verify-signatures"
     )
