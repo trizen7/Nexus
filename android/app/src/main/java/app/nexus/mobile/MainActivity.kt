@@ -11,6 +11,7 @@ import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
+import androidx.core.view.ViewCompat
 import androidx.core.view.WindowCompat
 import androidx.core.content.ContextCompat
 import androidx.core.view.WindowInsetsCompat
@@ -33,10 +34,6 @@ import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.imePadding
-import androidx.compose.foundation.layout.WindowInsets
-import androidx.compose.foundation.layout.isImeVisible
-import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.width
@@ -120,6 +117,7 @@ import androidx.compose.ui.graphics.vector.ImageVector
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalConfiguration
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
 import androidx.compose.ui.text.font.FontWeight
@@ -131,10 +129,8 @@ import app.nexus.mobile.network.ChatImage
 import app.nexus.mobile.network.ChatMessage
 import app.nexus.mobile.network.ChatRole
 import app.nexus.mobile.network.HermesSession
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.StateFlow
 
-private const val IME_SETTLE_DELAY_MILLIS = 300L
 
 private val LightScheme = lightColorScheme(
     primary = Color(0xFF4F46E5),
@@ -203,10 +199,23 @@ private val NexusTypography = Typography(
 
 class MainActivity : ComponentActivity() {
     private val viewModel: MainViewModel by viewModels { MainViewModel.Factory(application) }
+    private var instantWindowInsets by mutableStateOf(InstantWindowInsets())
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         enableEdgeToEdge()
+        ViewCompat.setOnApplyWindowInsetsListener(window.decorView) { _, insets ->
+            val imeInsets = insets.getInsets(WindowInsetsCompat.Type.ime())
+            val navigationInsets = insets.getInsets(WindowInsetsCompat.Type.navigationBars())
+            val updatedInsets = resolveInstantWindowInsets(
+                imeVisible = insets.isVisible(WindowInsetsCompat.Type.ime()),
+                imeBottomPx = imeInsets.bottom,
+                navigationBottomPx = navigationInsets.bottom
+            )
+            if (instantWindowInsets != updatedInsets) instantWindowInsets = updatedInsets
+            insets
+        }
+        ViewCompat.requestApplyInsets(window.decorView)
         WindowCompat.getInsetsController(window, window.decorView).show(
             WindowInsetsCompat.Type.systemBars()
         )
@@ -231,7 +240,7 @@ class MainActivity : ComponentActivity() {
                 colorScheme = if (darkTheme) DarkScheme else LightScheme,
                 typography = NexusTypography
             ) {
-                NexusApp(state, viewModel)
+                NexusApp(state, viewModel, instantWindowInsets)
             }
         }
         handleNotificationIntent(intent)
@@ -256,7 +265,7 @@ class MainActivity : ComponentActivity() {
 }
 
 @Composable
-private fun NexusApp(state: MainUiState, viewModel: MainViewModel) {
+private fun NexusApp(state: MainUiState, viewModel: MainViewModel, windowInsets: InstantWindowInsets) {
     BackHandler(enabled = state.settingsOpen) { viewModel.closeSettings() }
     BackHandler(enabled = state.drawerOpen && !state.settingsOpen) { viewModel.setDrawerOpen(false) }
     val lifecycleOwner = LocalLifecycleOwner.current
@@ -285,10 +294,10 @@ private fun NexusApp(state: MainUiState, viewModel: MainViewModel) {
 
     Surface(modifier = Modifier.fillMaxSize(), color = appBackground()) {
         when {
-            state.connectionStatus != ConnectionStatus.CONNECTED -> ConnectionScreen(state, viewModel)
+            state.connectionStatus != ConnectionStatus.CONNECTED -> ConnectionScreen(state, viewModel, windowInsets)
             state.settingsOpen -> SettingsScreen(state, viewModel)
             else -> Box(Modifier.fillMaxSize()) {
-                ChatScreen(state, viewModel)
+                ChatScreen(state, viewModel, windowInsets)
                 if (state.drawerOpen) {
                     Box(
                         Modifier
@@ -384,7 +393,7 @@ private fun FileDownloadDialog(file: app.nexus.mobile.network.ChatFile, state: F
 }
 
 @Composable
-private fun ConnectionScreen(state: MainUiState, viewModel: MainViewModel) {
+private fun ConnectionScreen(state: MainUiState, viewModel: MainViewModel, windowInsets: InstantWindowInsets) {
     var serverUrl by rememberSaveable { mutableStateOf(state.serverUrl) }
     var username by rememberSaveable { mutableStateOf(state.username) }
     var password by rememberSaveable { mutableStateOf(state.password) }
@@ -394,6 +403,7 @@ private fun ConnectionScreen(state: MainUiState, viewModel: MainViewModel) {
     val passwordFocusRequester = remember { FocusRequester() }
     val keyboardController = LocalSoftwareKeyboardController.current
     val focusManager = LocalFocusManager.current
+    val bottomInset = with(LocalDensity.current) { windowInsets.bottomPx.toDp() }
     val connecting = state.connectionStatus == ConnectionStatus.CONNECTING
     val canSubmit = serverUrl.isNotBlank() && username.isNotBlank() && password.isNotBlank() && !connecting
 
@@ -426,8 +436,7 @@ private fun ConnectionScreen(state: MainUiState, viewModel: MainViewModel) {
                 .fillMaxSize()
                 .verticalScroll(scrollState)
                 .statusBarsPadding()
-                .navigationBarsPadding()
-                .imePadding()
+                .padding(bottom = bottomInset)
                 .padding(horizontal = 18.dp, vertical = 4.dp),
             verticalArrangement = Arrangement.Top
         ) {
@@ -547,9 +556,8 @@ private fun ConnectionScreen(state: MainUiState, viewModel: MainViewModel) {
     }
 }
 
-@OptIn(androidx.compose.foundation.layout.ExperimentalLayoutApi::class)
 @Composable
-private fun ChatScreen(state: MainUiState, viewModel: MainViewModel) {
+private fun ChatScreen(state: MainUiState, viewModel: MainViewModel, windowInsets: InstantWindowInsets) {
     Column(Modifier.fillMaxSize()) {
         Surface(
             color = MaterialTheme.colorScheme.surface.copy(alpha = 0.98f),
@@ -627,10 +635,8 @@ private fun ChatScreen(state: MainUiState, viewModel: MainViewModel) {
                 userHasScrolledHistory = false
                 if (state.messages.isNotEmpty()) listState.scrollToItem(latestLazyListIndex(state.messages.size))
             }
-            val imeVisible = WindowInsets.isImeVisible
-            LaunchedEffect(imeVisible) {
-                if (imeVisible && state.messages.isNotEmpty()) {
-                    delay(IME_SETTLE_DELAY_MILLIS)
+            LaunchedEffect(windowInsets.imeVisible) {
+                if (windowInsets.imeVisible && state.messages.isNotEmpty()) {
                     val lastItemIndex = (listState.layoutInfo.totalItemsCount - 1).coerceAtLeast(0)
                     listState.requestScrollToItem(lastItemIndex)
                 }
@@ -732,7 +738,7 @@ private fun ChatScreen(state: MainUiState, viewModel: MainViewModel) {
             }
         }
 
-        ChatComposer(state = state, viewModel = viewModel)
+        ChatComposer(state = state, viewModel = viewModel, windowInsets = windowInsets)
     }
 }
 
@@ -747,8 +753,9 @@ private fun ChatTopAction(icon: ImageVector, label: String, onClick: () -> Unit)
 }
 
 @Composable
-private fun ChatComposer(state: MainUiState, viewModel: MainViewModel) {
+private fun ChatComposer(state: MainUiState, viewModel: MainViewModel, windowInsets: InstantWindowInsets) {
     val context = LocalContext.current
+    val bottomInset = with(LocalDensity.current) { windowInsets.bottomPx.toDp() }
     val keyboardController = LocalSoftwareKeyboardController.current
     val focusManager = LocalFocusManager.current
     val inputController = remember(viewModel) {
@@ -813,8 +820,7 @@ private fun ChatComposer(state: MainUiState, viewModel: MainViewModel) {
             .background(composerSurface())
             .clip(RoundedCornerShape(topStart = 28.dp, topEnd = 28.dp))
             .border(1.dp, MaterialTheme.colorScheme.outlineVariant, RoundedCornerShape(topStart = 28.dp, topEnd = 28.dp))
-            .navigationBarsPadding()
-            .imePadding()
+            .padding(bottom = bottomInset)
     ) {
         if (state.pendingImages.isNotEmpty() || state.preparingImage) {
             PendingImageStrip(
