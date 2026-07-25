@@ -89,6 +89,14 @@ class GatewayConfig:
     upstream_token: str
 
 
+@dataclass(frozen=True)
+class _OwnedFileIdentity:
+    device: int
+    inode: int
+    size: int
+    digest: bytes
+
+
 class RunTracker:
     """Own mobile chat runs outside Hermes so upstream stays unmodified."""
 
@@ -1767,9 +1775,11 @@ def _read_secure_existing_file(path: Path) -> str | None:
         return None
 
 
-def _secure_exclusive_write(path: Path, content: str) -> tuple[int, int]:
+def _secure_exclusive_write(path: Path, content: str) -> _OwnedFileIdentity:
     path.parent.mkdir(parents=True, exist_ok=True)
     descriptor = os.open(path, _bootstrap_open_flags(os.O_WRONLY | os.O_CREAT | os.O_EXCL), 0o600)
+    written_identity: _OwnedFileIdentity | None = None
+    encoded_content = content.encode("utf-8")
     try:
         with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as handle:
             descriptor = -1
@@ -1777,26 +1787,70 @@ def _secure_exclusive_write(path: Path, content: str) -> tuple[int, int]:
             handle.flush()
             os.fsync(handle.fileno())
             written_stat = os.fstat(handle.fileno())
+        written_identity = _OwnedFileIdentity(
+            device=written_stat.st_dev,
+            inode=written_stat.st_ino,
+            size=written_stat.st_size,
+            digest=hashlib.sha256(encoded_content).digest(),
+        )
         if os.name != "nt" and stat.S_IMODE(written_stat.st_mode) != 0o600:
             raise OSError("persisted file permissions are not owner-only")
-        return written_stat.st_dev, written_stat.st_ino
+        return written_identity
     except Exception:
-        path.unlink(missing_ok=True)
+        _unlink_owned_file(path, written_identity)
         raise
     finally:
         if descriptor != -1:
             os.close(descriptor)
 
 
-def _unlink_owned_file(path: Path, identity: tuple[int, int] | None) -> None:
+def _unlink_owned_file(path: Path, identity: _OwnedFileIdentity | None) -> None:
     if identity is None:
         return
+    descriptor = -1
     try:
         current = path.lstat()
-        if (current.st_dev, current.st_ino) == identity and stat.S_ISREG(current.st_mode):
-            path.unlink()
-    except OSError:
+        if not stat.S_ISREG(current.st_mode) or path.is_symlink():
+            return
+        if (current.st_dev, current.st_ino, current.st_size) != (
+            identity.device,
+            identity.inode,
+            identity.size,
+        ):
+            return
+        descriptor = os.open(path, _bootstrap_open_flags(os.O_RDONLY))
+        opened_stat = os.fstat(descriptor)
+        if not stat.S_ISREG(opened_stat.st_mode):
+            return
+        if (opened_stat.st_dev, opened_stat.st_ino, opened_stat.st_size) != (
+            identity.device,
+            identity.inode,
+            identity.size,
+        ):
+            return
+        digest = hashlib.sha256()
+        while True:
+            chunk = os.read(descriptor, CHUNK_SIZE)
+            if not chunk:
+                break
+            digest.update(chunk)
+        if not hmac.compare_digest(digest.digest(), identity.digest):
+            return
+        os.close(descriptor)
+        descriptor = -1
+        final_stat = path.lstat()
+        if (final_stat.st_dev, final_stat.st_ino, final_stat.st_size) != (
+            identity.device,
+            identity.inode,
+            identity.size,
+        ) or not stat.S_ISREG(final_stat.st_mode):
+            return
+        path.unlink()
+    except (OSError, NotImplementedError):
         pass
+    finally:
+        if descriptor != -1:
+            os.close(descriptor)
 
 
 def _bootstrap_open_flags(access: int) -> int:
@@ -1870,6 +1924,26 @@ def _secure_bootstrap_token_file(path: Path) -> bool:
     return bool(_read_secure_bootstrap_token(path))
 
 
+def _canonical_parent_path(path: Path) -> Path:
+    absolute = Path(os.path.abspath(os.fspath(path)))
+    try:
+        parent = absolute.parent.resolve(strict=False)
+    except OSError:
+        parent = absolute.parent
+    return parent / absolute.name
+
+
+def _path_entry_exists(path: Path) -> bool:
+    try:
+        path.lstat()
+        return True
+    except FileNotFoundError:
+        return False
+    except OSError:
+        # Permission and I/O failures must not be mistaken for an unused path.
+        return True
+
+
 def create_app(
     *,
     username: str | None,
@@ -1888,9 +1962,11 @@ def create_app(
     login_rate_window_seconds: float = 60.0,
     transcribe_audio: Callable[[str], dict[str, Any]] | None = None,
 ) -> web.Application:
-    resolved_config_path = Path(config_path or (Path(storage_dir).resolve().parent / "config.json")).resolve()
+    resolved_config_path = _canonical_parent_path(
+        Path(config_path or (Path(storage_dir).resolve().parent / "config.json"))
+    )
     saved_config: dict[str, Any] = {}
-    config_exists = resolved_config_path.exists()
+    config_exists = _path_entry_exists(resolved_config_path)
     config_valid = not config_exists
     if config_exists:
         try:
@@ -1912,8 +1988,10 @@ def create_app(
         middlewares=[security_headers, device_auth],
         client_max_size=max_upload_bytes + 1024 * 1024,
     )
-    resolved_credentials_path = Path(credentials_path or (Path(storage_dir).resolve().parent / "account.json")).resolve()
-    credentials_exists = resolved_credentials_path.exists()
+    resolved_credentials_path = _canonical_parent_path(
+        Path(credentials_path or (Path(storage_dir).resolve().parent / "account.json"))
+    )
+    credentials_exists = _path_entry_exists(resolved_credentials_path)
     credentials_valid = not credentials_exists
     revision = 1
     password_salt = ""
@@ -1948,7 +2026,7 @@ def create_app(
         and upstream_token
         and upstream_url.startswith(("http://", "https://"))
     )
-    if initialized and not resolved_config_path.exists():
+    if initialized and not config_exists:
         _write_config(resolved_config_path, upstream_url, upstream_token, session_secret)
     app[USERNAME_KEY] = username
     app[PASSWORD_KEY] = password

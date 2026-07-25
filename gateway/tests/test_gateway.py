@@ -470,6 +470,18 @@ async def test_setup_rollback_does_not_delete_replaced_foreign_config(
     assert token_path.exists()
 
 
+def test_setup_rollback_preserves_file_when_owned_contents_are_replaced(tmp_path: Path):
+    import nexus_gateway.app as gateway_app
+
+    config_path = tmp_path / "config.json"
+    identity = gateway_app._secure_exclusive_write(config_path, "owned-config")
+    config_path.write_text("foreign-config", encoding="utf-8")
+
+    gateway_app._unlink_owned_file(config_path, identity)
+
+    assert config_path.read_text(encoding="utf-8") == "foreign-config"
+
+
 def test_existing_config_and_account_are_read_from_verified_descriptors(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ):
