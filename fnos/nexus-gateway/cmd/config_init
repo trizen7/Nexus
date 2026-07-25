@@ -1,0 +1,16 @@
+#!/bin/bash
+
+SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)"
+# shellcheck source=setup_common.sh
+. "$SCRIPT_DIR/setup_common.sh"
+
+if [ -n "${wizard_nexus_username:-}" ]; then
+  validate_username "$wizard_nexus_username"
+fi
+if [ -n "${wizard_nexus_password:-}" ]; then
+  validate_password "$wizard_nexus_password"
+fi
+if [ -n "${wizard_hermes_api_url:-}" ]; then
+  validate_hermes_url "$wizard_hermes_api_url"
+fi
+exit 0

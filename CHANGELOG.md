@@ -4,7 +4,11 @@
 
 ## 未发布
 
-- 暂无。
+- 新增飞牛 fnOS 应用中心 FPK：提供安装与配置向导、Docker 项目资源、桌面入口、状态检查、应用图标及独立 SHA-256 校验文件；
+- fnOS 包固定使用与 Gateway 版本一致的 GHCR 多架构镜像，容器以包用户运行、根文件系统只读，并移除 Linux capabilities；
+- 安装和配置向导通过 Nexus 私有一次性文件传递账号与 Hermes 连接信息，容器内完成密码 scrypt 散列与 Session Secret 生成，不在 Compose 或软件包中保存明文凭据；
+- 增加 Windows/CI FPK 构建脚本、官方 fnpack 校验、FPK 归档验收器、多架构容器发布工作流、fnOS 契约测试和部署文档；
+- 所有 fnOS 生命周期脚本只处理 Nexus 自有目录和 `nexus-gateway-fnos` 容器，不读取、修改、安装、升级、启动、停止或管理 Hermes。
 
 ## 0.1.0｜首个开源正式版
 

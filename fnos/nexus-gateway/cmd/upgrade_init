@@ -1,0 +1,4 @@
+#!/bin/bash
+
+# Nexus data remains in TRIM_PKGVAR. This script never reads or changes Hermes files.
+exit 0

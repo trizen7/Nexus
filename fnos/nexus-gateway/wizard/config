@@ -1,0 +1,49 @@
+[
+  {
+    "stepTitle": "修改 Nexus 配置",
+    "items": [
+      {
+        "type": "tips",
+        "helpText": "只填写需要修改的项目，留空会保留原值。修改 Nexus 账号或密码后，已登录设备需要重新登录。这里仅更新 Nexus 自有配置，不会修改 Hermes。"
+      },
+      {
+        "type": "text",
+        "field": "wizard_nexus_username",
+        "label": "新 Nexus 账号",
+        "rules": [
+          {
+            "pattern": "^$|^.{3,48}$",
+            "message": "账号长度应为 3–48 个字符"
+          }
+        ]
+      },
+      {
+        "type": "password",
+        "field": "wizard_nexus_password",
+        "label": "新 Nexus 密码",
+        "rules": [
+          {
+            "pattern": "^$|^.{8,}$",
+            "message": "新密码至少需要 8 个字符"
+          }
+        ]
+      },
+      {
+        "type": "text",
+        "field": "wizard_hermes_api_url",
+        "label": "新 Hermes API 地址",
+        "rules": [
+          {
+            "pattern": "^$|^https?://.+",
+            "message": "地址必须以 http:// 或 https:// 开头"
+          }
+        ]
+      },
+      {
+        "type": "password",
+        "field": "wizard_hermes_api_token",
+        "label": "新 Hermes API Server Key"
+      }
+    ]
+  }
+]

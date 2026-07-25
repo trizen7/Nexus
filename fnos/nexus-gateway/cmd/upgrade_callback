@@ -1,0 +1,4 @@
+#!/bin/bash
+
+# fnOS recreates the declared Docker project with the packaged Compose definition.
+exit 0

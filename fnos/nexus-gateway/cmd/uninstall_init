@@ -1,0 +1,4 @@
+#!/bin/bash
+
+# Data retention and removal are handled by fnOS package management.
+exit 0

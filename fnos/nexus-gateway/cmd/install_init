@@ -1,0 +1,11 @@
+#!/bin/bash
+
+SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)"
+# shellcheck source=setup_common.sh
+. "$SCRIPT_DIR/setup_common.sh"
+
+validate_username "${wizard_nexus_username:-}"
+validate_password "${wizard_nexus_password:-}"
+validate_hermes_url "${wizard_hermes_api_url:-}"
+[ -n "${wizard_hermes_api_token:-}" ] || fail_setup "Hermes API Server Key is required"
+exit 0

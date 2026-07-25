@@ -1,0 +1,13 @@
+{
+  ".url": {
+    "nexus-gateway.main": {
+      "title": "Nexus",
+      "icon": "images/icon_{0}.png",
+      "type": "url",
+      "protocol": "http",
+      "port": "18787",
+      "url": "/",
+      "allUsers": true
+    }
+  }
+}

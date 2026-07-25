@@ -10,7 +10,8 @@ Nexus 是一个面向 Hermes Agent 的社区移动客户端与轻量移动网关
 
 - `android/`：Kotlin + Jetpack Compose Android 客户端；
 - `gateway/`：Python + aiohttp 移动网关和管理网页；
-- `docs/`：Docker、NAS、迁移、运维和开发计划文档；
+- `fnos/`：飞牛 fnOS 应用中心安装包源码；
+- `docs/`：Docker、NAS、fnOS、迁移、运维和开发计划文档；
 - `.github/`：持续集成、Issue 和 Pull Request 模板；
 - `文档/`：版本更新记录和分级开发待办。
 
@@ -79,6 +80,7 @@ Android：
 - 官方签名的 Android Release APK；
 - 用于应用商店或受控分发的 AAB；
 - 可独立部署的 Gateway ZIP；
+- 飞牛 fnOS 应用中心安装包 FPK 及独立 SHA-256 校验文件；
 - `SHA256SUMS.txt` 与 `release-manifest.json`；
 - 第三方依赖说明。
 
@@ -124,7 +126,19 @@ curl http://127.0.0.1:8787/health
 
 Nexus Gateway 不再内置 TLS 或证书管理。局域网直连只适合受信任网络；**不要把 HTTP 源站端口直接暴露到公网**。外网访问应使用反向代理提供受系统信任的 HTTPS 域名，并关闭代理缓冲以支持 SSE/流式回答。Nginx 和 Caddy 示例见 [`docs/docker-deployment.md`](docs/docker-deployment.md#6-https-反向代理)。
 
-### 2. 构建 Android App
+### 2. 安装飞牛 fnOS 应用包
+
+飞牛 fnOS 用户可以在应用中心手动安装 `Nexus-fnOS-<版本>.fpk`。安装向导会收集 Nexus 登录账号、密码、Hermes API 地址和 API Server Key；敏感信息只保存到 Nexus 私有数据目录，不写入安装包或 Compose 明文环境变量。
+
+Gateway 镜像固定为与源码版本一致的 GHCR 多架构标签。Windows 本地构建 FPK 不需要运行 Docker：
+
+~~~powershell
+./scripts/build_fnos_package.ps1
+~~~
+
+安装、升级、同机 Hermes 地址和真实设备验收说明见 [`docs/fnos-deployment.md`](docs/fnos-deployment.md)。
+
+### 3. 构建 Android App
 
 ```bash
 cd android

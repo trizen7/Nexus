@@ -1,0 +1,78 @@
+[
+  {
+    "stepTitle": "设置 Nexus",
+    "items": [
+      {
+        "type": "tips",
+        "helpText": "此账号用于 Android App 登录 Nexus。账号只保存在 Nexus 数据目录中，密码会使用 scrypt 散列保存。"
+      },
+      {
+        "type": "text",
+        "field": "wizard_nexus_username",
+        "label": "Nexus 账号",
+        "initValue": "admin",
+        "rules": [
+          {
+            "required": true,
+            "message": "请输入 Nexus 账号"
+          },
+          {
+            "min": 3,
+            "max": 48,
+            "message": "账号长度应为 3–48 个字符"
+          }
+        ]
+      },
+      {
+        "type": "password",
+        "field": "wizard_nexus_password",
+        "label": "Nexus 密码",
+        "rules": [
+          {
+            "required": true,
+            "message": "请输入 Nexus 密码"
+          },
+          {
+            "min": 8,
+            "message": "密码至少需要 8 个字符"
+          }
+        ]
+      }
+    ]
+  },
+  {
+    "stepTitle": "连接原版 Hermes",
+    "items": [
+      {
+        "type": "tips",
+        "helpText": "Nexus 仅调用原版 Hermes HTTP API，不会修改或管理 Hermes。Hermes 与 Nexus 在同一台 NAS 时可使用 host.docker.internal；请勿填写 127.0.0.1。"
+      },
+      {
+        "type": "text",
+        "field": "wizard_hermes_api_url",
+        "label": "Hermes API 地址",
+        "rules": [
+          {
+            "required": true,
+            "message": "请输入 Hermes API 地址"
+          },
+          {
+            "pattern": "^https?://.+",
+            "message": "地址必须以 http:// 或 https:// 开头"
+          }
+        ]
+      },
+      {
+        "type": "password",
+        "field": "wizard_hermes_api_token",
+        "label": "Hermes API Server Key",
+        "rules": [
+          {
+            "required": true,
+            "message": "请输入 Hermes API Server Key"
+          }
+        ]
+      }
+    ]
+  }
+]

@@ -1,0 +1,26 @@
+#!/bin/bash
+
+CONTAINER_NAME="nexus-gateway-fnos"
+
+is_running() {
+  docker inspect --format '{{.State.Running}}' "$CONTAINER_NAME" 2>/dev/null | grep -qx 'true'
+}
+
+case "${1:-}" in
+  start|stop)
+    # fnOS manages the declared Docker project lifecycle.
+    exit 0
+    ;;
+  status)
+    if is_running; then
+      exit 0
+    fi
+    exit 3
+    ;;
+  *)
+    if [ -n "${TRIM_TEMP_LOGFILE:-}" ]; then
+      printf '%s\n' "Unknown Nexus command" > "$TRIM_TEMP_LOGFILE"
+    fi
+    exit 1
+    ;;
+esac

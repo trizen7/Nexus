@@ -1,0 +1,143 @@
+name: Publish Gateway container and build fnOS package
+
+on:
+  workflow_dispatch:
+    inputs:
+      gateway_source_ref:
+        description: Git ref containing the Gateway source to publish
+        required: true
+        default: v0.1.0
+        type: string
+      image_tag:
+        description: GHCR tag; blank uses the Gateway source version
+        required: false
+        default: ""
+        type: string
+
+permissions:
+  contents: read
+  packages: write
+  id-token: write
+
+concurrency:
+  group: gateway-container-${{ github.ref }}-${{ inputs.gateway_source_ref }}
+  cancel-in-progress: false
+
+env:
+  REGISTRY_IMAGE: ghcr.io/trizen7/nexus-gateway
+  FNPACK_VERSION: 1.2.3
+  FNPACK_LINUX_AMD64_SHA256: 54b97fa7b70968c4d05c79840f5daeff508957d0bb2062fdb0376d00d9615c93
+
+jobs:
+  metadata:
+    runs-on: ubuntu-latest
+    outputs:
+      gateway_source_ref: ${{ steps.release.outputs.gateway_source_ref }}
+      image_tag: ${{ steps.release.outputs.image_tag }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.gateway_source_ref }}
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - id: release
+        name: Validate Gateway source and image version
+        shell: python
+        env:
+          GATEWAY_SOURCE_REF: ${{ inputs.gateway_source_ref }}
+          IMAGE_TAG_INPUT: ${{ inputs.image_tag }}
+        run: |
+          import os
+          import re
+          from pathlib import Path
+
+          source = Path("gateway/nexus_gateway/__init__.py").read_text(encoding="utf-8")
+          match = re.search(r'__version__\s*=\s*"([^"]+)"', source)
+          if not match:
+              raise SystemExit("could not read Gateway version")
+          version = match.group(1)
+          image_tag = os.environ.get("IMAGE_TAG_INPUT", "").strip() or version
+          if image_tag != version:
+              raise SystemExit(f"image tag {image_tag} must equal Gateway version {version}")
+          source_ref = os.environ["GATEWAY_SOURCE_REF"].strip()
+          if not source_ref:
+              raise SystemExit("Gateway source ref is required")
+          output = Path(os.environ["GITHUB_OUTPUT"])
+          with output.open("a", encoding="utf-8") as stream:
+              stream.write(f"gateway_source_ref={source_ref}\n")
+              stream.write(f"image_tag={image_tag}\n")
+
+  container:
+    needs: metadata
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.metadata.outputs.gateway_source_ref }}
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      - name: Log in to GitHub Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build and publish versioned multi-architecture image
+        uses: docker/build-push-action@v6
+        with:
+          context: gateway
+          file: gateway/Dockerfile
+          platforms: linux/amd64,linux/arm64
+          push: true
+          tags: ${{ env.REGISTRY_IMAGE }}:${{ needs.metadata.outputs.image_tag }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/trizen7/Nexus
+            org.opencontainers.image.version=${{ needs.metadata.outputs.image_tag }}
+            org.opencontainers.image.title=Nexus Gateway
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          provenance: mode=max
+          sbom: true
+
+  fnos-package:
+    needs:
+      - metadata
+      - container
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Ensure FPK references the published Gateway image
+        shell: python
+        env:
+          EXPECTED_IMAGE_TAG: ${{ needs.metadata.outputs.image_tag }}
+        run: |
+          import os
+          import re
+          from pathlib import Path
+
+          manifest = Path("fnos/nexus-gateway/manifest").read_text(encoding="utf-8")
+          version_match = re.search(r"(?m)^version=(.+)$", manifest)
+          if not version_match:
+              raise SystemExit("fnOS manifest version is missing")
+          compose = Path("fnos/nexus-gateway/app/docker/docker-compose.yaml").read_text(encoding="utf-8")
+          expected = f"ghcr.io/trizen7/nexus-gateway:{os.environ['EXPECTED_IMAGE_TAG']}"
+          if not re.search(rf"(?m)^\s*image:\s*{re.escape(expected)}\s*$", compose):
+              raise SystemExit(f"fnOS package must reference {expected}")
+      - name: Download and verify official fnpack
+        run: |
+          curl --fail --silent --show-error --location \
+            "https://static2.fnnas.com/fnpack/fnpack-${FNPACK_VERSION}-linux-amd64" \
+            --output "$RUNNER_TEMP/fnpack"
+          echo "${FNPACK_LINUX_AMD64_SHA256}  $RUNNER_TEMP/fnpack" | sha256sum --check --strict
+          chmod 0755 "$RUNNER_TEMP/fnpack"
+      - name: Build fnOS package without local Docker
+        shell: pwsh
+        run: ./scripts/build_fnos_package.ps1 -OutputDirectory dist -FnpackPath "$env:RUNNER_TEMP/fnpack"
+      - name: Verify fnOS package contents
+        run: python scripts/verify_fnos_package.py dist/Nexus-fnOS-*.fpk
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Nexus-fnOS-${{ needs.metadata.outputs.image_tag }}
+          path: dist/Nexus-fnOS-*.fpk*
+          if-no-files-found: error
