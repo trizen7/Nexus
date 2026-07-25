@@ -219,7 +219,7 @@ fun removeOptimisticMessages(
     assistantMessageId: String?
 ): List<ChatMessage> = messages.filterNot { it.id == userMessageId || it.id == assistantMessageId }
 
-enum class SendTermination { COMPLETED, STOPPED_BY_USER, FAILED }
+enum class SendTermination { COMPLETED, STOPPED_BY_USER, DETACHED, FAILED }
 
 fun messagesAfterSendTermination(
     messages: List<ChatMessage>,
@@ -227,7 +227,7 @@ fun messagesAfterSendTermination(
     optimisticAssistantId: String?,
     termination: SendTermination
 ): List<ChatMessage> = when (termination) {
-    SendTermination.COMPLETED -> messages
+    SendTermination.COMPLETED, SendTermination.DETACHED -> messages
     SendTermination.FAILED -> removeOptimisticMessages(messages, optimisticUserId, optimisticAssistantId)
     SendTermination.STOPPED_BY_USER -> messages.filterNot { message ->
         message.id == optimisticAssistantId && message.content.isBlank() && message.images.isEmpty() && message.files.isEmpty()
@@ -436,6 +436,8 @@ data class ConversationDrafts(private val values: Map<String, ComposerDraft> = e
         copy(values = values + (sessionKey to draft))
 
     fun load(sessionKey: String): ComposerDraft = values[sessionKey] ?: ComposerDraft()
+
+    fun clear(sessionKey: String): ConversationDrafts = save(sessionKey, ComposerDraft())
 
     fun keys(): Set<String> = values.keys
 

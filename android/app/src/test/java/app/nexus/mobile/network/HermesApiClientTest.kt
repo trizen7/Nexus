@@ -1,8 +1,10 @@
 package app.nexus.mobile.network
 
 import kotlinx.coroutines.test.runTest
+import okhttp3.OkHttpClient
 import okhttp3.mockwebserver.MockResponse
 import okhttp3.mockwebserver.MockWebServer
+import okhttp3.mockwebserver.SocketPolicy
 import java.io.ByteArrayInputStream
 import java.io.IOException
 import java.net.SocketException
@@ -457,6 +459,59 @@ class HermesApiClientTest {
         val body = request.body.readUtf8()
         assert(body.contains("name=\"file\""))
         assert(body.contains("filename=\"资料.pdf\""))
+    }
+
+    @Test
+    fun `streamChat treats a successful response body disconnect as detached without retrying`() = runTest {
+        val partialStream = buildString {
+            append("event: assistant.delta\n")
+            append("data: {\"delta\":\"working\"}\n\n")
+            repeat(512) { append(": keepalive padding\n") }
+        }
+        server.enqueue(
+            MockResponse()
+                .setResponseCode(200)
+                .setHeader("Content-Type", "text/event-stream")
+                .setBody(partialStream)
+                .setSocketPolicy(SocketPolicy.DISCONNECT_DURING_RESPONSE_BODY)
+        )
+        val client = HermesApiClient(server.url("/").toString(), "test-token")
+
+        val error = runCatching { client.streamChat("mobile-session", "lock screen test") }.exceptionOrNull()
+
+        assertTrue(error is HermesStreamDetachedException)
+        assertEquals(1, server.requestCount)
+    }
+
+    @Test
+    fun `streamChat treats clean eof before a terminal event as detached`() = runTest {
+        server.enqueue(
+            MockResponse()
+                .setResponseCode(200)
+                .setHeader("Content-Type", "text/event-stream")
+                .setBody("event: assistant.delta\ndata: {\"delta\":\"partial answer\"}\n\n")
+        )
+        val client = HermesApiClient(server.url("/").toString(), "test-token")
+
+        val error = runCatching { client.streamChat("mobile-session", "clean eof test") }.exceptionOrNull()
+
+        assertTrue(error is HermesStreamDetachedException)
+        assertEquals(1, server.requestCount)
+    }
+
+    @Test
+    fun `streamChat keeps failures before response headers as ordinary network errors`() = runTest {
+        val failingHttpClient = OkHttpClient.Builder()
+            .retryOnConnectionFailure(false)
+            .addInterceptor { throw IOException("before response headers") }
+            .build()
+        val client = HermesApiClient(server.url("/").toString(), "test-token", failingHttpClient)
+
+        val error = runCatching { client.streamChat("mobile-session", "send failure test") }.exceptionOrNull()
+
+        assertTrue(error is IOException)
+        assertFalse(error is HermesStreamDetachedException)
+        assertEquals(0, server.requestCount)
     }
 
     @Test

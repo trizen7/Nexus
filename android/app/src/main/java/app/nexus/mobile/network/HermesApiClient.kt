@@ -38,6 +38,9 @@ class HermesApiClient(
     private val baseUrl = baseUrl.trimEnd('/') + "/"
     private val jsonType = "application/json; charset=utf-8".toMediaType()
     private val gson = Gson()
+    private val streamHttpClient = httpClient.newBuilder()
+        .retryOnConnectionFailure(false)
+        .build()
 
     suspend fun login(username: String, password: String): String = withContext(Dispatchers.IO) {
         val payload = gson.toJson(mapOf("username" to username, "password" to password))
@@ -434,45 +437,36 @@ class HermesApiClient(
             baseUrl + "api/sessions/${encodePathSegment(sessionId)}/chat/stream"
         ).post(payload.toRequestBody(jsonType)).build()
 
-        var emittedContent = false
-        var attempt = 0
-        var result: List<HermesStreamEvent>? = null
-        while (result == null) {
-            try {
-                result = executeStreamRequest(request) { event ->
-                    if (event is HermesStreamEvent.TextDelta || event is HermesStreamEvent.ToolStarted) {
-                        emittedContent = true
-                    }
-                    onEvent(event)
-                }
-            } catch (error: IOException) {
-                if (attempt >= 1 || emittedContent || !isConnectionAbort(error)) throw error
-                attempt += 1
-            }
-        }
-        result
+        executeStreamRequest(request, onEvent)
     }
 
     private fun executeStreamRequest(
         request: Request,
         onEvent: (HermesStreamEvent) -> Unit
-    ): List<HermesStreamEvent> = httpClient.newCall(request).execute().use { response ->
+    ): List<HermesStreamEvent> = streamHttpClient.newCall(request).execute().use { response ->
         if (!response.isSuccessful) {
-            val text = response.body?.string().orEmpty()
-            throw HermesHttpException(response.code, responseErrorMessage(text), "对话请求")
+            val responseText = response.body?.string().orEmpty()
+            throw HermesHttpException(response.code, responseErrorMessage(responseText), "对话请求")
         }
         val parser = HermesStreamParser()
         val events = mutableListOf<HermesStreamEvent>()
         val source = response.body?.source() ?: error("响应内容为空")
-        while (!source.exhausted()) {
-            parser.accept(source.readUtf8Line().orEmpty())?.let { event ->
+        try {
+            while (!source.exhausted()) {
+                parser.accept(source.readUtf8Line().orEmpty())?.let { event ->
+                    events += event
+                    onEvent(event)
+                }
+            }
+            parser.flush()?.let { event ->
                 events += event
                 onEvent(event)
             }
+        } catch (error: IOException) {
+            if (!events.hasTerminalStreamEvent()) throw HermesStreamDetachedException(error)
         }
-        parser.flush()?.let { event ->
-            events += event
-            onEvent(event)
+        if (!events.hasTerminalStreamEvent()) {
+            throw HermesStreamDetachedException(IOException("SSE 响应在任务结束前关闭"))
         }
         events.distinctConsecutiveCompleted()
     }
@@ -522,12 +516,6 @@ class HermesApiClient(
     private fun encodePathSegment(value: String): String =
         java.net.URLEncoder.encode(value, Charsets.UTF_8.name()).replace("+", "%20")
 
-    private fun isConnectionAbort(error: IOException): Boolean =
-        generateSequence<Throwable>(error) { it.cause }
-            .any { cause ->
-                cause is SocketException &&
-                    cause.message.orEmpty().contains("connection abort", ignoreCase = true)
-            }
 }
 
 data class HermesHealth(
@@ -541,6 +529,9 @@ class HermesHttpException(
     val serverMessage: String?,
     val operation: String
 ) : IOException(serverMessage?.takeIf { it.isNotBlank() } ?: "$operation 失败：HTTP $statusCode")
+
+class HermesStreamDetachedException(cause: IOException) :
+    IOException("消息已提交，实时连接已中断", cause)
 
 private fun throwableChain(error: Throwable): Sequence<Throwable> =
     generateSequence(error) { it.cause }
@@ -732,6 +723,13 @@ private fun JsonObject.objectValue(key: String): JsonObject =
 
 private fun JsonElement.asJsonObjectOrNull(): JsonObject? =
     takeIf { it.isJsonObject }?.asJsonObject
+
+private fun List<HermesStreamEvent>.hasTerminalStreamEvent(): Boolean =
+    any { event ->
+        event is HermesStreamEvent.Completed ||
+            event is HermesStreamEvent.StreamEnded ||
+            event is HermesStreamEvent.Error
+    }
 
 private fun List<HermesStreamEvent>.distinctConsecutiveCompleted(): List<HermesStreamEvent> =
     fold(mutableListOf()) { result, event ->

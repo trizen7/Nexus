@@ -13,6 +13,7 @@ import app.nexus.mobile.network.HermesApiClient
 import app.nexus.mobile.network.HermesCronJob
 import app.nexus.mobile.network.HermesModel
 import app.nexus.mobile.network.HermesSession
+import app.nexus.mobile.network.HermesStreamDetachedException
 import app.nexus.mobile.network.HermesStreamEvent
 import app.nexus.mobile.network.friendlyNetworkError
 import app.nexus.mobile.network.requiresPasswordReauthentication
@@ -259,7 +260,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
     }
 
-    fun refreshSessions() {
+    fun refreshSessions(reportTransientErrors: Boolean = true) {
         val api = client ?: return
         viewModelScope.launch {
             runCatching { visibleSessions(api.listSessions()) }
@@ -288,14 +289,16 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         }
                     }
                 }
-                .onFailure { showError(it) }
+                .onFailure { error ->
+                    if (reportTransientErrors || requiresPasswordReauthentication(error)) showError(error)
+                }
         }
     }
 
     fun onAppResume() {
         when (_uiState.value.connectionStatus) {
             ConnectionStatus.CONNECTED -> {
-                refreshSessions()
+                refreshSessions(reportTransientErrors = false)
                 refreshCurrentMessages()
                 refreshActiveRunStatus()
                 startPolling()
@@ -306,7 +309,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     }
 
     fun refreshFromForeground() {
-        refreshSessions()
+        refreshSessions(reportTransientErrors = false)
         refreshCurrentMessages()
         refreshActiveRunStatus()
     }
@@ -790,6 +793,15 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         persistAllDrafts()
     }
 
+    private fun clearSubmittedDraft(key: String) {
+        draftPersistJob?.cancel()
+        draftPersistJob = null
+        drafts = drafts.clear(key)
+        draftImages.remove(key)
+        draftFiles.remove(key)
+        persistAllDrafts()
+    }
+
     private fun restoreDraft(sessionId: String?) {
         val key = draftKey(sessionId)
         val draft = drafts.load(key)
@@ -1072,6 +1084,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 error = null
             )
         }
+        clearSubmittedDraft(originalDraftKey)
         streamJob = viewModelScope.launch {
             var originSessionId = state.activeSessionId
             var optimisticUserId: String? = null
@@ -1134,10 +1147,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     fileUploadJobs.remove(it.id)?.cancel()
                     NotificationHelper.cancelTransfer(getApplication(), it.id)
                 }
-                drafts = drafts.save(originalDraftKey, ComposerDraft())
-                draftImages.remove(originalDraftKey)
-                draftFiles.remove(originalDraftKey)
-                persistAllDrafts()
                 _uiState.update {
                     if (it.activeSessionId == originSessionId) {
                         it.copy(
@@ -1152,39 +1161,61 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 }
                 refreshSessions()
             }.onFailure { error ->
+                val stoppedByUser = stopRequestedSessionId != null && stopRequestedSessionId == originSessionId
+                val detached = !stoppedByUser && error is HermesStreamDetachedException
+                val termination = when {
+                    stoppedByUser -> SendTermination.STOPPED_BY_USER
+                    detached -> SendTermination.DETACHED
+                    else -> SendTermination.FAILED
+                }
                 _uiState.update { current ->
                     if (current.activeSessionId != originSessionId) current
                     else {
-                        val stoppedByUser = error is kotlinx.coroutines.CancellationException && stopRequestedSessionId == originSessionId
-                        val restore = error !is kotlinx.coroutines.CancellationException
-                        val restoredInput = draftTextAfterRunFailure(_input.value, originalInput, restore)
-                        _input.value = restoredInput
-                        val restoredFiles = if (stoppedByUser) {
-                            current.pendingFiles
-                        } else {
+                        val restore = termination == SendTermination.FAILED
+                        _input.value = draftTextAfterRunFailure(_input.value, originalInput, restore)
+                        val restoredFiles = if (restore) {
                             (files + current.pendingFiles).distinctBy(ChatFile::id)
+                        } else {
+                            current.pendingFiles
                         }
                         current.copy(
                             messages = messagesAfterSendTermination(
                                 current.messages,
                                 optimisticUserId,
                                 optimisticAssistantId,
-                                if (stoppedByUser) SendTermination.STOPPED_BY_USER else SendTermination.FAILED
+                                termination
                             ),
-                            pendingImages = if (!stoppedByUser && current.pendingImages.isEmpty()) images else current.pendingImages,
+                            pendingImages = if (restore && current.pendingImages.isEmpty()) images else current.pendingImages,
                             pendingFiles = restoredFiles,
-                            streaming = false,
-                            runStoppable = false,
-                            thinking = false,
-                            toolStatus = null,
-                            uploadProgress = null
+                            streaming = detached,
+                            runStoppable = detached,
+                            thinking = if (detached) current.thinking else false,
+                            toolStatus = if (detached) current.toolStatus else null,
+                            uploadProgress = null,
+                            error = if (detached) null else current.error
                         )
                     }
                 }
-                if (error !is kotlinx.coroutines.CancellationException && _uiState.value.activeSessionId == originSessionId) {
-                    saveCurrentDraft()
-                    showTransientAnswerStatus(AnswerStatus.FAILED)
-                    showError(error)
+                when {
+                    detached -> {
+                        images.forEach { NotificationHelper.cancelTransfer(getApplication(), it.id) }
+                        files.forEach {
+                            fileUploadJobs.remove(it.id)?.cancel()
+                            NotificationHelper.cancelTransfer(getApplication(), it.id)
+                        }
+                        originSessionId?.let { sessionId ->
+                            observedActiveRuns += sessionId
+                            if (_uiState.value.activeSessionId == sessionId) {
+                                connectionStore.saveMessageCache(sessionId, _uiState.value.messages)
+                                refreshActiveRunStatus()
+                            }
+                        }
+                    }
+                    !stoppedByUser && _uiState.value.activeSessionId == originSessionId -> {
+                        saveCurrentDraft()
+                        showTransientAnswerStatus(AnswerStatus.FAILED)
+                        showError(error)
+                    }
                 }
             }
         }

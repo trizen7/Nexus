@@ -438,6 +438,32 @@ class SessionStateTest {
     }
 
     @Test
+    fun `detached stream keeps the submitted optimistic message pair`() {
+        val messages = listOf(
+            app.nexus.mobile.network.ChatMessage("user", app.nexus.mobile.network.ChatRole.USER, "submitted before lock"),
+            app.nexus.mobile.network.ChatMessage("assistant", app.nexus.mobile.network.ChatRole.ASSISTANT, "working")
+        )
+
+        val detached = messagesAfterSendTermination(
+            messages,
+            optimisticUserId = "user",
+            optimisticAssistantId = "assistant",
+            termination = SendTermination.DETACHED
+        )
+
+        assertEquals(messages, detached)
+    }
+
+    @Test
+    fun `clearing submitted draft removes persisted text and attachments immediately`() {
+        val drafts = ConversationDrafts()
+            .save("session-1", ComposerDraft("submitted", listOf("image-1"), listOf("file-1")))
+            .clear("session-1")
+
+        assertEquals(ComposerDraft(), drafts.load("session-1"))
+    }
+
+    @Test
     fun `draft bundle persists multiple uploaded files`() {
         val files = listOf(
             PersistedDraftFile("file-1", "plan.md", "text/markdown", 123, "", "file-1", "/api/files/file-1"),
