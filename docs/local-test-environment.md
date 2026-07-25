@@ -50,7 +50,7 @@ scripts\sync-product-test-environment.cmd
 | `02-查看状态.cmd` | 显示 HTTP 地址以及 18787/18788 状态 |
 | `03-停止测试环境.cmd` | 只停止该目录安全记录的 Gateway 进程 |
 | `04-清空并重新开始.cmd` | 显式清除整个测试数据目录；普通升级不得使用 |
-| `05-升级到最新成品.cmd` | 无损部署父目录最新 `Nexus-Gateway-*.zip` 并重启 |
+| `05-升级到最新成品.cmd` | 无损递归部署成品目录中版本号最高的 `Nexus-Gateway-*.zip` 并重启 |
 | `06-查看反向代理说明.cmd` | 打开本环境使用说明 |
 
 端口约定：
@@ -73,7 +73,7 @@ scripts\local-test.cmd setup
 脚本会自动：
 
 1. 在 `.local-test/venv/` 创建隔离 Python 环境；
-2. 使用 `uv pip compile` 与 `uv pip sync` 同步 `gateway/requirements-dev.txt`；
+2. 使用独立系统 Python 自带的 `venv + pip` 在 `.local-test/` 内重建并安装固定版本依赖，缓存也限制在 Nexus 自有目录；
 3. 以只读方式从本机已有 Hermes 配置获取 API Server 地址与 Key，绝不回写；
 4. 在 `.local-test/` 生成独立 Nexus 测试账号、密码和 Session Secret；
 5. 在 `http://127.0.0.1:18787` 启动当前源码；
@@ -142,6 +142,12 @@ powershell -NoProfile -ExecutionPolicy Bypass -File ".\成品\本地测试环境
 - 历史 `data/tls/`（如果存在）。
 
 普通升级后账号、Nexus 保存的 Hermes 上游连接配置副本、媒体和历史 TLS 文件哈希必须保持不变，同时验证 `18787` 正在监听、`18788` 未监听、`process.json` 记录的 PID 与实际监听进程一致。
+
+## 0.1.0 开源正式版成品
+
+正式成品由发布脚本生成到被 Git 忽略的 `成品/v0.1.0/`，包含官方签名 Release APK、AAB、Gateway ZIP、`SHA256SUMS.txt`、`release-manifest.json` 与第三方依赖说明。独立验收环境仍只部署 Gateway ZIP，不读取源码、不运行 Docker，也不接触签名私钥。
+
+手机验收应安装 `Nexus-Android-0.1.0-release.apk`；升级已有官方版本前核对发布清单中的签名证书 SHA-256 指纹保持一致。
 
 ## 0.0.15 成品
 

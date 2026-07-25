@@ -4,7 +4,7 @@ Nexus 是一个面向 Hermes Agent 的社区移动客户端与轻量移动网关
 
 项目目标是让 Hermes 始终保持原版并由用户独立维护，同时把移动端所需的登录、会话、附件、缓存、下载、通知和断线续接能力放在客户端与移动网关中。Nexus 不修改、更新或管理任何 Hermes 文件。
 
-当前版本：0.0.15
+当前版本：0.1.0
 
 ## 组成
 
@@ -14,7 +14,7 @@ Nexus 是一个面向 Hermes Agent 的社区移动客户端与轻量移动网关
 - `.github/`：持续集成、Issue 和 Pull Request 模板；
 - `文档/`：版本更新记录和分级开发待办。
 
-开发方向与待办见 [`docs/development-roadmap.md`](docs/development-roadmap.md)。
+开发方向与待办见 [`docs/development-roadmap.md`](docs/development-roadmap.md)。隐私说明、第三方依赖和安全报告方式分别见 [`PRIVACY.md`](PRIVACY.md)、[`THIRD_PARTY_NOTICES.md`](THIRD_PARTY_NOTICES.md) 与 [`SECURITY.md`](SECURITY.md)。
 
 ## 当前能力
 
@@ -72,6 +72,18 @@ Android：
 - 源码运行可使用 Python 3.11 或更高；
 - 可访问一个已启用 API Server 的 Hermes Agent 实例。
 
+## 下载与发布物验证
+
+正式版本通过 GitHub Releases 发布，包含：
+
+- 官方签名的 Android Release APK；
+- 用于应用商店或受控分发的 AAB；
+- 可独立部署的 Gateway ZIP；
+- `SHA256SUMS.txt` 与 `release-manifest.json`；
+- 第三方依赖说明。
+
+安装前应核对 SHA-256。Android 签名证书 SHA-256 指纹记录在每个版本的 `release-manifest.json` 中；同一官方签名系列的后续 APK 应保持一致。
+
 ## 快速开始
 
 ### 1. 使用 Docker 启动移动网关（推荐）
@@ -125,13 +137,13 @@ Windows 可运行：
 gradlew.bat testDebugUnitTest lintDebug assembleDebug
 ```
 
-Debug APK 位于：
+本地 Debug APK 位于：
 
 ```text
 android/app/build/outputs/apk/debug/app-debug.apk
 ```
 
-安装后填写移动网关地址、账号和密码即可登录。App 接受显式 `http://` 或 `https://` 地址，不再按公网/私网强制 HTTPS，也不再显示证书或公网 HTTP 拦截提示；遗漏协议时统一补全 `http://`，裸私网地址未写端口时继续补全 `18787`。旧保存的私网 `https://IP:18788` 会迁移回 `http://IP:18787`。公网明文 HTTP 会暴露账号、消息与 Token，生产环境仍建议使用反向代理 HTTPS。
+公开安装建议优先使用 GitHub Releases 中的官方签名 Release APK；本地 Debug APK 仅用于开发测试。安装后填写移动网关地址、账号和密码即可登录。App 接受显式 `http://` 或 `https://` 地址，不再按公网/私网强制 HTTPS，也不再显示证书或公网 HTTP 拦截提示；遗漏协议时统一补全 `http://`，裸私网地址未写端口时继续补全 `18787`。旧保存的私网 `https://IP:18788` 会迁移回 `http://IP:18787`。公网明文 HTTP 会暴露账号、消息与 Token，生产环境仍建议使用反向代理 HTTPS。
 
 ## 测试
 
@@ -183,7 +195,8 @@ cd android
 - `gateway/.env`；
 - `.local-test/`；
 - `gateway/data/`；
-- Android 签名文件、`local.properties`；
+- Android 签名文件、`.release-signing/`、`local.properties`；
+- `dist/` 与 `成品/` 中的本地构建产物；
 - 用户上传文件、会话导出、日志和真实服务器地址；
 - 任何 API Token、密码或会话密钥；
 - 任何 Hermes 源码、安装文件、配置、数据、日志或缓存副本。
@@ -192,10 +205,10 @@ cd android
 
 ## 已知限制
 
-- 当前仍处于早期稳定期，版本号保持在 `0.0.x`；
+- `0.1.x` 是首个公开稳定化系列，仍可能在后续次要版本调整非核心界面和部署细节；
 - 尚无完整 UI 自动化和多厂商真机矩阵；
 - 锁屏和后台通知会受到 Android 厂商电池策略影响；
-- Release/AAB、应用商店发布和正式签名流程尚未标准化；
+- 已提供正式签名 APK/AAB 和可复现的 Gateway 打包流程，暂未上架应用商店；
 - Gateway 只提供 HTTP 源站；公网证书、域名、反向代理、HSTS 和外部访问控制由部署者维护；
 
 欢迎通过 Issue 报告 Bug，提交时请附版本、Android 系统、复现步骤和必要日志。请勿附带密码、Token、私人会话或用户文件。
@@ -207,7 +220,7 @@ cd android
 
 ## 许可证与品牌
 
-源代码采用 Apache License 2.0，详见 `LICENSE`。
+源代码采用 Apache License 2.0，详见 `LICENSE`。第三方组件保留各自许可证，详见 `THIRD_PARTY_NOTICES.md`。
 
 “Nexus”名称和项目标识不因代码开源而自动授权用于冒充官方发行版。分发修改版本时应清楚标注为社区版本或进行重命名，详见 `TRADEMARKS.md`。
 

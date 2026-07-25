@@ -22,15 +22,20 @@
 4. 运行完整门禁：
 
 ```bash
+python scripts/scan_repository_secrets.py
+
 cd android
-./gradlew testDebugUnitTest lintDebug assembleDebug
+./gradlew testDebugUnitTest lintDebug assembleDebug assembleRelease bundleRelease
 
 cd ../gateway
 python -m pytest tests -q
+python -m compileall -q nexus_gateway
 node tests/web_contract_test.js
 ```
 
 5. 提交 Pull Request，说明问题、根因、修改范围和验证结果。
+
+普通 PR 的 Release 构建可以不签名；正式签名、Tag 和 GitHub Release 仅由维护者按 [`docs/releasing.md`](docs/releasing.md) 执行。
 
 本机已安装 Hermes 时，推荐使用持续本地测试环境代替手工启动 Gateway：
 
@@ -58,7 +63,8 @@ scripts\local-test.cmd verify
 - 网关使用 Python 3.11+ 和 aiohttp；
 - 用户界面优先使用清晰的普通语言，不显示 MIME、服务器路径等技术细节；
 - Hermes 保持原版且只读，移动特性必须放在 App 或 Gateway，不得通过修改 Hermes 实现；
-- 不提交生成文件、运行数据、真实配置和签名材料。
+- 不提交生成文件、运行数据、真实配置和签名材料；
+- 新增依赖时更新 `THIRD_PARTY_NOTICES.md`，涉及数据流或权限时同步更新 `PRIVACY.md`。
 
 ## 贡献许可
 

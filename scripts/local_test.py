@@ -31,6 +31,7 @@ PROCESS_FILE = LOCAL_DIR / "process.json"
 RUNTIME_FILE = LOCAL_DIR / "runtime.json"
 DEPENDENCY_STATE_FILE = LOCAL_DIR / "dependency-state.json"
 DEPENDENCY_LOCK_FILE = LOCAL_DIR / "requirements.lock.txt"
+PIP_CACHE_DIR = LOCAL_DIR / "cache" / "pip"
 GATEWAY_LOG_FILE = LOG_DIR / "gateway.log"
 REQUIREMENTS_FILES = (
     GATEWAY_DIR / "requirements.txt",
@@ -96,6 +97,21 @@ def managed_python() -> Path:
     if os.name == "nt":
         return VENV_DIR / "Scripts" / "python.exe"
     return VENV_DIR / "bin" / "python"
+
+
+def _is_external_dependency_python(path: Path) -> bool:
+    try:
+        parts = path.resolve().parts
+    except OSError:
+        parts = path.parts
+    return any(part.casefold() == "hermes" for part in parts)
+
+
+def _assert_safe_bootstrap_python() -> None:
+    if _is_external_dependency_python(Path(sys.executable)):
+        raise LocalTestError(
+            "拒绝使用 Hermes 虚拟环境运行 Nexus 工具；请设置 NEXUS_PYTHON 指向独立的系统 Python"
+        )
 
 
 def gateway_host() -> str:
@@ -216,58 +232,67 @@ def _dependency_imports_work(python: Path) -> bool:
 def _ensure_venv_and_dependencies(*, force_sync: bool) -> None:
     LOCAL_DIR.mkdir(parents=True, exist_ok=True)
     python = managed_python()
-    uv = shutil.which("uv")
-    if not uv:
-        raise LocalTestError("未找到 uv。请先安装 uv，以便精确同步本地测试依赖")
-
-    if not python.is_file():
-        print("[local-test] 创建隔离 Python 虚拟环境…", flush=True)
-        result = subprocess.run(
-            [uv, "venv", str(VENV_DIR), "--python", sys.executable],
-            cwd=ROOT,
-            check=False,
-        )
-        if result.returncode != 0 or not python.is_file():
-            raise LocalTestError("无法创建 .local-test/venv")
-        force_sync = True
-
     expected_digest = _requirements_digest()
     state = _read_json(DEPENDENCY_STATE_FILE) or {}
-    needs_sync = (
+    needs_rebuild = (
         force_sync
         or state.get("requirements_sha256") != expected_digest
         or not _dependency_imports_work(python)
     )
-    if not needs_sync:
+    if not needs_rebuild:
         return
+    if _is_managed_python():
+        raise LocalTestError("当前进程正在使用受管虚拟环境。请通过 local-test.cmd 或 local-test.ps1 从独立系统 Python 重新启动")
 
-    print("[local-test] 解析并精确同步 Gateway 开发依赖…", flush=True)
-    env = os.environ.copy()
-    env.setdefault("UV_NO_PROGRESS", "1")
-    compile_result = subprocess.run(
+    stop_gateway(quiet=True)
+    _safe_remove_tree(VENV_DIR)
+    PIP_CACHE_DIR.mkdir(parents=True, exist_ok=True)
+    pip_env = os.environ.copy()
+    pip_env["PIP_CACHE_DIR"] = str(PIP_CACHE_DIR)
+    pip_env["PIP_DISABLE_PIP_VERSION_CHECK"] = "1"
+    pip_env["PIP_NO_INPUT"] = "1"
+
+    print("[local-test] 创建隔离 Python 虚拟环境…", flush=True)
+    create_result = subprocess.run(
+        [sys.executable, "-m", "venv", str(VENV_DIR)],
+        cwd=ROOT,
+        env=pip_env,
+        check=False,
+    )
+    if create_result.returncode != 0 or not python.is_file():
+        raise LocalTestError("无法创建 .local-test/venv")
+
+    print("[local-test] 使用 pip 安装固定版本 Gateway 开发依赖…", flush=True)
+    install_result = subprocess.run(
         [
-            uv,
+            str(python),
+            "-m",
             "pip",
-            "compile",
+            "install",
+            "--disable-pip-version-check",
+            "--no-input",
+            "--requirement",
             str(GATEWAY_DIR / "requirements-dev.txt"),
-            "--output-file",
-            str(DEPENDENCY_LOCK_FILE),
-            "--quiet",
         ],
         cwd=ROOT,
-        env=env,
+        env=pip_env,
         check=False,
     )
-    if compile_result.returncode != 0 or not DEPENDENCY_LOCK_FILE.is_file():
-        raise LocalTestError("本地测试依赖解析失败")
-    sync_result = subprocess.run(
-        [uv, "pip", "sync", "--python", str(python), str(DEPENDENCY_LOCK_FILE)],
+    if install_result.returncode != 0 or not _dependency_imports_work(python):
+        raise LocalTestError("本地测试依赖安装失败")
+    freeze_result = subprocess.run(
+        [str(python), "-m", "pip", "freeze", "--all"],
         cwd=ROOT,
-        env=env,
+        env=pip_env,
+        capture_output=True,
+        text=True,
+        encoding="utf-8",
+        errors="replace",
         check=False,
     )
-    if sync_result.returncode != 0 or not _dependency_imports_work(python):
-        raise LocalTestError("本地测试依赖同步失败")
+    if freeze_result.returncode != 0:
+        raise LocalTestError("无法记录本地测试依赖版本")
+    DEPENDENCY_LOCK_FILE.write_text(freeze_result.stdout, encoding="utf-8", newline="\n")
     _write_private_json(DEPENDENCY_STATE_FILE, {
         "schema_version": 1,
         "requirements_sha256": expected_digest,
@@ -1160,6 +1185,7 @@ def main(argv: Sequence[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
     try:
+        _assert_safe_bootstrap_python()
         bootstrap_result = _prepare_python_runtime(args.command)
         if bootstrap_result is not None:
             return bootstrap_result

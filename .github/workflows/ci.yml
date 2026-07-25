@@ -8,7 +8,23 @@ on:
 permissions:
   contents: read
 
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
+  repository-security:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - run: python scripts/scan_repository_secrets.py
+      - run: python scripts/build_release.py --validate-only
+
   gateway:
     runs-on: ubuntu-latest
     steps:
@@ -21,16 +37,17 @@ jobs:
       - run: pip install -r gateway/requirements-dev.txt
       - working-directory: gateway
         run: python -m pytest tests -q
-      - name: Validate Docker image
-        run: docker build -t nexus-mobile-gateway:ci gateway
-      - name: Validate Compose configuration
-        run: |
-          cp gateway/.env.example gateway/.env
-          docker compose config
+      - working-directory: gateway
+        run: python -m compileall -q nexus_gateway
       - uses: actions/setup-node@v4
         with:
           node-version: "20"
+      - run: node --check gateway/nexus_gateway/web/app.js
       - run: node gateway/tests/web_contract_test.js
+      - name: Validate Docker image
+        run: docker build -t nexus-mobile-gateway:ci gateway
+      - name: Validate Compose configuration
+        run: docker compose config
 
   android:
     runs-on: ubuntu-latest
@@ -43,4 +60,4 @@ jobs:
           cache: gradle
       - uses: android-actions/setup-android@v3
       - working-directory: android
-        run: ./gradlew testDebugUnitTest lintDebug assembleDebug --no-daemon
+        run: ./gradlew testDebugUnitTest lintDebug assembleDebug assembleRelease bundleRelease --no-daemon

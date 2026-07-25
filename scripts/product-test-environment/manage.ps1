@@ -49,6 +49,51 @@ function Get-VenvPython {
     return Join-Path $VenvDir "Scripts\python.exe"
 }
 
+
+function Test-NexusPythonPath([string]$Candidate) {
+    if ([string]::IsNullOrWhiteSpace($Candidate)) { return $false }
+    try { $full = [System.IO.Path]::GetFullPath($Candidate) } catch { return $false }
+    if (-not (Test-Path -LiteralPath $full -PathType Leaf)) { return $false }
+    $parts = @($full -split '[\\/]')
+    if (@($parts | Where-Object { $_ -ieq "hermes" }).Count -gt 0) { return $false }
+    return $true
+}
+
+function Find-NexusPython([string]$ManagedCandidate) {
+    $candidates = New-Object System.Collections.Generic.List[string]
+    if (-not [string]::IsNullOrWhiteSpace($ManagedCandidate)) { $candidates.Add($ManagedCandidate) }
+    if (-not [string]::IsNullOrWhiteSpace($env:NEXUS_PYTHON)) { $candidates.Add($env:NEXUS_PYTHON) }
+    if (-not [string]::IsNullOrWhiteSpace($env:LOCALAPPDATA)) {
+        Get-ChildItem -LiteralPath (Join-Path $env:LOCALAPPDATA "Programs\Python") -Filter python.exe -File -Recurse -ErrorAction SilentlyContinue |
+            Sort-Object FullName -Descending |
+            ForEach-Object { $candidates.Add($_.FullName) }
+    }
+    foreach ($name in @("python", "python3")) {
+        Get-Command $name -All -ErrorAction SilentlyContinue |
+            Where-Object { $_.CommandType -eq "Application" } |
+            ForEach-Object { $candidates.Add($_.Source) }
+    }
+    $launcher = Get-Command py -ErrorAction SilentlyContinue
+    if ($null -ne $launcher) {
+        $launcherOutput = & $launcher.Source -3 -c "import sys; print(sys.executable)" 2>$null
+        if ($LASTEXITCODE -eq 0 -and $null -ne $launcherOutput) {
+            $candidates.Add([string]($launcherOutput | Select-Object -First 1))
+        }
+    }
+    $seen = @{}
+    foreach ($candidate in $candidates) {
+        try { $full = [System.IO.Path]::GetFullPath([string]$candidate) } catch { continue }
+        if ($seen.ContainsKey($full)) { continue }
+        $seen[$full] = $true
+        if (Test-NexusPythonPath $full) { return $full }
+    }
+    throw "No independent Python installation was found. Set NEXUS_PYTHON to a Python executable outside Hermes."
+}
+
+function Find-NexusBootstrapPython {
+    return Find-NexusPython ""
+}
+
 function Read-JsonFile([string]$Path) {
     if (-not (Test-Path -LiteralPath $Path)) { return $null }
     try {
@@ -386,16 +431,24 @@ sys.stdout.write(json.dumps(payload, ensure_ascii=False))
 }
 
 function Get-LatestArtifact {
-    $artifact = Get-ChildItem -LiteralPath $ProductRoot -Filter "Nexus-Gateway-*.zip" -File |
-        Sort-Object LastWriteTimeUtc -Descending |
-        Select-Object -First 1
-    if ($null -eq $artifact) { throw "No Nexus-Gateway-*.zip artifact was found in $ProductRoot" }
-    return $artifact
+    $candidates = @(Get-ChildItem -LiteralPath $ProductRoot -Filter "Nexus-Gateway-*.zip" -File -Recurse |
+        ForEach-Object {
+            $match = [regex]::Match($_.Name, '^Nexus-Gateway-(?<version>\d+\.\d+\.\d+)\.zip$')
+            if ($match.Success) {
+                [pscustomobject]@{
+                    Artifact = $_
+                    Version = [version]$match.Groups['version'].Value
+                }
+            }
+        } |
+        Sort-Object Version, @{ Expression = { $_.Artifact.LastWriteTimeUtc } } -Descending)
+    if ($candidates.Count -eq 0) { throw "No Nexus-Gateway-*.zip artifact was found in $ProductRoot" }
+    return $candidates[0].Artifact
 }
 
 function Verify-Artifact($Artifact) {
     $actual = (Get-FileHash -LiteralPath $Artifact.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
-    $sumFile = Join-Path $ProductRoot "SHA256SUMS.txt"
+    $sumFile = Join-Path $Artifact.DirectoryName "SHA256SUMS.txt"
     if (Test-Path -LiteralPath $sumFile) {
         $escapedName = [regex]::Escape($Artifact.Name)
         $line = Get-Content -LiteralPath $sumFile -Encoding UTF8 |
@@ -410,37 +463,57 @@ function Verify-Artifact($Artifact) {
 }
 
 function Ensure-Dependencies([string]$RequirementsPath) {
-    $uvCommand = Get-Command uv -ErrorAction SilentlyContinue
-    if ($null -eq $uvCommand) { throw "uv is required but was not found in PATH." }
     $python = Get-VenvPython
-    if (-not (Test-Path -LiteralPath $python)) {
-        Write-Host "Creating isolated Python environment..."
-        & $uvCommand.Source venv $VenvDir --python python
-        if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $python)) {
-            throw "Could not create the isolated Python environment."
-        }
+    $requirementsHash = (Get-FileHash -LiteralPath $RequirementsPath -Algorithm SHA256).Hash.ToLowerInvariant()
+    $dependencyStateFile = Join-Path $StateDir "dependencies.json"
+    $dependencyState = Read-JsonFile $dependencyStateFile
+    $importsWork = $false
+    if (Test-Path -LiteralPath $python -PathType Leaf) {
+        & $python -c "import aiohttp, multidict, yarl" *> $null
+        $importsWork = $LASTEXITCODE -eq 0
     }
+    if ($importsWork -and $null -ne $dependencyState -and [string]$dependencyState.requirements_sha256 -eq $requirementsHash) {
+        return
+    }
+
+    $bootstrapPython = Find-NexusBootstrapPython
+    Remove-ManagedTree $VenvDir
+    $pipCacheDir = Assert-ManagedPath (Join-Path $Root "cache\pip")
+    $null = New-Item -ItemType Directory -Path $pipCacheDir -Force
     $null = New-Item -ItemType Directory -Path $StateDir -Force
     $lockFile = Join-Path $StateDir "requirements.lock.txt"
-    Write-Host "Resolving and synchronizing release dependencies in copy mode..."
-    $previousLinkMode = [Environment]::GetEnvironmentVariable("UV_LINK_MODE", "Process")
-    $previousProgress = [Environment]::GetEnvironmentVariable("UV_NO_PROGRESS", "Process")
-    [Environment]::SetEnvironmentVariable("UV_LINK_MODE", "copy", "Process")
-    [Environment]::SetEnvironmentVariable("UV_NO_PROGRESS", "1", "Process")
+    $previousCache = [Environment]::GetEnvironmentVariable("PIP_CACHE_DIR", "Process")
+    $previousVersionCheck = [Environment]::GetEnvironmentVariable("PIP_DISABLE_PIP_VERSION_CHECK", "Process")
+    $previousNoInput = [Environment]::GetEnvironmentVariable("PIP_NO_INPUT", "Process")
+    [Environment]::SetEnvironmentVariable("PIP_CACHE_DIR", $pipCacheDir, "Process")
+    [Environment]::SetEnvironmentVariable("PIP_DISABLE_PIP_VERSION_CHECK", "1", "Process")
+    [Environment]::SetEnvironmentVariable("PIP_NO_INPUT", "1", "Process")
     try {
-        & $uvCommand.Source pip compile $RequirementsPath --python $python --output-file $lockFile --quiet
-        if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $lockFile)) {
-            throw "Dependency resolution failed."
+        Write-Host "Creating isolated Python environment..."
+        & $bootstrapPython -m venv $VenvDir
+        if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $python -PathType Leaf)) {
+            throw "Could not create the isolated Python environment."
         }
-        & $uvCommand.Source pip sync --python $python --link-mode copy $lockFile
-        if ($LASTEXITCODE -ne 0) { throw "Dependency synchronization failed." }
+        Write-Host "Installing pinned release dependencies..."
+        & $python -m pip install --disable-pip-version-check --no-input --requirement $RequirementsPath
+        if ($LASTEXITCODE -ne 0) { throw "Dependency installation failed." }
         & $python -c "import aiohttp, multidict, yarl"
-        if ($LASTEXITCODE -ne 0) { throw "The synchronized runtime dependencies cannot be imported." }
+        if ($LASTEXITCODE -ne 0) { throw "The installed runtime dependencies cannot be imported." }
+        $freeze = & $python -m pip freeze --all
+        if ($LASTEXITCODE -ne 0) { throw "Could not record installed dependency versions." }
+        ($freeze -join "`n") + "`n" | Set-Content -LiteralPath $lockFile -Encoding UTF8
+        Write-JsonFile $dependencyStateFile ([ordered]@{
+            schema_version = 1
+            requirements_sha256 = $requirementsHash
+            synced_at = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
+        })
     } finally {
-        [Environment]::SetEnvironmentVariable("UV_LINK_MODE", $previousLinkMode, "Process")
-        [Environment]::SetEnvironmentVariable("UV_NO_PROGRESS", $previousProgress, "Process")
+        [Environment]::SetEnvironmentVariable("PIP_CACHE_DIR", $previousCache, "Process")
+        [Environment]::SetEnvironmentVariable("PIP_DISABLE_PIP_VERSION_CHECK", $previousVersionCheck, "Process")
+        [Environment]::SetEnvironmentVariable("PIP_NO_INPUT", $previousNoInput, "Process")
     }
 }
+
 
 function Deploy-LatestArtifact {
     $artifact = Get-LatestArtifact

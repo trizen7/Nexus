@@ -124,4 +124,6 @@ def test_nexus_cleanup_and_deployment_are_confined_to_nexus_directories():
     assert "function Assert-ManagedPath" in manage_source
     assert "Refusing to modify a path outside the deployed test environment" in manage_source
     assert "Start-Process -FilePath $python" in manage_source
+    assert '& $bootstrapPython -m venv $VenvDir' in manage_source
+    assert "Get-Command uv" not in manage_source
     assert "hermes-agent" not in manage_source.casefold()

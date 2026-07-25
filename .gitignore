@@ -12,6 +12,8 @@ Thumbs.db
 local.properties
 *.jks
 *.keystore
+*.p12
+*.pfx
 *.pem
 *.key
 
@@ -42,5 +44,8 @@ gateway/logs/
 *.tmp
 *.part
 
-# Local delivery artifacts
+# Release signing, tools and local delivery artifacts
+.release-signing/
+dist/
+.tools/
 成品/

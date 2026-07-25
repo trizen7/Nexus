@@ -47,6 +47,43 @@ def test_product_test_controller_has_valid_paths_and_safe_process_recovery():
     assert 'cryptography' not in script
     assert 'PYTHONNOUSERSITE = "1"' in script
     assert '"PYTHONPATH", "PYTHONHOME"' in script
+    assert 'Get-ChildItem -LiteralPath $ProductRoot -Filter "Nexus-Gateway-*.zip" -File -Recurse' in script
+    assert '$sumFile = Join-Path $Artifact.DirectoryName "SHA256SUMS.txt"' in script
+
+
+def test_windows_release_script_preserves_the_chinese_product_path():
+    script_path = ROOT / "scripts" / "build-android-release.ps1"
+    payload = script_path.read_bytes()
+
+    # Windows PowerShell 5.1 treats BOM-less scripts as the active ANSI code page.
+    # Keep a UTF-8 BOM so the default product/v<version> output path is not mojibaked.
+    assert payload.startswith(b"\xef\xbb\xbf")
+    script = payload.decode("utf-8-sig")
+    assert '("成品\\v" + $Version)' in script
+
+
+def test_nexus_tools_do_not_bootstrap_from_the_hermes_virtual_environment():
+    module = load_local_test_module()
+    assert module._is_external_dependency_python(Path("C:/vendor/hermes/venv/python.exe"))
+    assert not module._is_external_dependency_python(Path("C:/Python312/python.exe"))
+
+    powershell = (ROOT / "scripts" / "local-test.ps1").read_text(encoding="utf-8-sig")
+    release = (ROOT / "scripts" / "build-android-release.ps1").read_text(encoding="utf-8-sig")
+    product = (ROOT / "scripts" / "product-test-environment" / "manage.ps1").read_text(encoding="utf-8-sig")
+    cmd = (ROOT / "scripts" / "local-test.cmd").read_text(encoding="ascii")
+
+    for script in (powershell, release, product):
+        assert '$_ -ieq "hermes"' in script
+        assert "NEXUS_PYTHON" in script
+    assert '& $bootstrapPython -m venv $VenvDir' in product
+    assert 'Get-Command uv' not in product
+    assert 'Assert-ManagedPath (Join-Path $Root "cache\\pip")' in product
+    assert module.PIP_CACHE_DIR == module.LOCAL_DIR / "cache" / "pip"
+    local_source = (ROOT / "scripts" / "local_test.py").read_text(encoding="utf-8")
+    assert 'pip_env["PIP_CACHE_DIR"] = str(PIP_CACHE_DIR)' in local_source
+    assert 'shutil.which("uv")' not in local_source
+    assert "local-test.ps1" in cmd
+    assert "PYTHON=python" not in cmd
 
 
 def test_local_test_cli_exposes_full_lifecycle():

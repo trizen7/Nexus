@@ -1,0 +1,5 @@
+blank_issues_enabled: false
+contact_links:
+  - name: 私下报告安全漏洞
+    url: https://github.com/trizen7/Nexus/security/advisories/new
+    about: 请勿在公开 Issue 中发布漏洞细节、凭据或私人数据。

@@ -3,6 +3,17 @@ plugins {
     id("org.jetbrains.kotlin.android")
 }
 
+val releaseStoreFile = System.getenv("NEXUS_RELEASE_STORE_FILE")
+val releaseStorePassword = System.getenv("NEXUS_RELEASE_STORE_PASSWORD")
+val releaseKeyAlias = System.getenv("NEXUS_RELEASE_KEY_ALIAS")
+val releaseKeyPassword = System.getenv("NEXUS_RELEASE_KEY_PASSWORD")
+val hasReleaseSigning = listOf(
+    releaseStoreFile,
+    releaseStorePassword,
+    releaseKeyAlias,
+    releaseKeyPassword
+).all { !it.isNullOrBlank() }
+
 android {
     namespace = "app.nexus.mobile"
     compileSdk = 35
@@ -11,14 +22,28 @@ android {
         applicationId = "app.nexus.mobile"
         minSdk = 26
         targetSdk = 35
-        versionCode = 15
-        versionName = "0.0.15"
+        versionCode = 16
+        versionName = "0.1.0"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }
 
+    signingConfigs {
+        if (hasReleaseSigning) {
+            create("release") {
+                storeFile = file(releaseStoreFile!!)
+                storePassword = releaseStorePassword
+                keyAlias = releaseKeyAlias
+                keyPassword = releaseKeyPassword
+            }
+        }
+    }
+
     buildTypes {
         release {
+            if (hasReleaseSigning) {
+                signingConfig = signingConfigs.getByName("release")
+            }
             isMinifyEnabled = false
             proguardFiles(
                 getDefaultProguardFile("proguard-android-optimize.txt"),

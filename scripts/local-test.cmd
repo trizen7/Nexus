@@ -1,7 +1,4 @@
 @echo off
 setlocal
-set "REPO_ROOT=%~dp0.."
-set "PYTHON=%REPO_ROOT%\.local-test\venv\Scripts\python.exe"
-if not exist "%PYTHON%" set "PYTHON=python"
-"%PYTHON%" "%~dp0local_test.py" %*
+powershell -NoProfile -ExecutionPolicy Bypass -File "%~dp0local-test.ps1" %*
 exit /b %ERRORLEVEL%
