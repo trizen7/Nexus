@@ -39,7 +39,7 @@ jobs:
         run: python -m pytest tests -q
       - working-directory: gateway
         run: python -m compileall -q nexus_gateway
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@v7
         with:
           node-version: "20"
       - run: node --check gateway/nexus_gateway/web/app.js
