@@ -108,6 +108,9 @@ try {
     }
     & $pythonCommand @releaseArgs
     if ($LASTEXITCODE -ne 0) { throw "Release artifact packaging failed." }
+
+    & (Join-Path $RepoRoot "scripts\build_fnos_package.ps1") -OutputDirectory $OutputDirectory
+    if ($LASTEXITCODE -ne 0) { throw "fnOS release packaging failed." }
 } finally {
     Remove-Item Env:NEXUS_RELEASE_STORE_FILE -ErrorAction SilentlyContinue
     Remove-Item Env:NEXUS_RELEASE_STORE_PASSWORD -ErrorAction SilentlyContinue

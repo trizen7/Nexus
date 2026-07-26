@@ -47,9 +47,10 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\build-android-rele
 
 - Android Release APK；
 - Gateway ZIP；
-- `SHA256SUMS.txt`。
+- 飞牛 fnOS FPK；
+- 同时覆盖上述所有附件的唯一 `SHA256SUMS.txt`。
 
-脚本会执行 Android 单元测试、Lint、Release APK 构建与签名验证。Gateway ZIP 时间戳固定且文件清单受控；第三方许可声明包含在 Gateway ZIP 中。
+脚本会执行 Android 单元测试、Lint、Release APK 构建与签名验证，并构建 fnOS FPK。Gateway ZIP 时间戳固定且文件清单受控；第三方许可声明包含在 Gateway ZIP 中。发布目录不再生成单独的 `.fpk.sha256`。
 
 ## 4. GitHub Actions 签名秘密
 

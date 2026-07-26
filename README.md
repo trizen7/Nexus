@@ -4,7 +4,7 @@ Nexus 是一个面向 Hermes Agent 的社区移动客户端与轻量移动网关
 
 项目目标是让 Hermes 始终保持原版并由用户独立维护，同时把移动端所需的登录、会话、附件、缓存、下载、通知和断线续接能力放在客户端与移动网关中。Nexus 不修改、更新或管理任何 Hermes 文件。
 
-当前版本：0.1.3
+当前版本：0.1.4
 
 ## 组成
 
@@ -78,10 +78,10 @@ Android：
 
 - 官方签名的 Android Release APK；
 - 可独立部署的 Gateway ZIP；
-- 飞牛 fnOS 应用中心安装包 FPK 及独立 SHA-256 校验文件；
+- 飞牛 fnOS 应用中心安装包 FPK；
 - `SHA256SUMS.txt`。
 
-安装前应使用 `SHA256SUMS.txt` 核对 APK、Gateway ZIP 等发布附件。Android APK 由项目持久发布密钥签名，正式版本应保持相同签名系列。第三方许可声明保留在源码仓库与 Gateway ZIP 中，不再作为独立 Release 附件。
+安装前应使用唯一的 `SHA256SUMS.txt` 核对 APK、Gateway ZIP 和 FPK 发布附件。Android APK 由项目持久发布密钥签名，正式版本应保持相同签名系列。第三方许可声明保留在源码仓库与 Gateway ZIP 中，不再作为独立 Release 附件。
 
 ## 快速开始
 

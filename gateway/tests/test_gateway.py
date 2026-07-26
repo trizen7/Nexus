@@ -59,6 +59,10 @@ async def upstream_client():
             }
         ],
     }
+    chat_state = {
+        "status": 200,
+        "payload": None,
+    }
     probe_counts = {"health_detailed": 0, "sessions": 0}
 
     async def health(_request):
@@ -75,10 +79,10 @@ async def upstream_client():
     async def sessions(request):
         assert request.headers["Authorization"] == "Bearer upstream-secret"
         probe_counts["sessions"] += 1
-        return web.json_response(
-            {"object": "list", "data": session_state["rows"]},
-            status=int(session_state["status"]),
-        )
+        payload = session_state.get("payload")
+        if not isinstance(payload, dict):
+            payload = {"object": "list", "data": session_state["rows"]}
+        return web.json_response(payload, status=int(session_state["status"]))
 
     async def create_session(request):
         assert request.headers["Authorization"] == "Bearer upstream-secret"
@@ -97,6 +101,11 @@ async def upstream_client():
         assert request.headers["Authorization"] == "Bearer upstream-secret"
         captured_chat.clear()
         captured_chat.update(await request.json())
+        if int(chat_state["status"]) != 200:
+            return web.json_response(
+                chat_state.get("payload") or {"error": "upstream rejected request"},
+                status=int(chat_state["status"]),
+            )
         if captured_chat.get("message") == "slow-run":
             response = web.StreamResponse(headers={"Content-Type": "text/event-stream"})
             await response.prepare(request)
@@ -180,6 +189,7 @@ async def upstream_client():
     client.health_state = health_state
     client.detailed_health_state = detailed_health_state
     client.session_state = session_state
+    client.chat_state = chat_state
     client.probe_counts = probe_counts
     await client.start_server()
     try:
@@ -2479,6 +2489,72 @@ async def test_transcription_failure_does_not_expose_internal_error(tmp_path: Pa
         body = await response.json()
         assert body["error"] == {"code": "transcription_failed", "message": "语音转写失败"}
         assert "secret" not in json.dumps(body)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("upstream_status", [401, 403])
+async def test_proxy_maps_hermes_auth_failure_without_invalidating_device_token(
+    gateway_client: TestClient, upstream_client: TestClient, upstream_status: int,
+):
+    leaked_upstream_error = {
+        "error": {
+            "message": "invalid bearer upstream-secret for http://private-hermes.local",
+        }
+    }
+    upstream_client.session_state.update({
+        "status": upstream_status,
+        "payload": leaked_upstream_error,
+    })
+    headers = await auth_headers(gateway_client)
+
+    response = await gateway_client.get("/api/sessions", headers=headers)
+
+    assert response.status == 502
+    body = await response.json()
+    assert body == {
+        "error": {
+            "code": "hermes_auth_failed",
+            "message": "Hermes API Server Key 无效或无权访问，请在 Nexus 配置中检查 Hermes API 地址和 API Server Key",
+        }
+    }
+    serialized = json.dumps(body, ensure_ascii=False)
+    assert "upstream-secret" not in serialized
+    assert "private-hermes.local" not in serialized
+
+    upstream_client.session_state.update({
+        "status": 200,
+        "payload": {"object": "list", "data": upstream_client.session_state["rows"]},
+    })
+    still_authorized = await gateway_client.get("/api/sessions", headers=headers)
+    assert still_authorized.status == 200
+
+
+@pytest.mark.asyncio
+async def test_stream_reports_hermes_auth_failure_without_exposing_upstream(
+    gateway_client: TestClient, upstream_client: TestClient,
+):
+    upstream_client.chat_state.update({
+        "status": 401,
+        "payload": {"detail": "bad key upstream-secret at http://private-hermes.local"},
+    })
+    headers = await auth_headers(gateway_client)
+
+    response = await gateway_client.post(
+        "/api/sessions/session-1/chat/stream",
+        json={"message": "hello"},
+        headers=headers,
+    )
+
+    assert response.status == 200
+    body = await response.text()
+    assert "event: error" in body
+    assert "hermes_auth_failed" in body
+    assert "Hermes API Server Key 无效或无权访问，请在 Nexus 配置中检查 Hermes API 地址和 API Server Key" in body
+    assert "upstream-secret" not in body
+    assert "private-hermes.local" not in body
+
+    still_authorized = await gateway_client.get("/api/sessions", headers=headers)
+    assert still_authorized.status == 200
 
 
 @pytest.mark.asyncio

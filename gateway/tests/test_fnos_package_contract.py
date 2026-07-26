@@ -13,6 +13,7 @@ import yaml
 ROOT = Path(__file__).resolve().parents[2]
 PACKAGE = ROOT / "fnos" / "nexus-gateway"
 ENTRYPOINT = PACKAGE / "app" / "docker" / "fnos_entrypoint.py"
+VERIFIER = ROOT / "scripts" / "verify_fnos_package.py"
 
 
 def _manifest() -> dict[str, str]:
@@ -41,6 +42,14 @@ def _load_entrypoint():
         spec.loader.exec_module(module)
     finally:
         sys.dont_write_bytecode = previous
+    return module
+
+
+def _load_verifier():
+    spec = importlib.util.spec_from_file_location("nexus_fnos_verifier", VERIFIER)
+    assert spec and spec.loader
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
     return module
 
 
@@ -398,6 +407,9 @@ def test_fnos_build_and_container_workflows_are_reproducible_contracts() -> None
     assert "d7af4bd716b009c58f5bcd931615f39db121e7d4b75dc759e575c4fb2879b6ee" in script
     assert "54b97fa7b70968c4d05c79840f5daeff508957d0bb2062fdb0376d00d9615c93" in script
     assert "Nexus-fnOS-$PackageVersion.fpk" in script
+    assert "Update-ChecksumManifest" in script
+    assert "SHA256SUMS.txt" in script
+    assert "WriteAllText($HashPath" not in script
     assert "docker build" not in script.lower()
     assert "linux/amd64,linux/arm64" in workflow
     assert "docker/build-push-action@v6" in workflow
@@ -417,3 +429,36 @@ def test_fnos_build_and_container_workflows_are_reproducible_contracts() -> None
             for step in job.get("steps", []):
                 if step.get("shell") == "python":
                     compile(step["run"], f"{workflow_path}:{step.get('name', 'python step')}", "exec")
+
+
+def test_fnos_verifier_reads_fpk_entry_from_unified_checksum_manifest(tmp_path: Path) -> None:
+    verifier = _load_verifier()
+    fpk = tmp_path / "Nexus-fnOS-0.1.4-fnos1.fpk"
+    fpk.write_bytes(b"fnos-package")
+    digest = hashlib.sha256(fpk.read_bytes()).hexdigest()
+    checksums = tmp_path / "SHA256SUMS.txt"
+    checksums.write_text(
+        "0" * 64 + "  Nexus-Android-0.1.4-release.apk\n" +
+        f"{digest}  {fpk.name}\n",
+        encoding="utf-8",
+    )
+
+    verifier._verify_checksum_file(fpk, digest, checksums)
+
+    checksums.write_text("0" * 64 + f"  {fpk.name}\n", encoding="utf-8")
+    with pytest.raises(verifier.VerificationError, match="does not match"):
+        verifier._verify_checksum_file(fpk, digest, checksums)
+
+
+def test_fnos_verifier_prefers_unified_checksum_manifest_but_accepts_legacy_sidecar(tmp_path: Path) -> None:
+    verifier = _load_verifier()
+    fpk = tmp_path / "Nexus-fnOS-0.1.4-fnos1.fpk"
+    fpk.write_bytes(b"fnos-package")
+    legacy = Path(f"{fpk}.sha256")
+    legacy.write_text("0" * 64 + f"  {fpk.name}\n", encoding="utf-8")
+
+    assert verifier._resolve_checksum_file(fpk, None) == legacy
+
+    unified = tmp_path / "SHA256SUMS.txt"
+    unified.write_text("0" * 64 + f"  {fpk.name}\n", encoding="utf-8")
+    assert verifier._resolve_checksum_file(fpk, None) == unified

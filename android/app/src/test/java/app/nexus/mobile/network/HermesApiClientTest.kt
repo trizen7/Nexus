@@ -349,7 +349,45 @@ class HermesApiClientTest {
         val error = runCatching { client.listSessions() }.exceptionOrNull()
 
         assertEquals("登录已失效，请重新输入密码", friendlyNetworkError(error!!))
+        assertEquals("unauthorized", (error as HermesHttpException).serverCode)
         assertTrue(requiresPasswordReauthentication(error))
+    }
+
+    @Test
+    fun `Hermes auth failure keeps the Nexus device token`() = runTest {
+        val serverMessage = "Hermes API Server Key 无效或无权访问，请在 Nexus 配置中检查 Hermes API 地址和 API Server Key"
+        server.enqueue(
+            MockResponse()
+                .setResponseCode(502)
+                .setHeader("Content-Type", "application/json")
+                .setBody("""{"error":{"code":"hermes_auth_failed","message":"$serverMessage"}}""")
+        )
+        val client = HermesApiClient(server.url("/").toString(), "valid-nexus-token")
+
+        val error = runCatching { client.listSessions() }.exceptionOrNull()
+
+        assertTrue(error is HermesHttpException)
+        assertEquals("hermes_auth_failed", (error as HermesHttpException).serverCode)
+        assertEquals(serverMessage, friendlyNetworkError(error))
+        assertFalse(requiresPasswordReauthentication(error))
+    }
+
+    @Test
+    fun `unstructured upstream unauthorized response does not clear the Nexus device token`() = runTest {
+        server.enqueue(
+            MockResponse()
+                .setResponseCode(401)
+                .setHeader("Content-Type", "application/json")
+                .setBody("{\"message\":\"upstream unauthorized\"}")
+        )
+        val client = HermesApiClient(server.url("/").toString(), "valid-nexus-token")
+
+        val error = runCatching { client.listSessions() }.exceptionOrNull()
+
+        assertTrue(error is HermesHttpException)
+        assertEquals(null, (error as HermesHttpException).serverCode)
+        assertEquals("upstream unauthorized", friendlyNetworkError(error))
+        assertFalse(requiresPasswordReauthentication(error))
     }
 
     @Test

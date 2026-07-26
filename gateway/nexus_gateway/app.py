@@ -79,6 +79,22 @@ def _hermes_unavailable_message() -> str:
 
 
 HERMES_UNAVAILABLE_MESSAGE = _hermes_unavailable_message()
+HERMES_AUTH_FAILED_MESSAGE = (
+    "Hermes API Server Key 无效或无权访问，请在 Nexus 配置中检查 Hermes API 地址和 API Server Key"
+)
+
+
+def _hermes_auth_failed_error() -> dict[str, dict[str, str]]:
+    return {
+        "error": {
+            "code": "hermes_auth_failed",
+            "message": HERMES_AUTH_FAILED_MESSAGE,
+        }
+    }
+
+
+class HermesUpstreamAuthError(RuntimeError):
+    """Raised when Hermes rejects the Gateway's own upstream credentials."""
 
 
 @dataclass
@@ -1501,6 +1517,9 @@ async def proxy(request: web.Request) -> web.StreamResponse:
         data=body_bytes,
         allow_redirects=False,
     )
+    if upstream.status in {401, 403}:
+        upstream.release()
+        return web.json_response(_hermes_auth_failed_error(), status=502)
     excluded = {"content-length", "transfer-encoding", "connection", "content-encoding"}
     headers = {key: value for key, value in upstream.headers.items() if key.lower() not in excluded}
     if is_message_history:
@@ -1696,6 +1715,8 @@ async def _tracked_session_stream(request: web.Request) -> web.StreamResponse:
                 headers=upstream_headers,
                 data=body_bytes,
             )
+            if upstream.status in {401, 403}:
+                raise HermesUpstreamAuthError()
             if not upstream.ok:
                 raise RuntimeError(f"Hermes HTTP {upstream.status}")
             if use_model_route:
@@ -1719,7 +1740,17 @@ async def _tracked_session_stream(request: web.Request) -> web.StreamResponse:
         except asyncio.CancelledError:
             tracker.finish(session_id, "stopped")
             raise
-        except Exception as exc:
+        except HermesUpstreamAuthError:
+            attachment_ids = request.get(REQUEST_ATTACHMENT_IDS_KEY, [])
+            if attachment_ids:
+                request.app[MEDIA_STORE_KEY].discard_last_session_media(session_id, attachment_ids)
+            tracker.finish(session_id, "failed", HERMES_AUTH_FAILED_MESSAGE)
+            payload = json.dumps({
+                "code": "hermes_auth_failed",
+                "message": HERMES_AUTH_FAILED_MESSAGE,
+            }, ensure_ascii=False)
+            tracker.publish(session_id, f"event: error\ndata: {payload}\n\n".encode("utf-8"))
+        except Exception:
             attachment_ids = request.get(REQUEST_ATTACHMENT_IDS_KEY, [])
             if attachment_ids:
                 request.app[MEDIA_STORE_KEY].discard_last_session_media(session_id, attachment_ids)

@@ -51,7 +51,7 @@ class HermesApiClient(
         httpClient.newCall(request).execute().use { response ->
             val text = response.body?.string().orEmpty()
             if (!response.isSuccessful) {
-                throw HermesHttpException(response.code, responseErrorMessage(text), "登录")
+                throw responseHttpException(response.code, text, "登录")
             }
             val root = gson.fromJson(text, JsonObject::class.java) ?: JsonObject()
             root.string("access_token").ifBlank { error("服务器没有返回登录凭证") }.also { token = it }
@@ -238,7 +238,7 @@ class HermesApiClient(
         httpClient.newCall(request).execute().use { response ->
             val text = response.body?.string().orEmpty()
             if (!response.isSuccessful) {
-                throw HermesHttpException(response.code, responseErrorMessage(text), "停止回答")
+                throw responseHttpException(response.code, text, "停止回答")
             }
             val root = gson.fromJson(text, JsonObject::class.java) ?: JsonObject()
             root.get("stopped")?.takeUnless { it.isJsonNull }?.asBoolean ?: false
@@ -446,7 +446,7 @@ class HermesApiClient(
     ): List<HermesStreamEvent> = streamHttpClient.newCall(request).execute().use { response ->
         if (!response.isSuccessful) {
             val responseText = response.body?.string().orEmpty()
-            throw HermesHttpException(response.code, responseErrorMessage(responseText), "对话请求")
+            throw responseHttpException(response.code, responseText, "对话请求")
         }
         val parser = HermesStreamParser()
         val events = mutableListOf<HermesStreamEvent>()
@@ -491,16 +491,30 @@ class HermesApiClient(
         httpClient.newCall(request).execute().use { response ->
             val text = response.body?.string().orEmpty()
             if (!response.isSuccessful) {
-                throw HermesHttpException(response.code, responseErrorMessage(text), "Hermes 请求")
+                throw responseHttpException(response.code, text, "Hermes 请求")
             }
             return gson.fromJson(text, JsonObject::class.java) ?: JsonObject()
         }
     }
 
-    private fun responseErrorMessage(text: String): String? = runCatching {
-        val root = gson.fromJson(text, JsonObject::class.java) ?: return@runCatching null
-        root.objectValue("error").string("message").ifBlank { root.string("message") }.ifBlank { null }
-    }.getOrNull()
+    private fun responseHttpException(statusCode: Int, text: String, operation: String): HermesHttpException {
+        val error = responseError(text)
+        return HermesHttpException(
+            statusCode = statusCode,
+            serverMessage = error.message,
+            operation = operation,
+            serverCode = error.code
+        )
+    }
+
+    private fun responseError(text: String): HermesServerError = runCatching {
+        val root = gson.fromJson(text, JsonObject::class.java) ?: return@runCatching HermesServerError()
+        val error = root.objectValue("error")
+        HermesServerError(
+            code = error.string("code").ifBlank { root.string("code") }.ifBlank { null },
+            message = error.string("message").ifBlank { root.string("message") }.ifBlank { null }
+        )
+    }.getOrDefault(HermesServerError())
 
     private fun authorizedRequest(url: String): Request.Builder = authorized(Request.Builder().url(url))
 
@@ -524,10 +538,16 @@ data class HermesHealth(
     val hermesVersion: String?
 )
 
+private data class HermesServerError(
+    val code: String? = null,
+    val message: String? = null
+)
+
 class HermesHttpException(
     val statusCode: Int,
     val serverMessage: String?,
-    val operation: String
+    val operation: String,
+    val serverCode: String? = null
 ) : IOException(serverMessage?.takeIf { it.isNotBlank() } ?: "$operation 失败：HTTP $statusCode")
 
 class HermesStreamDetachedException(cause: IOException) :
@@ -539,7 +559,11 @@ private fun throwableChain(error: Throwable): Sequence<Throwable> =
 fun requiresPasswordReauthentication(error: Throwable): Boolean =
     throwableChain(error)
         .filterIsInstance<HermesHttpException>()
-        .any { it.statusCode == 401 && it.operation != "登录" }
+        .any {
+            it.statusCode == 401 &&
+                it.serverCode == "unauthorized" &&
+                it.operation != "登录"
+        }
 
 private fun isConnectionAbort(error: Throwable): Boolean =
     throwableChain(error).any { cause ->
@@ -565,7 +589,8 @@ fun friendlyNetworkError(error: Throwable, serverUrl: String? = null): String {
     return when {
         error is kotlinx.coroutines.CancellationException -> "操作已取消"
         httpError?.statusCode == 401 && httpError.operation == "登录" -> "登录失败：账号或密码错误"
-        httpError?.statusCode == 401 -> "登录已失效，请重新输入密码"
+        httpError?.statusCode == 401 && httpError.serverCode == "unauthorized" ->
+            "登录已失效，请重新输入密码"
         httpError != null -> httpError.serverMessage?.takeIf { it.isNotBlank() }
             ?: "${httpError.operation}失败：HTTP ${httpError.statusCode}"
         causes.any { it is SSLHandshakeException || it is SSLPeerUnverifiedException ||

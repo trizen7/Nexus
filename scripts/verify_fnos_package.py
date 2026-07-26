@@ -137,6 +137,43 @@ def _source_bytes(path: str, *, in_app: bool = False) -> bytes:
     return (base / path).read_bytes()
 
 
+def _verify_checksum_file(fpk_path: Path, digest: str, checksum_path: Path) -> None:
+    try:
+        lines = checksum_path.read_text(encoding="utf-8").splitlines()
+    except UnicodeDecodeError as exc:
+        raise VerificationError(f"checksum file is not UTF-8: {checksum_path}") from exc
+
+    entries: dict[str, str] = {}
+    for raw_line in lines:
+        if not raw_line:
+            continue
+        match = re.fullmatch(r"([0-9A-Fa-f]{64})  ([^\x2f\x5c]+)", raw_line)
+        if not match:
+            _fail(f"invalid checksum line in {checksum_path.name}")
+        checksum, name = match.groups()
+        if name in entries:
+            _fail(f"duplicate checksum entry in {checksum_path.name}: {name}")
+        entries[name] = checksum.lower()
+
+    expected = entries.get(fpk_path.name)
+    if expected is None:
+        _fail(f"{checksum_path.name} does not contain {fpk_path.name}")
+    if expected != digest:
+        _fail(f"{checksum_path.name} does not match the package")
+
+
+def _resolve_checksum_file(fpk_path: Path, requested: Path | None) -> Path | None:
+    if requested is not None:
+        if not requested.is_file():
+            _fail(f"checksum file not found: {requested}")
+        return requested
+    unified = fpk_path.parent / "SHA256SUMS.txt"
+    if unified.is_file():
+        return unified
+    legacy = Path(f"{fpk_path}.sha256")
+    return legacy if legacy.is_file() else None
+
+
 def verify_package(fpk_path: Path, sha256_path: Path | None = None) -> str:
     if not fpk_path.is_file():
         _fail(f"FPK not found: {fpk_path}")
@@ -257,13 +294,9 @@ def verify_package(fpk_path: Path, sha256_path: Path | None = None) -> str:
         _fail("FPK LICENSE does not include the repository license and NOTICE")
 
     digest = hashlib.sha256(fpk_path.read_bytes()).hexdigest()
-    resolved_sha256_path = sha256_path or Path(f"{fpk_path}.sha256")
-    if resolved_sha256_path.exists():
-        parts = resolved_sha256_path.read_text(encoding="utf-8").split()
-        if len(parts) != 2 or parts[0].lower() != digest or parts[1] != fpk_path.name:
-            _fail("FPK SHA-256 file does not match the package")
-    elif sha256_path is not None:
-        _fail(f"SHA-256 file not found: {resolved_sha256_path}")
+    checksum_file = _resolve_checksum_file(fpk_path, sha256_path)
+    if checksum_file is not None:
+        _verify_checksum_file(fpk_path, digest, checksum_file)
 
     return digest
 
@@ -271,7 +304,7 @@ def verify_package(fpk_path: Path, sha256_path: Path | None = None) -> str:
 def main() -> int:
     parser = argparse.ArgumentParser(description="Verify a Nexus fnOS FPK without extracting it")
     parser.add_argument("fpk", type=Path)
-    parser.add_argument("--sha256-file", type=Path)
+    parser.add_argument("--sha256-file", type=Path, help="SHA256SUMS.txt or a legacy single-artifact checksum file")
     args = parser.parse_args()
     try:
         digest = verify_package(args.fpk.resolve(), args.sha256_file.resolve() if args.sha256_file else None)

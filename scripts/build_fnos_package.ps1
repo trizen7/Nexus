@@ -18,7 +18,8 @@ $OfficialLinuxAmd64Sha256 = "54b97fa7b70968c4d05c79840f5daeff508957d0bb2062fdb03
 $RunningOnWindows = $env:OS -eq "Windows_NT"
 
 function Resolve-RepositoryPath([string]$Value, [string]$Label) {
-    $Resolved = [System.IO.Path]::GetFullPath((Join-Path $RepositoryRoot $Value))
+    $Candidate = if ([System.IO.Path]::IsPathRooted($Value)) { $Value } else { Join-Path $RepositoryRoot $Value }
+    $Resolved = [System.IO.Path]::GetFullPath($Candidate)
     $Prefix = $RepositoryRoot.TrimEnd([System.IO.Path]::DirectorySeparatorChar) + [System.IO.Path]::DirectorySeparatorChar
     if (-not $Resolved.StartsWith($Prefix, [System.StringComparison]::OrdinalIgnoreCase)) {
         throw "$Label must stay inside the Nexus repository"
@@ -82,6 +83,41 @@ function Resolve-Fnpack([string]$RequestedPath) {
     return $Resolved
 }
 
+function Update-ChecksumManifest([string]$Directory, [string]$ArtifactName) {
+    $ManifestPath = Join-Path $Directory "SHA256SUMS.txt"
+    $Names = @{}
+    if (Test-Path -LiteralPath $ManifestPath -PathType Leaf) {
+        foreach ($RawLine in [System.IO.File]::ReadAllLines($ManifestPath, [System.Text.Encoding]::UTF8)) {
+            if ([string]::IsNullOrWhiteSpace($RawLine)) { continue }
+            $Match = [regex]::Match($RawLine, '^([0-9A-Fa-f]{64})  ([^\x2f\x5c]+)$')
+            if (-not $Match.Success) {
+                throw "invalid SHA256SUMS.txt line"
+            }
+            $Name = $Match.Groups[2].Value
+            if ($Name -eq "SHA256SUMS.txt" -or $Name -ne [System.IO.Path]::GetFileName($Name)) {
+                throw "unsafe SHA256SUMS.txt artifact name"
+            }
+            if ($Names.ContainsKey($Name)) {
+                throw "duplicate SHA256SUMS.txt artifact: $Name"
+            }
+            $Names[$Name] = $true
+        }
+    }
+    $Names[$ArtifactName] = $true
+
+    $Lines = @()
+    foreach ($Name in @($Names.Keys | Sort-Object)) {
+        $ArtifactPath = Join-Path $Directory $Name
+        if (-not (Test-Path -LiteralPath $ArtifactPath -PathType Leaf)) {
+            throw "SHA256SUMS.txt references a missing artifact: $Name"
+        }
+        $ArtifactDigest = (Get-FileHash -LiteralPath $ArtifactPath -Algorithm SHA256).Hash.ToLowerInvariant()
+        $Lines += "$ArtifactDigest  $Name"
+    }
+    [System.IO.File]::WriteAllText($ManifestPath, (($Lines -join "`n") + "`n"), $Utf8NoBom)
+    return $ManifestPath
+}
+
 function Test-Fnpack([string]$Executable) {
     $Name = [System.IO.Path]::GetFileName($Executable)
     $ExpectedHash = switch ($Name) {
@@ -131,9 +167,9 @@ Normalize-StagingText $StagingPackage
 New-Item -ItemType Directory -Path $ResolvedOutput -Force | Out-Null
 $OutputName = "Nexus-fnOS-$PackageVersion.fpk"
 $OutputPath = Join-Path $ResolvedOutput $OutputName
-$HashPath = "$OutputPath.sha256"
+$LegacyHashPath = "$OutputPath.sha256"
 Remove-Item -LiteralPath $OutputPath -Force -ErrorAction SilentlyContinue
-Remove-Item -LiteralPath $HashPath -Force -ErrorAction SilentlyContinue
+Remove-Item -LiteralPath $LegacyHashPath -Force -ErrorAction SilentlyContinue
 
 Push-Location $StagingRoot
 try {
@@ -154,7 +190,8 @@ finally {
 }
 
 $Digest = (Get-FileHash -LiteralPath $OutputPath -Algorithm SHA256).Hash.ToLowerInvariant()
-[System.IO.File]::WriteAllText($HashPath, "$Digest  $OutputName`n", $Utf8NoBom)
+$ChecksumManifest = Update-ChecksumManifest $ResolvedOutput $OutputName
 
 Write-Host "Built $OutputPath"
+Write-Host "Updated $ChecksumManifest"
 Write-Host "SHA-256 $Digest"

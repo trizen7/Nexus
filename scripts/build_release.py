@@ -104,6 +104,17 @@ def sha256(path: Path) -> str:
     return digest.hexdigest()
 
 
+def write_checksum_manifest(artifacts: list[Path], target: Path) -> None:
+    names = [path.name for path in artifacts]
+    if len(names) != len(set(names)):
+        raise RuntimeError("release artifact names must be unique")
+    checksum_lines = [
+        f"{sha256(path)}  {path.name}"
+        for path in sorted(artifacts, key=lambda item: item.name)
+    ]
+    target.write_text("\n".join(checksum_lines) + "\n", encoding="utf-8", newline="\n")
+
+
 def canonical_gateway_bytes(source: Path) -> bytes:
     """Return platform-independent bytes for text-only Gateway release files."""
     return source.read_bytes().replace(b"\r\n", b"\n")
@@ -193,6 +204,12 @@ def main() -> int:
     artifacts = [gateway_zip]
     if args.require_android or args.apk:
         artifacts.append(copy_required(args.apk, apk_target, "release APK"))
+    for legacy_checksum in output.glob(f"Nexus-fnOS-{version}-fnos*.fpk.sha256"):
+        legacy_checksum.unlink()
+    artifacts.extend(
+        path for path in sorted(output.glob(f"Nexus-fnOS-{version}-fnos*.fpk"))
+        if path.is_file()
+    )
 
     expected_fingerprint = normalize_fingerprint(args.certificate_sha256)
     if args.verify_signatures:
@@ -202,11 +219,7 @@ def main() -> int:
         if expected_fingerprint and apk_fingerprint != expected_fingerprint:
             raise RuntimeError("Android release certificate does not match the configured fingerprint")
 
-    checksum_lines = [
-        f"{sha256(path)}  {path.name}"
-        for path in sorted(artifacts, key=lambda item: item.name)
-    ]
-    checksums.write_text("\n".join(checksum_lines) + "\n", encoding="utf-8", newline="\n")
+    write_checksum_manifest(artifacts, checksums)
 
     print(f"output={output}")
     for artifact in artifacts:
