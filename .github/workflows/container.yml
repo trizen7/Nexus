@@ -6,7 +6,7 @@ on:
       gateway_source_ref:
         description: Git ref containing the Gateway source to publish
         required: true
-        default: v0.1.1
+        default: v0.1.2
         type: string
       image_tag:
         description: GHCR tag; blank uses the Gateway source version
@@ -107,6 +107,8 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ needs.metadata.outputs.gateway_source_ref }}
       - name: Ensure FPK references the published Gateway image
         shell: python
         env:

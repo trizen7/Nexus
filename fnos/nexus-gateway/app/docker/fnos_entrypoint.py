@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import hashlib
+import ipaddress
 import json
 import os
 import re
@@ -127,6 +128,31 @@ def _valid_account(value: dict[str, Any]) -> bool:
     return bool(username and (legacy_password or (salt and digest)))
 
 
+def _is_container_local_host(hostname: str) -> bool:
+    normalized = hostname.strip().lower().rstrip(".")
+    if normalized == "localhost":
+        return True
+    try:
+        address = ipaddress.ip_address(normalized)
+    except ValueError:
+        return False
+    return address.is_loopback or address.is_unspecified
+
+
+def _container_safe_hermes_url(value: str) -> str:
+    try:
+        parsed = urlsplit(value)
+        port = parsed.port
+    except ValueError:
+        return value
+    if not parsed.hostname or not _is_container_local_host(parsed.hostname):
+        return value
+    netloc = "host.docker.internal"
+    if port is not None:
+        netloc = f"{netloc}:{port}"
+    return parsed._replace(netloc=netloc).geturl()
+
+
 def _valid_hermes_url(value: str) -> bool:
     try:
         parsed = urlsplit(value)
@@ -136,6 +162,7 @@ def _valid_hermes_url(value: str) -> bool:
     return bool(
         parsed.scheme in {"http", "https"}
         and parsed.hostname
+        and not _is_container_local_host(parsed.hostname)
         and parsed.username is None
         and parsed.password is None
         and not parsed.query
@@ -179,7 +206,20 @@ def _validate_setup_directory() -> bool:
     return True
 
 
+def _migrate_legacy_loopback_config() -> None:
+    existing_config = _read_json(CONFIG_PATH)
+    current_url = str(existing_config.get("hermes_api_url", "")).strip().rstrip("/")
+    migrated_url = _container_safe_hermes_url(current_url)
+    if not current_url or migrated_url == current_url:
+        return
+    updated_config = dict(existing_config)
+    updated_config["hermes_api_url"] = migrated_url
+    if _valid_config(updated_config):
+        _atomic_json_write(CONFIG_PATH, updated_config)
+
+
 def apply_pending_setup() -> None:
+    _migrate_legacy_loopback_config()
     if not _validate_setup_directory():
         return
 

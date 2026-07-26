@@ -15,4 +15,8 @@ write_setup_field password "$wizard_nexus_password"
 write_setup_field hermes_api_url "$wizard_hermes_api_url"
 write_setup_field hermes_api_token "$wizard_hermes_api_token"
 commit_setup_dir
+
+if docker inspect nexus-gateway-fnos >/dev/null 2>&1; then
+  docker restart nexus-gateway-fnos >/dev/null 2>&1 || fail_setup "Nexus initialization was saved but the container could not be restarted"
+fi
 exit 0

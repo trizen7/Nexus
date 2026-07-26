@@ -23,7 +23,7 @@ import androidx.compose.material.icons.automirrored.filled.ArrowBack
 import androidx.compose.material.icons.filled.AutoAwesome
 import androidx.compose.material.icons.filled.ChevronRight
 import androidx.compose.material.icons.filled.Info
-import androidx.compose.material.icons.filled.Logout
+import androidx.compose.material.icons.automirrored.filled.Logout
 import androidx.compose.material.icons.filled.Palette
 import androidx.compose.material.icons.filled.Schedule
 import androidx.compose.material.icons.filled.Sync
@@ -188,7 +188,7 @@ fun SettingsScreen(state: MainUiState, viewModel: MainViewModel) {
                         verticalAlignment = Alignment.CenterVertically
                     ) {
                         SettingsIcon(
-                            icon = Icons.Filled.Logout,
+                            icon = Icons.AutoMirrored.Filled.Logout,
                             tint = MaterialTheme.colorScheme.error,
                             container = MaterialTheme.colorScheme.errorContainer
                         )

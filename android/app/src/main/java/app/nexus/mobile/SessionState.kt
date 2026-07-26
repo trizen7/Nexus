@@ -180,13 +180,19 @@ fun prependAnchorLazyListIndex(prependedMessageCount: Int): Int =
 fun prependAnchorLazyListIndex(previousFirstVisibleIndex: Int, prependedMessageCount: Int): Int =
     previousFirstVisibleIndex.coerceAtLeast(0) + prependedMessageCount.coerceAtLeast(0)
 
+fun nextHasMoreMessages(pageHasMore: Boolean, receivedMessageCount: Int): Boolean =
+    pageHasMore && receivedMessageCount > 0
+
 fun shouldLoadOlderMessages(
     firstVisibleItemIndex: Int,
+    activeSessionId: String?,
+    messageCount: Int,
     hasMoreMessages: Boolean,
     loadingOlder: Boolean,
     loading: Boolean,
     userHasScrolled: Boolean
-): Boolean = userHasScrolled && firstVisibleItemIndex <= 3 && hasMoreMessages && !loadingOlder && !loading
+): Boolean = activeSessionId != null && messageCount > 0 && userHasScrolled &&
+    firstVisibleItemIndex <= 3 && hasMoreMessages && !loadingOlder && !loading
 
 enum class ThemeMode(val label: String) {
     SYSTEM("跟随系统"),

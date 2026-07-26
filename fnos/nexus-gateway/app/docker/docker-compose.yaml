@@ -1,6 +1,6 @@
 services:
   nexus-gateway:
-    image: ghcr.io/trizen7/nexus-gateway:0.1.1
+    image: ghcr.io/trizen7/nexus-gateway:0.1.2
     container_name: nexus-gateway-fnos
     restart: unless-stopped
     user: "${TRIM_UID}:${TRIM_GID}"
@@ -23,6 +23,12 @@ services:
       - "${TRIM_APPDEST}/docker/fnos_entrypoint.py:/opt/nexus/fnos_entrypoint.py:ro"
     extra_hosts:
       - "host.docker.internal:host-gateway"
+    healthcheck:
+      test: ["CMD", "python", "-c", "import json, urllib.request; data = json.load(urllib.request.urlopen('http://127.0.0.1:8787/api/setup/status', timeout=3)); raise SystemExit(0 if data.get('initialized') else 1)"]
+      interval: 30s
+      timeout: 5s
+      retries: 5
+      start_period: 20s
     read_only: true
     tmpfs:
       - /tmp:size=64m,mode=1777

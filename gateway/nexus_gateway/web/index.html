@@ -147,7 +147,7 @@
           <div class="proxy-content">
             <p>Nexus Gateway 提供 HTTP 源站，不会强制跳转 HTTPS，也不要求 App 安装证书。</p>
             <p>局域网可直接访问；外网部署建议由 Nginx、Caddy 或其他反向代理提供 HTTPS 域名，并转发到当前 HTTP 端口。</p>
-            <div class="code-note"><span>建议转发</span><code>http://127.0.0.1:18787</code></div>
+            <div class="code-note"><span>建议转发</span><code id="proxyTarget">http://127.0.0.1:8787</code></div>
             <p class="muted">请根据你的网络边界自行做好访问控制。需要流式响应时，应关闭代理响应缓冲。</p>
           </div>
         </article>

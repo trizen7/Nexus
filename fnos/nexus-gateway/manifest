@@ -1,5 +1,5 @@
 appname=nexus-gateway
-version=0.1.1-fnos1
+version=0.1.2-fnos1
 display_name=Nexus
 desc=Nexus 移动网关，为 Android 客户端提供登录、会话、附件、运行状态与断线续接能力，仅通过原版 Hermes HTTP API 集成
 source=thirdparty
@@ -10,8 +10,7 @@ distributor=trizen7
 distributor_url=https://github.com/trizen7/Nexus
 desktop_uidir=ui
 desktop_applaunchname=nexus-gateway.main
-service_port=18787
+service_port=8787
 checkport=true
 ctl_stop=true
 disable_authorization_path=true
-changelog=新增飞牛 fnOS Docker 应用安装、配置和升级支持

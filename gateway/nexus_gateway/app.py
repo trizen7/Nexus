@@ -69,6 +69,10 @@ PUBLIC_PATHS = {
     "/assets/app.js",
 }
 WEB_ROOT = Path(__file__).with_name("web")
+HERMES_UNAVAILABLE_MESSAGE = (
+    'Nexus 已启动，但无法访问 Hermes API。请检查 Hermes 地址、端口、API Server Key 和服务状态；'
+    'Docker 与 Hermes 位于同一台主机时，请勿使用 127.0.0.1，请使用 host.docker.internal 或宿主机局域网地址。'
+)
 
 
 @dataclass
@@ -1202,10 +1206,34 @@ async def health(request: web.Request) -> web.Response:
     try:
         async with session.get(f"{request.app[GATEWAY_CONFIG_KEY].upstream_url}/health") as upstream:
             data = await upstream.json(content_type=None)
-            status = "ok" if upstream.status == 200 and data.get("status") == "ok" else "degraded"
-            return web.json_response({"status": status, "gateway": "nexus-mobile-gateway", "version": __version__, "upstream": data}, status=200 if status == "ok" else 503)
+            if upstream.status == 200 and isinstance(data, dict) and data.get("status") == "ok":
+                return web.json_response({
+                    "status": "ok",
+                    "gateway": "nexus-mobile-gateway",
+                    "version": __version__,
+                    "upstream": data,
+                })
+            upstream_summary = {
+                "status": data.get("status", "unavailable") if isinstance(data, dict) else "unavailable",
+                "http_status": upstream.status,
+            }
+            if isinstance(data, dict) and data.get("version"):
+                upstream_summary["version"] = data["version"]
+            return web.json_response({
+                "status": "degraded",
+                "gateway": "nexus-mobile-gateway",
+                "version": __version__,
+                "upstream": upstream_summary,
+                "error": {"code": "hermes_unavailable", "message": HERMES_UNAVAILABLE_MESSAGE},
+            }, status=503)
     except Exception as exc:
-        return web.json_response({"status": "degraded", "gateway": "nexus-mobile-gateway", "version": __version__, "upstream": {"error": type(exc).__name__}}, status=503)
+        return web.json_response({
+            "status": "degraded",
+            "gateway": "nexus-mobile-gateway",
+            "version": __version__,
+            "upstream": {"status": "unavailable", "error": type(exc).__name__},
+            "error": {"code": "hermes_unavailable", "message": HERMES_UNAVAILABLE_MESSAGE},
+        }, status=503)
 
 
 async def upload(request: web.Request) -> web.Response:

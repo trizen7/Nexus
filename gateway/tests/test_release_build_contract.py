@@ -17,6 +17,8 @@ def load_build_release():
 
 def test_gateway_release_zip_is_cross_platform_byte_stable(tmp_path: Path) -> None:
     build_release = load_build_release()
+    assert "gateway/nexus_gateway/admin_page.py" not in build_release.GATEWAY_FILES
+    assert not (REPOSITORY_ROOT / "gateway" / "nexus_gateway" / "admin_page.py").exists()
     first = tmp_path / "first.zip"
     second = tmp_path / "second.zip"
 

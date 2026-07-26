@@ -320,6 +320,23 @@ class HermesApiClientTest {
     }
 
     @Test
+    fun `login surfaces actionable gateway message for Hermes HTTP 503`() = runTest {
+        val serverMessage = "Nexus 已启动，但无法访问 Hermes API。请检查 Hermes 地址、端口、API Server Key 和服务状态；Docker 与 Hermes 位于同一台主机时，请勿使用 127.0.0.1，请使用 host.docker.internal 或宿主机局域网地址。"
+        server.enqueue(
+            MockResponse()
+                .setResponseCode(503)
+                .setHeader("Content-Type", "application/json")
+                .setBody("""{"error":{"code":"hermes_unavailable","message":"$serverMessage"}}""")
+        )
+        val client = HermesApiClient(server.url("/").toString())
+
+        val error = runCatching { client.login("nexus", "test-password") }.exceptionOrNull()
+
+        assertTrue(error is HermesHttpException)
+        assertEquals(serverMessage, friendlyNetworkError(error!!))
+    }
+
+    @Test
     fun `expired device token asks for password again`() = runTest {
         server.enqueue(
             MockResponse()

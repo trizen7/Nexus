@@ -38,6 +38,10 @@ async def upstream_client():
     captured_completion_headers: dict[str, str] = {}
     release_chat = asyncio.Event()
     chat_started = asyncio.Event()
+    health_state = {
+        "status": 200,
+        "payload": {"status": "ok", "platform": "hermes-agent", "version": "test"},
+    }
     detailed_health_state = {
         "status": 200,
         "payload": {"status": "ok", "gateway_busy": False, "active_agents": 0},
@@ -57,7 +61,7 @@ async def upstream_client():
     probe_counts = {"health_detailed": 0, "sessions": 0}
 
     async def health(_request):
-        return web.json_response({"status": "ok", "platform": "hermes-agent", "version": "test"})
+        return web.json_response(health_state["payload"], status=int(health_state["status"]))
 
     async def detailed_health(request):
         assert request.headers["Authorization"] == "Bearer upstream-secret"
@@ -172,6 +176,7 @@ async def upstream_client():
     client.captured_completion_headers = captured_completion_headers
     client.release_chat = release_chat
     client.chat_started = chat_started
+    client.health_state = health_state
     client.detailed_health_state = detailed_health_state
     client.session_state = session_state
     client.probe_counts = probe_counts
@@ -1274,6 +1279,34 @@ async def test_health_combines_gateway_and_upstream_state(gateway_client: TestCl
     assert body["status"] == "ok"
     assert body["gateway"] == "nexus-mobile-gateway"
     assert body["upstream"]["platform"] == "hermes-agent"
+
+
+@pytest.mark.asyncio
+async def test_health_returns_actionable_sanitized_error_when_hermes_is_unavailable(
+    gateway_client: TestClient,
+    upstream_client: TestClient,
+):
+    upstream_client.health_state["status"] = 503
+    upstream_client.health_state["payload"] = {
+        "status": "degraded",
+        "version": "test",
+        "detail": "sensitive-upstream-detail",
+    }
+
+    response = await gateway_client.get("/health")
+
+    assert response.status == 503
+    body = await response.json()
+    assert body["status"] == "degraded"
+    assert body["upstream"] == {"status": "degraded", "http_status": 503, "version": "test"}
+    assert body["error"]["code"] == "hermes_unavailable"
+    assert "\u65e0\u6cd5\u8bbf\u95ee Hermes API" in body["error"]["message"]
+    assert "host.docker.internal" in body["error"]["message"]
+    assert "127.0.0.1" in body["error"]["message"]
+    serialized = json.dumps(body, ensure_ascii=False)
+    assert "sensitive-upstream-detail" not in serialized
+    assert "upstream-secret" not in serialized
+    assert str(upstream_client.make_url("/")).rstrip("/") not in serialized
 
 
 @pytest.mark.asyncio

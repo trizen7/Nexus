@@ -43,6 +43,15 @@ if (html.includes('tlsCertificateFile') || html.includes('tlsPrivateKeyFile') ||
 if (!html.includes('HTTP 源站') || !html.includes('反向代理') || !html.includes('不会强制跳转 HTTPS')) throw Error('HTTP origin and reverse proxy guidance missing');
 if (!css.includes('.proxy-content') || !css.includes('.app-shell') || !css.includes('.metrics-grid')) throw Error('Admin layout styling missing');
 
+if (html.includes('127.0.0.1:18787')) throw Error('Active Web UI must not hard-code the local product-test port');
+if (!html.includes('id="proxyTarget"') || !source.includes('function suggestedProxyTarget()') || !source.includes("current.protocol === 'http:'") || !source.includes("return 'http://127.0.0.1:8787'")) throw Error('Dynamic reverse-proxy target guidance missing');
+context.location.origin = 'http://nas.test:8787';
+if (context.suggestedProxyTarget() !== 'http://127.0.0.1:8787') throw Error('fnOS proxy target must follow the active HTTP origin port');
+context.location.origin = 'http://nas.test:18787';
+if (context.suggestedProxyTarget() !== 'http://127.0.0.1:18787') throw Error('Local product-test proxy target must follow the active HTTP origin port');
+context.location.origin = 'https://nexus.example';
+if (context.suggestedProxyTarget() !== 'http://127.0.0.1:8787') throw Error('HTTPS reverse proxy target must fall back to the packaged fnOS origin port');
+
 const forbiddenHtml = ['data-page="chat"', 'id="chat"', '网页聊天', 'id="chatForm"', 'id="sessionRows"'];
 for (const marker of forbiddenHtml) if (html.includes(marker)) throw Error('Web chat UI is still present: ' + marker);
 const forbiddenSource = ['createSession', 'renameSession', 'deleteSession', 'sendChat', 'renderMarkdown', 'uploadAttachment', '/api/sessions', '/chat/stream'];

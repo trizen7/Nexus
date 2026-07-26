@@ -184,6 +184,10 @@ def verify_package(fpk_path: Path, sha256_path: Path | None = None) -> str:
     package_version = source_manifest.get("version", "")
     if not re.fullmatch(rf"{re.escape(gateway_version)}-fnos[1-9][0-9]*", package_version):
         _fail("fnOS package version does not match the Gateway version")
+    if source_manifest.get("service_port") != "8787":
+        _fail("fnOS package must publish the standard Nexus Gateway port 8787")
+    if "changelog" in source_manifest or "changelog" in generated_manifest:
+        _fail("fnOS package must not publish a changelog field")
 
     combined_text: dict[str, str] = {}
     for name, data in outer.items():
@@ -203,10 +207,14 @@ def verify_package(fpk_path: Path, sha256_path: Path | None = None) -> str:
         _fail("Compose contains a local build or plaintext secret environment field")
     if '"${TRIM_PKGVAR}:/data"' not in compose or "/opt/hermes" in compose.lower():
         _fail("Compose violates the Nexus-only data boundary")
+    if "/api/setup/status" not in compose or "initialized" not in compose:
+        _fail("Compose healthcheck does not verify that fnOS setup was consumed")
 
     scripts = "\n".join(text for name, text in combined_text.items() if name.startswith("FPK/cmd/"))
-    if "docker restart nexus-gateway-fnos" not in scripts:
-        _fail("configuration callback does not restart the Nexus container")
+    for callback_name in ("install_callback", "config_callback"):
+        callback = combined_text[f"FPK/cmd/{callback_name}"]
+        if "docker inspect nexus-gateway-fnos" not in callback or "docker restart nexus-gateway-fnos" not in callback:
+            _fail(f"{callback_name} does not restart the Nexus container after saving configuration")
     hermes_word = "her" + "mes"
     forbidden_lifecycle_patterns = [
         rf"systemctl\s+(?:start|stop|restart).*{hermes_word}",

@@ -658,6 +658,8 @@ private fun ChatScreen(state: MainUiState, viewModel: MainViewModel, windowInset
             }
 
             val shouldRequestOlderMessages by remember(
+                state.activeSessionId,
+                state.messages.size,
                 state.hasMoreMessages,
                 state.loadingOlder,
                 state.loading,
@@ -665,11 +667,13 @@ private fun ChatScreen(state: MainUiState, viewModel: MainViewModel, windowInset
             ) {
                 derivedStateOf {
                     shouldLoadOlderMessages(
-                        listState.firstVisibleItemIndex,
-                        state.hasMoreMessages,
-                        state.loadingOlder,
-                        state.loading,
-                        userHasScrolledHistory
+                        firstVisibleItemIndex = listState.firstVisibleItemIndex,
+                        activeSessionId = state.activeSessionId,
+                        messageCount = state.messages.size,
+                        hasMoreMessages = state.hasMoreMessages,
+                        loadingOlder = state.loadingOlder,
+                        loading = state.loading,
+                        userHasScrolled = userHasScrolledHistory
                     )
                 }
             }

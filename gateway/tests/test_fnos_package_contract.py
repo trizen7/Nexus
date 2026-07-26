@@ -72,10 +72,11 @@ def test_fnos_manifest_and_desktop_entry_are_consistent() -> None:
     assert manifest["platform"] == "all"
     assert manifest["desktop_uidir"] == "ui"
     assert manifest["desktop_applaunchname"] == "nexus-gateway.main"
-    assert manifest["service_port"] == "18787"
+    assert manifest["service_port"] == "8787"
     assert manifest["checkport"] == "true"
     assert manifest["ctl_stop"] == "true"
     assert manifest["disable_authorization_path"] == "true"
+    assert "changelog" not in manifest
 
     ui = json.loads((PACKAGE / "app" / "ui" / "config").read_text(encoding="utf-8"))
     entry = ui[".url"][manifest["desktop_applaunchname"]]
@@ -104,6 +105,13 @@ def test_fnos_compose_uses_public_versioned_image_and_private_package_data() -> 
     assert service["cap_drop"] == ["ALL"]
     assert service["security_opt"] == ["no-new-privileges:true"]
     assert service["extra_hosts"] == ["host.docker.internal:host-gateway"]
+    healthcheck_command = " ".join(service["healthcheck"]["test"])
+    assert "/api/setup/status" in healthcheck_command
+    assert "initialized" in healthcheck_command
+    assert service["healthcheck"]["interval"] == "30s"
+    assert service["healthcheck"]["timeout"] == "5s"
+    assert service["healthcheck"]["retries"] == 5
+    assert service["healthcheck"]["start_period"] == "20s"
     assert service["entrypoint"] == ["python", "/opt/nexus/fnos_entrypoint.py"]
     assert service["command"][:3] == ["python", "-m", "nexus_gateway"]
     assert "NEXUS_PASSWORD" not in service["environment"]
@@ -180,7 +188,14 @@ def test_fnos_lifecycle_scripts_only_manage_nexus_owned_paths_and_container() ->
     for pattern in forbidden:
         assert re.search(pattern, scripts, re.IGNORECASE) is None
     assert 'TRIM_PKGVAR' in scripts
-    assert "docker restart nexus-gateway-fnos" in scripts
+    install_callback = (PACKAGE / "cmd" / "install_callback").read_text(encoding="utf-8")
+    config_callback = (PACKAGE / "cmd" / "config_callback").read_text(encoding="utf-8")
+    for callback in (install_callback, config_callback):
+        assert "docker inspect nexus-gateway-fnos" in callback
+        assert "docker restart nexus-gateway-fnos" in callback
+    setup_common = (PACKAGE / "cmd" / "setup_common.sh").read_text(encoding="utf-8")
+    assert "host.docker.internal" in setup_common
+    assert "127.*" in setup_common
 
 
 def test_fnos_entrypoint_initializes_gateway_without_plaintext_password(tmp_path: Path) -> None:
@@ -228,6 +243,12 @@ def test_fnos_entrypoint_initializes_gateway_without_plaintext_password(tmp_path
         "http://hermes.example:8000?debug=true",
         "http://hermes.example:8000#fragment",
         "http://hermes.example:70000",
+        "http://localhost:8000",
+        "http://127.0.0.1:8000",
+        "http://127.1.2.3:8000",
+        "http://0.0.0.0:8000",
+        "http://[::1]:8000",
+        "http://[::]:8000",
     ],
 )
 def test_fnos_entrypoint_rejects_invalid_hermes_urls(tmp_path: Path, invalid_url: str) -> None:
@@ -244,6 +265,37 @@ def test_fnos_entrypoint_rejects_invalid_hermes_urls(tmp_path: Path, invalid_url
 
     with pytest.raises(module.SetupError, match="valid http:// or https:// address"):
         module.apply_pending_setup()
+
+
+@pytest.mark.parametrize(
+    ("legacy_url", "expected_url"),
+    [
+        ("http://localhost:8000", "http://host.docker.internal:8000"),
+        ("http://127.0.0.1:8000/api", "http://host.docker.internal:8000/api"),
+        ("https://[::1]:8443", "https://host.docker.internal:8443"),
+        ("http://0.0.0.0:9000", "http://host.docker.internal:9000"),
+    ],
+)
+def test_fnos_entrypoint_migrates_legacy_container_local_hermes_urls(
+    tmp_path: Path,
+    legacy_url: str,
+    expected_url: str,
+) -> None:
+    module = _load_entrypoint()
+    _point_entrypoint_at(module, tmp_path)
+    original = {
+        "hermes_api_url": legacy_url,
+        "hermes_api_token": "legacy-test-token",
+        "session_secret": "legacy-session-secret-value",
+    }
+    (tmp_path / "config.json").write_text(json.dumps(original), encoding="utf-8")
+
+    module.apply_pending_setup()
+
+    migrated = json.loads((tmp_path / "config.json").read_text(encoding="utf-8"))
+    assert migrated["hermes_api_url"] == expected_url
+    assert migrated["hermes_api_token"] == original["hermes_api_token"]
+    assert migrated["session_secret"] == original["session_secret"]
 
 
 @pytest.mark.parametrize("changed_field", ["username", "password", "hermes_api_url", "hermes_api_token"])

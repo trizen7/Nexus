@@ -103,12 +103,25 @@ async function signIn(event) {
   }
 }
 
+function suggestedProxyTarget() {
+  try {
+    const current = new URL(location.origin);
+    if (current.protocol === 'http:') {
+      return `http://127.0.0.1${current.port ? `:${current.port}` : ''}`;
+    }
+  } catch (_error) {
+    // Fall back to the packaged fnOS origin port when the browser origin is unavailable.
+  }
+  return 'http://127.0.0.1:8787';
+}
+
 function showApp() {
   $('setupPage').classList.add('hidden');
   $('loginPage').classList.add('hidden');
   $('appPage').classList.remove('hidden');
   $('entryAddress').textContent = location.origin;
   $('systemEntry').textContent = location.origin;
+  $('proxyTarget').textContent = suggestedProxyTarget();
   $('newUsername').value = localStorage.getItem('nexus_username') || '';
   loadAll();
 }

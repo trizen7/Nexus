@@ -30,7 +30,6 @@ GATEWAY_FILES = (
     "gateway/Dockerfile",
     "gateway/requirements.txt",
     "gateway/start_gateway.py",
-    "gateway/nexus_gateway/admin_page.py",
     "gateway/nexus_gateway/app.py",
     "gateway/nexus_gateway/__init__.py",
     "gateway/nexus_gateway/__main__.py",

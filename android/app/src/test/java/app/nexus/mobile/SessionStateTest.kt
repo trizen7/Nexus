@@ -296,11 +296,25 @@ class SessionStateTest {
 
     @Test
     fun `history paging prefetches before the exact top only after user scroll`() {
-        assertEquals(false, shouldLoadOlderMessages(3, true, false, false, false))
-        assertEquals(true, shouldLoadOlderMessages(3, true, false, false, true))
-        assertEquals(false, shouldLoadOlderMessages(4, true, false, false, true))
-        assertEquals(false, shouldLoadOlderMessages(0, false, false, false, true))
-        assertEquals(false, shouldLoadOlderMessages(0, true, true, false, true))
+        assertEquals(false, shouldLoadOlderMessages(3, "session", 10, true, false, false, false))
+        assertEquals(true, shouldLoadOlderMessages(3, "session", 10, true, false, false, true))
+        assertEquals(false, shouldLoadOlderMessages(4, "session", 10, true, false, false, true))
+        assertEquals(false, shouldLoadOlderMessages(0, "session", 10, false, false, false, true))
+        assertEquals(false, shouldLoadOlderMessages(0, "session", 10, true, true, false, true))
+    }
+
+    @Test
+    fun `new local conversation never requests older history`() {
+        assertEquals(false, shouldLoadOlderMessages(0, null, 0, true, false, false, true))
+        assertEquals(false, shouldLoadOlderMessages(0, null, 12, true, false, false, true))
+        assertEquals(false, shouldLoadOlderMessages(0, "session", 0, true, false, false, true))
+    }
+
+    @Test
+    fun `empty older page stops further history refreshes`() {
+        assertEquals(false, nextHasMoreMessages(pageHasMore = true, receivedMessageCount = 0))
+        assertEquals(false, nextHasMoreMessages(pageHasMore = false, receivedMessageCount = 20))
+        assertEquals(true, nextHasMoreMessages(pageHasMore = true, receivedMessageCount = 20))
     }
 
     @Test

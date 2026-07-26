@@ -477,6 +477,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun createSession() {
         saveCurrentDraft()
         streamJob?.cancel()
+        sessionLoadJob?.cancel()
+        sessionLoadJob = null
+        runStatusJob?.cancel()
+        runStatusJob = null
+        sessionLoadGeneration += 1
         liveAssistantMessageId = null
         connectionStore.saveActiveSession(null)
         localDraftKey = "local-draft-${UUID.randomUUID()}"
@@ -492,9 +497,18 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     featurePanelOpen = false,
                     voiceInputMode = false,
                     loading = false,
+                    loadingOlder = false,
+                    hasMoreMessages = false,
+                    loadedMessageCount = 0,
+                    historyPrependCount = 0,
+                    historyPrependToken = state.historyPrependToken + 1,
+                    initialScrollToken = state.initialScrollToken + 1,
                     streaming = false,
+                    runStoppable = false,
                     thinking = false,
                     toolStatus = null,
+                    answerStatus = AnswerStatus.IDLE,
+                    uploadProgress = null,
                     error = null
                 ),
                 null
@@ -682,7 +696,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val api = client ?: return
         val state = _uiState.value
         val sessionId = state.activeSessionId ?: return
-        if (state.loading || state.loadingOlder || !state.hasMoreMessages) return
+        if (state.messages.isEmpty() || state.loading || state.loadingOlder || !state.hasMoreMessages) return
         val generation = sessionLoadGeneration
         _uiState.update { it.copy(loadingOlder = true) }
         viewModelScope.launch {
@@ -697,7 +711,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                                 messages = merged,
                                 loadingOlder = false,
                                 loadedMessageCount = nextLoadedMessageCount(state.loadedMessageCount, page.messages.size),
-                                hasMoreMessages = page.hasMore,
+                                hasMoreMessages = nextHasMoreMessages(page.hasMore, page.messages.size),
                                 historyPrependCount = page.messages.size,
                                 historyPrependToken = current.historyPrependToken + 1
                             )
