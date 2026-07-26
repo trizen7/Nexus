@@ -1,4 +1,4 @@
-name: Publish Gateway container and build fnOS package
+name: Publish Gateway container and build offline fnOS packages
 
 on:
   workflow_dispatch:
@@ -6,7 +6,7 @@ on:
       gateway_source_ref:
         description: Git ref containing the Gateway source to publish
         required: true
-        default: v0.1.4
+        default: v0.1.5
         type: string
       image_tag:
         description: GHCR tag; blank uses the Gateway source version
@@ -34,6 +34,7 @@ jobs:
     outputs:
       gateway_source_ref: ${{ steps.release.outputs.gateway_source_ref }}
       image_tag: ${{ steps.release.outputs.image_tag }}
+      fnos_version: ${{ steps.release.outputs.fnos_version }}
     steps:
       - uses: actions/checkout@v4
         with:
@@ -42,7 +43,7 @@ jobs:
         with:
           python-version: "3.11"
       - id: release
-        name: Validate Gateway source and image version
+        name: Validate Gateway source and package versions
         shell: python
         env:
           GATEWAY_SOURCE_REF: ${{ inputs.gateway_source_ref }}
@@ -60,6 +61,22 @@ jobs:
           image_tag = os.environ.get("IMAGE_TAG_INPUT", "").strip() or version
           if image_tag != version:
               raise SystemExit(f"image tag {image_tag} must equal Gateway version {version}")
+
+          manifest = Path("fnos/nexus-gateway/manifest").read_text(encoding="utf-8")
+          fnos_match = re.search(r"(?m)^version\s*=\s*(\S+)\s*$", manifest)
+          if not fnos_match:
+              raise SystemExit("fnOS manifest version is missing")
+          fnos_version = fnos_match.group(1)
+          if not re.fullmatch(rf"{re.escape(version)}-fnos[1-9][0-9]*", fnos_version):
+              raise SystemExit("fnOS package version does not match Gateway version")
+
+          compose = Path("fnos/nexus-gateway/app/docker/docker-compose.yaml").read_text(encoding="utf-8")
+          expected = f"nexus-gateway-fnos:{version}"
+          if not re.search(rf"(?m)^\s*image:\s*{re.escape(expected)}\s*$", compose):
+              raise SystemExit(f"fnOS package must use the local image {expected}")
+          if not re.search(r"(?m)^\s*pull_policy:\s*never\s*$", compose):
+              raise SystemExit("fnOS package must disable remote image pulls")
+
           source_ref = os.environ["GATEWAY_SOURCE_REF"].strip()
           if not source_ref:
               raise SystemExit("Gateway source ref is required")
@@ -67,6 +84,7 @@ jobs:
           with output.open("a", encoding="utf-8") as stream:
               stream.write(f"gateway_source_ref={source_ref}\n")
               stream.write(f"image_tag={image_tag}\n")
+              stream.write(f"fnos_version={fnos_version}\n")
 
   container:
     needs: metadata
@@ -83,7 +101,7 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      - name: Build and publish versioned multi-architecture image
+      - name: Build and publish optional versioned multi-architecture image
         uses: docker/build-push-action@v6
         with:
           context: gateway
@@ -101,31 +119,29 @@ jobs:
           sbom: true
 
   fnos-package:
-    needs:
-      - metadata
-      - container
+    needs: metadata
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
         with:
           ref: ${{ needs.metadata.outputs.gateway_source_ref }}
-      - name: Ensure FPK references the published Gateway image
-        shell: python
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      - name: Build architecture-specific fnOS image archives
         env:
-          EXPECTED_IMAGE_TAG: ${{ needs.metadata.outputs.image_tag }}
+          VERSION: ${{ needs.metadata.outputs.image_tag }}
         run: |
-          import os
-          import re
-          from pathlib import Path
-
-          manifest = Path("fnos/nexus-gateway/manifest").read_text(encoding="utf-8")
-          version_match = re.search(r"(?m)^version=(.+)$", manifest)
-          if not version_match:
-              raise SystemExit("fnOS manifest version is missing")
-          compose = Path("fnos/nexus-gateway/app/docker/docker-compose.yaml").read_text(encoding="utf-8")
-          expected = f"ghcr.io/trizen7/nexus-gateway:{os.environ['EXPECTED_IMAGE_TAG']}"
-          if not re.search(rf"(?m)^\s*image:\s*{re.escape(expected)}\s*$", compose):
-              raise SystemExit(f"fnOS package must reference {expected}")
+          set -euo pipefail
+          for architecture in amd64 arm64; do
+            docker buildx build \
+              --file gateway/Dockerfile \
+              --platform "linux/$architecture" \
+              --tag "nexus-gateway-fnos:$VERSION" \
+              --output "type=docker,dest=$RUNNER_TEMP/nexus-gateway-$architecture.tar" \
+              --provenance=false \
+              gateway
+            gzip --no-name --best "$RUNNER_TEMP/nexus-gateway-$architecture.tar"
+          done
       - name: Download and verify official fnpack
         run: |
           curl --fail --silent --show-error --location \
@@ -133,13 +149,22 @@ jobs:
             --output "$RUNNER_TEMP/fnpack"
           echo "${FNPACK_LINUX_AMD64_SHA256}  $RUNNER_TEMP/fnpack" | sha256sum --check --strict
           chmod 0755 "$RUNNER_TEMP/fnpack"
-      - name: Build fnOS package without local Docker
+      - name: Build self-contained fnOS packages
         shell: pwsh
-        run: ./scripts/build_fnos_package.ps1 -OutputDirectory dist -FnpackPath "$env:RUNNER_TEMP/fnpack"
-      - name: Verify fnOS package contents
-        run: python scripts/verify_fnos_package.py dist/Nexus-fnOS-*.fpk
+        run: |
+          ./scripts/build_fnos_package.ps1 -OutputDirectory dist -Platform amd64 -ImageArchivePath "$env:RUNNER_TEMP/nexus-gateway-amd64.tar.gz" -FnpackPath "$env:RUNNER_TEMP/fnpack"
+          ./scripts/build_fnos_package.ps1 -OutputDirectory dist -Platform arm64 -ImageArchivePath "$env:RUNNER_TEMP/nexus-gateway-arm64.tar.gz" -FnpackPath "$env:RUNNER_TEMP/fnpack"
+      - name: Verify self-contained fnOS packages
+        env:
+          FNOS_VERSION: ${{ needs.metadata.outputs.fnos_version }}
+        run: |
+          python scripts/verify_fnos_package.py "dist/Nexus-fnOS-$FNOS_VERSION-amd64.fpk" --sha256-file dist/SHA256SUMS.txt
+          python scripts/verify_fnos_package.py "dist/Nexus-fnOS-$FNOS_VERSION-arm64.fpk" --sha256-file dist/SHA256SUMS.txt
       - uses: actions/upload-artifact@v4
         with:
-          name: Nexus-fnOS-${{ needs.metadata.outputs.image_tag }}
-          path: dist/Nexus-fnOS-*.fpk*
+          name: Nexus-fnOS-${{ needs.metadata.outputs.fnos_version }}-offline
+          path: |
+            dist/Nexus-fnOS-${{ needs.metadata.outputs.fnos_version }}-amd64.fpk
+            dist/Nexus-fnOS-${{ needs.metadata.outputs.fnos_version }}-arm64.fpk
+            dist/SHA256SUMS.txt
           if-no-files-found: error

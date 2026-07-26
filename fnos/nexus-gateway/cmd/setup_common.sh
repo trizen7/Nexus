@@ -2,6 +2,11 @@
 
 set -eu
 
+PACKAGED_IMAGE_ARCHIVE="nexus-gateway-image.tar.gz"
+PACKAGED_IMAGE_CHECKSUM="nexus-gateway-image.sha256"
+PACKAGED_IMAGE_PLATFORM="nexus-gateway-image.platform"
+PACKAGED_IMAGE_TAG="nexus-gateway-fnos:0.1.5"
+
 fail_setup() {
   if [ -n "${TRIM_TEMP_LOGFILE:-}" ]; then
     printf '%s\n' "$1" > "$TRIM_TEMP_LOGFILE"
@@ -46,6 +51,101 @@ validate_hermes_url() {
       fail_setup "Hermes API URL cannot use an unspecified address"
       ;;
   esac
+}
+
+package_directory_has_image() {
+  candidate="$1"
+  [ -d "$candidate" ] || return 1
+  [ ! -L "$candidate" ] || return 1
+  for required in "$PACKAGED_IMAGE_ARCHIVE" "$PACKAGED_IMAGE_CHECKSUM" "$PACKAGED_IMAGE_PLATFORM"; do
+    [ -f "$candidate/$required" ] || return 1
+    [ ! -L "$candidate/$required" ] || return 1
+  done
+  return 0
+}
+
+find_packaged_docker_dir() {
+  root="$1"
+  [ -n "$root" ] || return 1
+  case "$root" in
+    /*) ;;
+    *) return 1 ;;
+  esac
+  for relative in docker app/docker target/docker; do
+    candidate="${root%/}/$relative"
+    if package_directory_has_image "$candidate"; then
+      printf '%s\n' "$candidate"
+      return 0
+    fi
+  done
+  return 1
+}
+
+resolve_packaged_docker_dir() {
+  if docker_dir=$(find_packaged_docker_dir "${TRIM_PKGINST_TEMP_DIR:-}"); then
+    printf '%s\n' "$docker_dir"
+    return 0
+  fi
+  if docker_dir=$(find_packaged_docker_dir "${TRIM_TEMP_UPGRADE_FOLDER:-}"); then
+    printf '%s\n' "$docker_dir"
+    return 0
+  fi
+  if docker_dir=$(find_packaged_docker_dir "${TRIM_TEMP_TPKFILE:-}"); then
+    printf '%s\n' "$docker_dir"
+    return 0
+  fi
+  fail_setup "The packaged Nexus Gateway image is unavailable"
+}
+
+current_docker_platform() {
+  machine=$(uname -m 2>/dev/null || true)
+  case "$machine" in
+    x86_64|amd64) printf '%s\n' "linux/amd64" ;;
+    aarch64|arm64) printf '%s\n' "linux/arm64" ;;
+    *) fail_setup "This Nexus package does not support device architecture: $machine" ;;
+  esac
+}
+
+sha256_file() {
+  target="$1"
+  if command -v sha256sum >/dev/null 2>&1; then
+    sha256sum "$target" | awk '{print $1}'
+    return
+  fi
+  if command -v busybox >/dev/null 2>&1; then
+    busybox sha256sum "$target" | awk '{print $1}'
+    return
+  fi
+  fail_setup "SHA-256 verification is unavailable on this device"
+}
+
+load_packaged_image() {
+  docker_dir=$(resolve_packaged_docker_dir)
+  archive="$docker_dir/$PACKAGED_IMAGE_ARCHIVE"
+  checksum_file="$docker_dir/$PACKAGED_IMAGE_CHECKSUM"
+  platform_file="$docker_dir/$PACKAGED_IMAGE_PLATFORM"
+
+  packaged_platform=$(cat "$platform_file") || fail_setup "Unable to read the packaged image platform"
+  device_platform=$(current_docker_platform)
+  [ "$packaged_platform" = "$device_platform" ] || fail_setup "This Nexus package is for $packaged_platform, but this device is $device_platform"
+
+  checksum_line=$(cat "$checksum_file") || fail_setup "Unable to read the packaged image checksum"
+  expected_checksum=${checksum_line%%  *}
+  checksum_name=${checksum_line#*  }
+  [ "$checksum_name" != "$checksum_line" ] || fail_setup "The packaged image checksum file is invalid"
+  [ "$checksum_name" = "$PACKAGED_IMAGE_ARCHIVE" ] || fail_setup "The packaged image checksum filename is invalid"
+  [ "${#expected_checksum}" -eq 64 ] || fail_setup "The packaged image checksum is invalid"
+  invalid_checksum=$(printf '%s' "$expected_checksum" | tr -d '0-9a-f')
+  [ -z "$invalid_checksum" ] || fail_setup "The packaged image checksum is invalid"
+
+  actual_checksum=$(sha256_file "$archive")
+  [ "$actual_checksum" = "$expected_checksum" ] || fail_setup "The packaged Nexus Gateway image failed SHA-256 verification"
+
+  command -v docker >/dev/null 2>&1 || fail_setup "Docker is required to install Nexus"
+  docker load --input "$archive" >/dev/null 2>&1 || fail_setup "The packaged Nexus Gateway image could not be loaded"
+  docker image inspect "$PACKAGED_IMAGE_TAG" >/dev/null 2>&1 || fail_setup "The packaged Nexus Gateway image tag is missing"
+  loaded_platform=$(docker image inspect --format '{{.Os}}/{{.Architecture}}' "$PACKAGED_IMAGE_TAG" 2>/dev/null) || fail_setup "The loaded Nexus Gateway image could not be inspected"
+  [ "$loaded_platform" = "$packaged_platform" ] || fail_setup "The loaded Nexus Gateway image architecture is invalid"
 }
 
 prepare_setup_dir() {

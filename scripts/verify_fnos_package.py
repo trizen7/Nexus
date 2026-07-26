@@ -34,7 +34,7 @@ OUTER_FILES = {
     "wizard/config",
     "wizard/install",
 }
-APP_FILES = {
+STATIC_APP_FILES = {
     "docker/docker-compose.yaml",
     "docker/fnos_entrypoint.py",
     "ui/config",
@@ -43,8 +43,21 @@ APP_FILES = {
     "config/privilege",
     "config/resource",
 }
+GENERATED_IMAGE_FILES = {
+    "docker/nexus-gateway-image.tar.gz",
+    "docker/nexus-gateway-image.sha256",
+    "docker/nexus-gateway-image.platform",
+}
+APP_FILES = STATIC_APP_FILES | GENERATED_IMAGE_FILES
 FORBIDDEN_NAMES = {".ds_store", "account.json", "config.json", "bootstrap.token", ".env"}
-TEXT_SUFFIXES = {"", ".json", ".py", ".sh", ".yaml", ".yml", ".txt"}
+TEXT_SUFFIXES = {"", ".json", ".py", ".sh", ".yaml", ".yml", ".txt", ".sha256", ".platform"}
+IMAGE_ARCHIVE_NAME = "nexus-gateway-image.tar.gz"
+IMAGE_CHECKSUM_NAME = "nexus-gateway-image.sha256"
+IMAGE_PLATFORM_NAME = "nexus-gateway-image.platform"
+ARCHITECTURES = {
+    "amd64": {"manifest": "x86", "docker": "amd64", "platform": "linux/amd64"},
+    "arm64": {"manifest": "arm", "docker": "arm64", "platform": "linux/arm64"},
+}
 
 
 class VerificationError(RuntimeError):
@@ -121,7 +134,7 @@ def _assert_clean_text(name: str, data: bytes, *, allow_crlf: bool = False) -> s
         text = data.decode("utf-8")
     except UnicodeDecodeError as exc:
         raise VerificationError(f"{name} is not UTF-8") from exc
-    if "\x00" in text or "\x0c" in text or "\x3f\x3f\x3f" in text:
+    if "\x00" in text or "\x0c" in text or "???" in text:
         _fail(f"{name} contains invalid or corrupted text")
     return text
 
@@ -174,6 +187,89 @@ def _resolve_checksum_file(fpk_path: Path, requested: Path | None) -> Path | Non
     return legacy if legacy.is_file() else None
 
 
+def _safe_docker_member_name(name: str, label: str) -> str:
+    normalized = name.rstrip("/")
+    path = PurePosixPath(normalized)
+    if not normalized or path.is_absolute() or ".." in path.parts or "\\" in normalized:
+        _fail(f"Docker image archive contains an unsafe {label}: {name!r}")
+    return normalized
+
+
+def _read_small_tar_member(archive: tarfile.TarFile, member: tarfile.TarInfo, label: str, limit: int = 2 * 1024 * 1024) -> bytes:
+    if member.size > limit:
+        _fail(f"Docker image archive {label} is unexpectedly large")
+    stream = archive.extractfile(member)
+    if stream is None:
+        _fail(f"Docker image archive {label} cannot be read")
+    return stream.read()
+
+
+def _verify_docker_archive(data: bytes, expected_image: str, expected_architecture: str) -> None:
+    if not data.startswith(b"\x1f\x8b"):
+        _fail("packaged Docker image archive is not gzip-compressed")
+    try:
+        with tarfile.open(fileobj=io.BytesIO(data), mode="r:gz") as archive:
+            members: dict[str, tarfile.TarInfo] = {}
+            for member in archive.getmembers():
+                name = _safe_docker_member_name(member.name, "path")
+                if member.issym() or member.islnk() or member.isdev():
+                    _fail(f"Docker image archive contains a link or device: {name}")
+                if member.isdir():
+                    continue
+                if not member.isfile():
+                    _fail(f"Docker image archive contains an unsupported entry: {name}")
+                if name in members:
+                    _fail(f"Docker image archive contains a duplicate file: {name}")
+                members[name] = member
+
+            manifest_member = members.get("manifest.json")
+            if manifest_member is None:
+                _fail("Docker image archive is missing manifest.json")
+            manifest = json.loads(_read_small_tar_member(archive, manifest_member, "manifest.json"))
+            if not isinstance(manifest, list) or len(manifest) != 1 or not isinstance(manifest[0], dict):
+                _fail("Docker image archive must contain exactly one image")
+            image_manifest = manifest[0]
+            repo_tags = image_manifest.get("RepoTags")
+            if repo_tags != [expected_image]:
+                _fail(f"Docker image archive tag must be exactly {expected_image}")
+
+            config_name = image_manifest.get("Config")
+            if not isinstance(config_name, str):
+                _fail("Docker image archive does not identify an image config")
+            config_name = _safe_docker_member_name(config_name, "config path")
+            config_member = members.get(config_name)
+            if config_member is None:
+                _fail("Docker image archive is missing its image config")
+            config = json.loads(_read_small_tar_member(archive, config_member, "image config"))
+            if not isinstance(config, dict):
+                _fail("Docker image config is invalid")
+            if config.get("os") != "linux" or config.get("architecture") != expected_architecture:
+                _fail(f"Docker image must target linux/{expected_architecture}")
+
+            layers = image_manifest.get("Layers")
+            if not isinstance(layers, list) or not layers:
+                _fail("Docker image archive does not contain image layers")
+            for layer in layers:
+                if not isinstance(layer, str):
+                    _fail("Docker image archive contains an invalid layer path")
+                layer_name = _safe_docker_member_name(layer, "layer path")
+                if layer_name not in members:
+                    _fail(f"Docker image archive is missing layer: {layer_name}")
+    except (OSError, tarfile.TarError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+        raise VerificationError(f"invalid packaged Docker image archive: {exc}") from exc
+
+
+def _package_architecture(fpk_path: Path, package_version: str) -> tuple[str, dict[str, str]]:
+    match = re.fullmatch(
+        rf"Nexus-fnOS-{re.escape(package_version)}-(amd64|arm64)\.fpk",
+        fpk_path.name,
+    )
+    if not match:
+        _fail("fnOS package filename does not include a supported architecture")
+    architecture = match.group(1)
+    return architecture, ARCHITECTURES[architecture]
+
+
 def verify_package(fpk_path: Path, sha256_path: Path | None = None) -> str:
     if not fpk_path.is_file():
         _fail(f"FPK not found: {fpk_path}")
@@ -184,6 +280,17 @@ def verify_package(fpk_path: Path, sha256_path: Path | None = None) -> str:
         _fail("could not read the Gateway version")
     gateway_version = gateway_match.group(1)
     source_manifest = _read_manifest((PACKAGE_SOURCE / "manifest").read_bytes())
+    package_version = source_manifest.get("version", "")
+    if not re.fullmatch(rf"{re.escape(gateway_version)}-fnos[1-9][0-9]*", package_version):
+        _fail("fnOS package version does not match the Gateway version")
+    if source_manifest.get("platform") != "all":
+        _fail("fnOS source manifest must be an architecture-neutral build template")
+    manifest_urls = " ".join(
+        source_manifest.get(field, "") for field in ("maintainer_url", "distributor_url")
+    )
+    if re.search(r"(?i)github\.com|ghcr\.io", manifest_urls):
+        _fail("fnOS package metadata must not depend on GitHub or GHCR")
+    architecture, architecture_metadata = _package_architecture(fpk_path, package_version)
 
     try:
         with tarfile.open(fpk_path, mode="r:*") as outer_archive:
@@ -207,39 +314,46 @@ def verify_package(fpk_path: Path, sha256_path: Path | None = None) -> str:
         expected = _source_bytes(name)
         if outer[name] != expected:
             _fail(f"FPK content differs from package source: {name}")
-    for name in APP_FILES:
+    for name in STATIC_APP_FILES:
         expected = _source_bytes(name, in_app=True) if not name.startswith("config/") else _source_bytes(name)
         if app[name] != expected:
             _fail(f"app.tgz content differs from package source: {name}")
 
     generated_manifest = _read_manifest(outer["manifest"])
+    expected_manifest_keys = set(source_manifest) | {"checksum"}
+    if set(generated_manifest) != expected_manifest_keys:
+        _fail("generated manifest contains an unexpected field set")
     for key, value in source_manifest.items():
+        if key == "platform":
+            continue
         if generated_manifest.get(key) != value:
             _fail(f"generated manifest changed {key}")
+    if generated_manifest.get("platform") != architecture_metadata["manifest"]:
+        _fail(f"generated manifest platform does not match {architecture}")
     if not re.fullmatch(r"[0-9a-f]{32}", generated_manifest.get("checksum", "")):
         _fail("generated manifest checksum is missing or invalid")
-    package_version = source_manifest.get("version", "")
-    if not re.fullmatch(rf"{re.escape(gateway_version)}-fnos[1-9][0-9]*", package_version):
-        _fail("fnOS package version does not match the Gateway version")
     if source_manifest.get("service_port") != "8787":
-        _fail("fnOS package must publish the standard Nexus Gateway port 8787")
-    if "changelog" in source_manifest or "changelog" in generated_manifest:
-        _fail("fnOS package must not publish a changelog field")
+        _fail("fnOS package must publish the standard Nexus port 8787")
 
     combined_text: dict[str, str] = {}
     for name, data in outer.items():
-        if name != "app.tgz" and (PurePosixPath(name).suffix.lower() in TEXT_SUFFIXES or name in {"LICENSE", "manifest"}):
-            combined_text[f"FPK/{name}"] = _assert_clean_text(
-                f"FPK/{name}", data, allow_crlf=name == "manifest"
-            )
+        if name == "app.tgz" or PurePosixPath(name).suffix.lower() not in TEXT_SUFFIXES:
+            continue
+        combined_text[f"FPK/{name}"] = _assert_clean_text(
+            f"FPK/{name}", data, allow_crlf=name == "manifest"
+        )
     for name, data in app.items():
         if PurePosixPath(name).suffix.lower() in TEXT_SUFFIXES:
             combined_text[f"app.tgz/{name}"] = _assert_clean_text(f"app.tgz/{name}", data)
 
+    expected_image = f"nexus-gateway-fnos:{gateway_version}"
     compose = combined_text["app.tgz/docker/docker-compose.yaml"]
-    expected_image = f"ghcr.io/trizen7/nexus-gateway:{gateway_version}"
     if not re.search(rf"(?m)^\s*image:\s*{re.escape(expected_image)}\s*$", compose):
-        _fail(f"Compose does not use {expected_image}")
+        _fail(f"Compose does not use the packaged image {expected_image}")
+    if not re.search(r"(?m)^\s*pull_policy:\s*never\s*$", compose):
+        _fail("Compose does not disable remote image pulls")
+    if re.search(r"(?i)ghcr\.io|github\.com", compose):
+        _fail("Compose contains a GitHub or GHCR dependency")
     if re.search(r"(?m)^\s*(?:build|NEXUS_PASSWORD|HERMES_API_TOKEN|NEXUS_SESSION_SECRET)\s*:", compose):
         _fail("Compose contains a local build or plaintext secret environment field")
     if not re.search(r"(?m)^\s*network_mode:\s*host\s*$", compose):
@@ -253,11 +367,48 @@ def verify_package(fpk_path: Path, sha256_path: Path | None = None) -> str:
     if "/api/setup/status" not in compose or "initialized" not in compose:
         _fail("Compose healthcheck does not verify that fnOS setup was consumed")
 
+    checksum_text = combined_text[f"app.tgz/docker/{IMAGE_CHECKSUM_NAME}"]
+    image_digest = hashlib.sha256(app[f"docker/{IMAGE_ARCHIVE_NAME}"]).hexdigest()
+    expected_checksum_text = f"{image_digest}  {IMAGE_ARCHIVE_NAME}\n"
+    if checksum_text != expected_checksum_text:
+        _fail("packaged Docker image SHA-256 does not match its checksum file")
+    platform_text = combined_text[f"app.tgz/docker/{IMAGE_PLATFORM_NAME}"]
+    if platform_text != f"{architecture_metadata['platform']}\n":
+        _fail("packaged Docker image platform marker does not match the FPK architecture")
+    _verify_docker_archive(
+        app[f"docker/{IMAGE_ARCHIVE_NAME}"],
+        expected_image,
+        architecture_metadata["docker"],
+    )
+
     scripts = "\n".join(text for name, text in combined_text.items() if name.startswith("FPK/cmd/"))
     for callback_name in ("install_callback", "config_callback"):
         callback = combined_text[f"FPK/cmd/{callback_name}"]
         if "docker inspect nexus-gateway-fnos" not in callback or "docker restart nexus-gateway-fnos" not in callback:
             _fail(f"{callback_name} does not restart the Nexus container after saving configuration")
+    install_init = combined_text["FPK/cmd/install_init"]
+    upgrade_init = combined_text["FPK/cmd/upgrade_init"]
+    setup_common = combined_text["FPK/cmd/setup_common.sh"]
+    if "load_packaged_image" not in install_init or "load_packaged_image" not in upgrade_init:
+        _fail("install and upgrade lifecycle scripts must load the packaged image")
+    if "TRIM_PKGINST_TEMP_DIR" not in setup_common or 'docker load --input "$archive"' not in setup_common:
+        _fail("packaged image loader does not use the fnOS staging directory")
+    if expected_image not in setup_common:
+        _fail("packaged image loader checks the wrong image tag")
+    uninstall_callback = combined_text["FPK/cmd/uninstall_callback"]
+    if f"docker image rm {expected_image}" not in uninstall_callback:
+        _fail("uninstall callback does not limit cleanup to the Nexus-owned image")
+
+    forbidden_network_patterns = [
+        r"\bdocker\s+pull\b",
+        r"\b(?:curl|wget)\b",
+        r"https?://(?:www\.)?github\.com",
+        r"https?://ghcr\.io",
+    ]
+    for pattern in forbidden_network_patterns:
+        if re.search(pattern, scripts, re.IGNORECASE):
+            _fail("lifecycle scripts contain a remote download operation")
+
     hermes_word = "her" + "mes"
     forbidden_lifecycle_patterns = [
         rf"systemctl\s+(?:start|stop|restart).*{hermes_word}",
@@ -284,7 +435,10 @@ def verify_package(fpk_path: Path, sha256_path: Path | None = None) -> str:
         "app.tgz/ui/images/icon_64.png": (64, 64),
         "app.tgz/ui/images/icon_256.png": (256, 256),
     }
-    binary_lookup = {**{f"FPK/{key}": value for key, value in outer.items()}, **{f"app.tgz/{key}": value for key, value in app.items()}}
+    binary_lookup = {
+        **{f"FPK/{key}": value for key, value in outer.items()},
+        **{f"app.tgz/{key}": value for key, value in app.items()},
+    }
     for name, size in expected_sizes.items():
         if _png_size(binary_lookup[name], name) != size:
             _fail(f"{name} has the wrong dimensions")
@@ -302,7 +456,7 @@ def verify_package(fpk_path: Path, sha256_path: Path | None = None) -> str:
 
 
 def main() -> int:
-    parser = argparse.ArgumentParser(description="Verify a Nexus fnOS FPK without extracting it")
+    parser = argparse.ArgumentParser(description="Verify a self-contained Nexus fnOS FPK without extracting it")
     parser.add_argument("fpk", type=Path)
     parser.add_argument("--sha256-file", type=Path, help="SHA256SUMS.txt or a legacy single-artifact checksum file")
     args = parser.parse_args()

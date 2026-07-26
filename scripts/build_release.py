@@ -14,6 +14,7 @@ import zipfile
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
+FNOS_MANIFEST = REPO_ROOT / "fnos" / "nexus-gateway" / "manifest"
 GATEWAY_FILES = (
     "compose.yaml",
     "LICENSE",
@@ -36,6 +37,17 @@ GATEWAY_FILES = (
     "gateway/nexus_gateway/web/app.js",
     "gateway/nexus_gateway/web/index.html",
     "gateway/nexus_gateway/web/styles.css",
+)
+GENERATED_RELEASE_PATTERNS = (
+    "Nexus-Android-*-release.apk",
+    "Nexus-Android-*.aab",
+    "Nexus-Gateway-*.zip",
+    "Nexus-fnOS-*.fpk",
+    "Nexus-fnOS-*.fpk.sha256",
+    "SHA256SUMS.txt",
+    "release-manifest.json",
+    "renease-manifest.json",
+    "THIRD_PARTY_NOTICES.md",
 )
 FINGERPRINT_RE = re.compile(r"(?:certificate SHA-256 digest|SHA256):\s*([0-9A-Fa-f:]{64,95})", re.I)
 
@@ -85,6 +97,34 @@ def release_metadata() -> tuple[str, int]:
     return gateway_version, version_code
 
 
+def fnos_package_version(gateway_version: str) -> str:
+    manifest = FNOS_MANIFEST.read_text(encoding="utf-8")
+    version = match_one(r"^version\s*=\s*(\S+)\s*$", manifest, "fnOS package version")
+    platform = match_one(r"^platform\s*=\s*(\S+)\s*$", manifest, "fnOS source platform")
+    if not re.fullmatch(rf"{re.escape(gateway_version)}-fnos[1-9][0-9]*", version):
+        raise RuntimeError(f"fnOS package version {version} does not match Gateway version {gateway_version}")
+    if platform != "all":
+        raise RuntimeError("fnOS source manifest must remain an architecture-neutral build template")
+    return version
+
+
+def expected_fnos_artifact_names(gateway_version: str) -> tuple[str, str]:
+    package_version = fnos_package_version(gateway_version)
+    return (
+        f"Nexus-fnOS-{package_version}-amd64.fpk",
+        f"Nexus-fnOS-{package_version}-arm64.fpk",
+    )
+
+
+def expected_complete_release_names(gateway_version: str) -> set[str]:
+    return {
+        f"Nexus-Android-{gateway_version}-release.apk",
+        f"Nexus-Gateway-{gateway_version}.zip",
+        *expected_fnos_artifact_names(gateway_version),
+        "SHA256SUMS.txt",
+    }
+
+
 def safe_output_path(value: str) -> Path:
     output = Path(value).resolve()
     try:
@@ -108,6 +148,9 @@ def write_checksum_manifest(artifacts: list[Path], target: Path) -> None:
     names = [path.name for path in artifacts]
     if len(names) != len(set(names)):
         raise RuntimeError("release artifact names must be unique")
+    for path in artifacts:
+        if path.name != Path(path.name).name or not path.is_file() or path.is_symlink():
+            raise RuntimeError(f"invalid release artifact: {path}")
     checksum_lines = [
         f"{sha256(path)}  {path.name}"
         for path in sorted(artifacts, key=lambda item: item.name)
@@ -170,10 +213,37 @@ def copy_required(source: str | None, target: Path, label: str) -> Path:
     if not source:
         raise RuntimeError(f"{label} path is required")
     path = Path(source).resolve()
-    if not path.is_file():
-        raise RuntimeError(f"{label} does not exist: {path}")
+    if not path.is_file() or path.is_symlink():
+        raise RuntimeError(f"{label} does not exist or is unsafe: {path}")
     shutil.copy2(path, target)
     return target
+
+
+def clean_generated_release_files(output: Path, preserve_names: set[str]) -> None:
+    for pattern in GENERATED_RELEASE_PATTERNS:
+        for path in output.glob(pattern):
+            if path.is_file() and path.name not in preserve_names:
+                path.unlink()
+
+
+def collect_required_fnos_artifacts(output: Path, gateway_version: str) -> list[Path]:
+    expected = [output / name for name in expected_fnos_artifact_names(gateway_version)]
+    missing = [path.name for path in expected if not path.is_file() or path.is_symlink()]
+    if missing:
+        raise RuntimeError(f"required fnOS package is missing: {', '.join(missing)}")
+    return expected
+
+
+def validate_complete_release(output: Path, gateway_version: str) -> None:
+    expected = expected_complete_release_names(gateway_version)
+    actual: set[str] = set()
+    for pattern in GENERATED_RELEASE_PATTERNS:
+        actual.update(path.name for path in output.glob(pattern) if path.is_file())
+    if actual != expected:
+        raise RuntimeError(
+            "complete release artifact set is invalid; "
+            f"missing={sorted(expected - actual)}, extra={sorted(actual - expected)}"
+        )
 
 
 def main() -> int:
@@ -181,35 +251,37 @@ def main() -> int:
     parser.add_argument("--output", default=str(REPO_ROOT / "dist"))
     parser.add_argument("--apk")
     parser.add_argument("--require-android", action="store_true")
+    parser.add_argument("--require-fnos", action="store_true")
     parser.add_argument("--verify-signatures", action="store_true")
     parser.add_argument("--certificate-sha256", default="")
     parser.add_argument("--validate-only", action="store_true")
     args = parser.parse_args()
 
     version, version_code = release_metadata()
+    fnos_version = fnos_package_version(version)
     print(f"release_version={version}")
     print(f"android_version_code={version_code}")
+    print(f"fnos_package_version={fnos_version}")
     if args.validate_only:
         return 0
+    if args.require_fnos and not (args.require_android or args.apk):
+        raise RuntimeError("a complete fnOS release also requires the Android release APK")
 
     output = safe_output_path(args.output)
     output.mkdir(parents=True, exist_ok=True)
+    preserved_fnos = set(expected_fnos_artifact_names(version)) if args.require_fnos else set()
+    clean_generated_release_files(output, preserved_fnos)
+
+    fnos_artifacts = collect_required_fnos_artifacts(output, version) if args.require_fnos else []
     gateway_zip = output / f"Nexus-Gateway-{version}.zip"
     apk_target = output / f"Nexus-Android-{version}-release.apk"
     checksums = output / "SHA256SUMS.txt"
-    for stale in (gateway_zip, apk_target, checksums):
-        stale.unlink(missing_ok=True)
 
     deterministic_zip(gateway_zip)
     artifacts = [gateway_zip]
     if args.require_android or args.apk:
         artifacts.append(copy_required(args.apk, apk_target, "release APK"))
-    for legacy_checksum in output.glob(f"Nexus-fnOS-{version}-fnos*.fpk.sha256"):
-        legacy_checksum.unlink()
-    artifacts.extend(
-        path for path in sorted(output.glob(f"Nexus-fnOS-{version}-fnos*.fpk"))
-        if path.is_file()
-    )
+    artifacts.extend(fnos_artifacts)
 
     expected_fingerprint = normalize_fingerprint(args.certificate_sha256)
     if args.verify_signatures:
@@ -220,6 +292,8 @@ def main() -> int:
             raise RuntimeError("Android release certificate does not match the configured fingerprint")
 
     write_checksum_manifest(artifacts, checksums)
+    if args.require_fnos:
+        validate_complete_release(output, version)
 
     print(f"output={output}")
     for artifact in artifacts:

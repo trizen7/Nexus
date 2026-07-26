@@ -1,7 +1,12 @@
 [CmdletBinding()]
 param(
     [string]$OutputDirectory = "dist",
-    [string]$FnpackPath = ""
+    [string]$FnpackPath = "",
+    [Parameter(Mandatory = $true)]
+    [ValidateSet("amd64", "arm64")]
+    [string]$Platform,
+    [Parameter(Mandatory = $true)]
+    [string]$ImageArchivePath
 )
 
 Set-StrictMode -Version Latest
@@ -16,6 +21,9 @@ $OfficialFnpackVersion = "1.2.3"
 $OfficialWindowsSha256 = "d7af4bd716b009c58f5bcd931615f39db121e7d4b75dc759e575c4fb2879b6ee"
 $OfficialLinuxAmd64Sha256 = "54b97fa7b70968c4d05c79840f5daeff508957d0bb2062fdb0376d00d9615c93"
 $RunningOnWindows = $env:OS -eq "Windows_NT"
+$PackagedArchiveName = "nexus-gateway-image.tar.gz"
+$PackagedChecksumName = "nexus-gateway-image.sha256"
+$PackagedPlatformName = "nexus-gateway-image.platform"
 
 function Resolve-RepositoryPath([string]$Value, [string]$Label) {
     $Candidate = if ([System.IO.Path]::IsPathRooted($Value)) { $Value } else { Join-Path $RepositoryRoot $Value }
@@ -26,6 +34,15 @@ function Resolve-RepositoryPath([string]$Value, [string]$Label) {
     }
     if ($Resolved -eq $RepositoryRoot) {
         throw "$Label cannot be the repository root"
+    }
+    return $Resolved
+}
+
+function Resolve-InputFile([string]$Value, [string]$Label) {
+    $Candidate = if ([System.IO.Path]::IsPathRooted($Value)) { $Value } else { Join-Path $RepositoryRoot $Value }
+    $Resolved = [System.IO.Path]::GetFullPath($Candidate)
+    if (-not (Test-Path -LiteralPath $Resolved -PathType Leaf)) {
+        throw "$Label was not found: $Resolved"
     }
     return $Resolved
 }
@@ -53,7 +70,7 @@ function Read-ManifestValue([string]$Manifest, [string]$Name) {
 
 function Normalize-StagingText([string]$Root) {
     $TextNames = @("LICENSE", "manifest", "config", "privilege", "resource", "install", "upgrade", "uninstall", "main", "config_init", "config_callback", "install_init", "install_callback", "upgrade_init", "upgrade_callback", "uninstall_init", "uninstall_callback")
-    $TextExtensions = @(".py", ".sh", ".json", ".yaml", ".yml", ".txt")
+    $TextExtensions = @(".py", ".sh", ".json", ".yaml", ".yml", ".txt", ".sha256", ".platform")
     Get-ChildItem -LiteralPath $Root -Recurse -File | ForEach-Object {
         if (($TextNames -contains $_.Name) -or ($TextExtensions -contains $_.Extension.ToLowerInvariant())) {
             $Text = [System.IO.File]::ReadAllText($_.FullName)
@@ -109,7 +126,7 @@ function Update-ChecksumManifest([string]$Directory, [string]$ArtifactName) {
     foreach ($Name in @($Names.Keys | Sort-Object)) {
         $ArtifactPath = Join-Path $Directory $Name
         if (-not (Test-Path -LiteralPath $ArtifactPath -PathType Leaf)) {
-            throw "SHA256SUMS.txt references a missing artifact: $Name"
+            continue
         }
         $ArtifactDigest = (Get-FileHash -LiteralPath $ArtifactPath -Algorithm SHA256).Hash.ToLowerInvariant()
         $Lines += "$ArtifactDigest  $Name"
@@ -139,8 +156,25 @@ function Test-Fnpack([string]$Executable) {
 }
 
 $ResolvedOutput = Resolve-RepositoryPath $OutputDirectory "output directory"
+$ResolvedImageArchive = Resolve-InputFile $ImageArchivePath "Gateway image archive"
+$ArchiveStream = [System.IO.File]::OpenRead($ResolvedImageArchive)
+try {
+    $FirstByte = $ArchiveStream.ReadByte()
+    $SecondByte = $ArchiveStream.ReadByte()
+} finally {
+    $ArchiveStream.Dispose()
+}
+if ($FirstByte -ne 0x1f -or $SecondByte -ne 0x8b) {
+    throw "Gateway image archive must be a gzip-compressed Docker save archive"
+}
 $Fnpack = Resolve-Fnpack $FnpackPath
 Test-Fnpack $Fnpack
+
+$PlatformMetadata = switch ($Platform) {
+    "amd64" { @{ Manifest = "x86"; Docker = "linux/amd64" } }
+    "arm64" { @{ Manifest = "arm"; Docker = "linux/arm64" } }
+    default { throw "unsupported fnOS package platform: $Platform" }
+}
 
 $GatewayInit = [System.IO.File]::ReadAllText((Join-Path $RepositoryRoot "gateway/nexus_gateway/__init__.py"))
 $GatewayMatch = [regex]::Match($GatewayInit, '__version__\s*=\s*"([^"]+)"')
@@ -153,19 +187,55 @@ $PackageVersion = Read-ManifestValue $Manifest "version"
 if ($PackageVersion -notmatch ("^" + [regex]::Escape($GatewayVersion) + "-fnos[1-9][0-9]*$")) {
     throw "fnOS package version $PackageVersion must be based on Gateway $GatewayVersion"
 }
+if ((Read-ManifestValue $Manifest "platform") -ne "all") {
+    throw "the fnOS source manifest must remain an architecture-neutral build template"
+}
 $Compose = [System.IO.File]::ReadAllText((Join-Path $PackageSource "app/docker/docker-compose.yaml"))
-$ExpectedImage = "ghcr.io/trizen7/nexus-gateway:$GatewayVersion"
+$ExpectedImage = "nexus-gateway-fnos:$GatewayVersion"
 if ($Compose -notmatch ("(?m)^\s*image:\s*" + [regex]::Escape($ExpectedImage) + "\s*$")) {
     throw "fnOS Compose image must be $ExpectedImage"
+}
+if ($Compose -notmatch '(?m)^\s*pull_policy:\s*never\s*$') {
+    throw "fnOS Compose must disable remote image pulls"
+}
+if ($Compose -match '(?i)ghcr\.io|github\.com') {
+    throw "fnOS Compose must not reference GitHub or GHCR"
 }
 
 New-Item -ItemType Directory -Path $StagingRoot -Force | Out-Null
 Remove-ContainedTree $StagingPackage $StagingRoot
 Copy-Item -LiteralPath $PackageSource -Destination $StagingPackage -Recurse
+
+$StagingManifestPath = Join-Path $StagingPackage "manifest"
+$StagingManifest = [System.IO.File]::ReadAllText($StagingManifestPath)
+$StagingManifest = [regex]::Replace(
+    $StagingManifest,
+    '(?m)^platform\s*=\s*all\s*$',
+    "platform=$($PlatformMetadata.Manifest)"
+)
+if ((Read-ManifestValue $StagingManifest "platform") -ne $PlatformMetadata.Manifest) {
+    throw "failed to set the fnOS package platform"
+}
+[System.IO.File]::WriteAllText($StagingManifestPath, $StagingManifest, $Utf8NoBom)
+
+$StagingDocker = Join-Path $StagingPackage "app/docker"
+$StagingArchive = Join-Path $StagingDocker $PackagedArchiveName
+Copy-Item -LiteralPath $ResolvedImageArchive -Destination $StagingArchive
+$ImageDigest = (Get-FileHash -LiteralPath $StagingArchive -Algorithm SHA256).Hash.ToLowerInvariant()
+[System.IO.File]::WriteAllText(
+    (Join-Path $StagingDocker $PackagedChecksumName),
+    "$ImageDigest  $PackagedArchiveName`n",
+    $Utf8NoBom
+)
+[System.IO.File]::WriteAllText(
+    (Join-Path $StagingDocker $PackagedPlatformName),
+    "$($PlatformMetadata.Docker)`n",
+    $Utf8NoBom
+)
 Normalize-StagingText $StagingPackage
 
 New-Item -ItemType Directory -Path $ResolvedOutput -Force | Out-Null
-$OutputName = "Nexus-fnOS-$PackageVersion.fpk"
+$OutputName = "Nexus-fnOS-$PackageVersion-$Platform.fpk"
 $OutputPath = Join-Path $ResolvedOutput $OutputName
 $LegacyHashPath = "$OutputPath.sha256"
 Remove-Item -LiteralPath $OutputPath -Force -ErrorAction SilentlyContinue
@@ -193,5 +263,6 @@ $Digest = (Get-FileHash -LiteralPath $OutputPath -Algorithm SHA256).Hash.ToLower
 $ChecksumManifest = Update-ChecksumManifest $ResolvedOutput $OutputName
 
 Write-Host "Built $OutputPath"
+Write-Host "Embedded $($PlatformMetadata.Docker) image archive $ResolvedImageArchive"
 Write-Host "Updated $ChecksumManifest"
 Write-Host "SHA-256 $Digest"

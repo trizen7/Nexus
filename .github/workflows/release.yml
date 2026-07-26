@@ -45,23 +45,33 @@ jobs:
           python scripts/scan_repository_secrets.py
           python scripts/build_release.py --validate-only
 
-      - id: gateway-version
-        name: Read validated Gateway version
+      - id: release-metadata
+        name: Read validated release metadata
         shell: python
         run: |
           import os
           import re
           from pathlib import Path
 
-          source = Path("gateway/nexus_gateway/__init__.py").read_text(encoding="utf-8")
-          match = re.search(r'__version__\s*=\s*"([^"]+)"', source)
-          if not match:
+          gateway_source = Path("gateway/nexus_gateway/__init__.py").read_text(encoding="utf-8")
+          gateway_match = re.search(r'__version__\s*=\s*"([^"]+)"', gateway_source)
+          if not gateway_match:
               raise SystemExit("could not read Gateway version")
-          version = match.group(1)
+          version = gateway_match.group(1)
           if os.environ["GITHUB_REF_NAME"] != f"v{version}":
               raise SystemExit("Git tag does not match Gateway version")
+
+          manifest = Path("fnos/nexus-gateway/manifest").read_text(encoding="utf-8")
+          fnos_match = re.search(r"(?m)^version\s*=\s*(\S+)\s*$", manifest)
+          if not fnos_match:
+              raise SystemExit("could not read fnOS package version")
+          fnos_version = fnos_match.group(1)
+          if not re.fullmatch(rf"{re.escape(version)}-fnos[1-9][0-9]*", fnos_version):
+              raise SystemExit("fnOS package version does not match Gateway version")
+
           with Path(os.environ["GITHUB_OUTPUT"]).open("a", encoding="utf-8") as stream:
               stream.write(f"version={version}\n")
+              stream.write(f"fnos_version={fnos_version}\n")
 
       - name: Install Gateway test dependencies
         run: pip install -r gateway/requirements-dev.txt
@@ -98,33 +108,43 @@ jobs:
           NEXUS_RELEASE_KEY_PASSWORD: ${{ secrets.NEXUS_RELEASE_KEY_PASSWORD }}
         run: ./gradlew testDebugUnitTest lintDebug assembleRelease --no-daemon
 
-      - name: Package and verify release artifacts
-        run: |
-          python scripts/build_release.py \
-            --output dist \
-            --apk android/app/build/outputs/apk/release/app-release.apk \
-            --require-android \
-            --verify-signatures
-
       - uses: docker/setup-qemu-action@v3
       - uses: docker/setup-buildx-action@v3
+
+      - name: Build architecture-specific fnOS image archives
+        env:
+          VERSION: ${{ steps.release-metadata.outputs.version }}
+        run: |
+          set -euo pipefail
+          for architecture in amd64 arm64; do
+            docker buildx build \
+              --file gateway/Dockerfile \
+              --platform "linux/$architecture" \
+              --tag "nexus-gateway-fnos:$VERSION" \
+              --output "type=docker,dest=$RUNNER_TEMP/nexus-gateway-$architecture.tar" \
+              --provenance=false \
+              gateway
+            gzip --no-name --best "$RUNNER_TEMP/nexus-gateway-$architecture.tar"
+          done
+
       - name: Log in to GitHub Container Registry
         uses: docker/login-action@v3
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
-      - name: Build and publish Gateway multi-architecture image
+
+      - name: Publish optional Gateway multi-architecture image
         uses: docker/build-push-action@v6
         with:
           context: gateway
           file: gateway/Dockerfile
           platforms: linux/amd64,linux/arm64
           push: true
-          tags: ghcr.io/trizen7/nexus-gateway:${{ steps.gateway-version.outputs.version }}
+          tags: ghcr.io/trizen7/nexus-gateway:${{ steps.release-metadata.outputs.version }}
           labels: |
             org.opencontainers.image.source=https://github.com/trizen7/Nexus
-            org.opencontainers.image.version=${{ steps.gateway-version.outputs.version }}
+            org.opencontainers.image.version=${{ steps.release-metadata.outputs.version }}
             org.opencontainers.image.title=Nexus Gateway
           cache-from: type=gha
           cache-to: type=gha,mode=max
@@ -141,20 +161,51 @@ jobs:
           echo "$FNPACK_SHA256  $RUNNER_TEMP/fnpack" | sha256sum --check --strict
           chmod 0755 "$RUNNER_TEMP/fnpack"
 
-      - name: Build fnOS package
+      - name: Build self-contained fnOS packages
         shell: pwsh
-        run: ./scripts/build_fnos_package.ps1 -OutputDirectory dist -FnpackPath "$env:RUNNER_TEMP/fnpack"
+        run: |
+          ./scripts/build_fnos_package.ps1 -OutputDirectory dist -Platform amd64 -ImageArchivePath "$env:RUNNER_TEMP/nexus-gateway-amd64.tar.gz" -FnpackPath "$env:RUNNER_TEMP/fnpack"
+          ./scripts/build_fnos_package.ps1 -OutputDirectory dist -Platform arm64 -ImageArchivePath "$env:RUNNER_TEMP/nexus-gateway-arm64.tar.gz" -FnpackPath "$env:RUNNER_TEMP/fnpack"
 
-      - name: Verify fnOS package contents
-        run: python scripts/verify_fnos_package.py dist/Nexus-fnOS-*.fpk
+      - name: Verify self-contained fnOS packages
+        env:
+          FNOS_VERSION: ${{ steps.release-metadata.outputs.fnos_version }}
+        run: |
+          python scripts/verify_fnos_package.py "dist/Nexus-fnOS-$FNOS_VERSION-amd64.fpk" --sha256-file dist/SHA256SUMS.txt
+          python scripts/verify_fnos_package.py "dist/Nexus-fnOS-$FNOS_VERSION-arm64.fpk" --sha256-file dist/SHA256SUMS.txt
+
+      - name: Package and verify complete release artifacts
+        run: |
+          python scripts/build_release.py \
+            --output dist \
+            --apk android/app/build/outputs/apk/release/app-release.apk \
+            --require-android \
+            --require-fnos \
+            --verify-signatures
 
       - uses: actions/upload-artifact@v4
         with:
           name: Nexus-${{ github.ref_name }}
-          path: dist/*
+          path: |
+            dist/Nexus-Android-${{ steps.release-metadata.outputs.version }}-release.apk
+            dist/Nexus-Gateway-${{ steps.release-metadata.outputs.version }}.zip
+            dist/Nexus-fnOS-${{ steps.release-metadata.outputs.fnos_version }}-amd64.fpk
+            dist/Nexus-fnOS-${{ steps.release-metadata.outputs.fnos_version }}-arm64.fpk
+            dist/SHA256SUMS.txt
           if-no-files-found: error
 
       - name: Create GitHub Release
         env:
           GH_TOKEN: ${{ github.token }}
-        run: gh release create "$GITHUB_REF_NAME" dist/* --verify-tag --title "Nexus $GITHUB_REF_NAME"
+          VERSION: ${{ steps.release-metadata.outputs.version }}
+          FNOS_VERSION: ${{ steps.release-metadata.outputs.fnos_version }}
+        run: |
+          gh release create "$GITHUB_REF_NAME" \
+            "dist/Nexus-Android-$VERSION-release.apk" \
+            "dist/Nexus-Gateway-$VERSION.zip" \
+            "dist/Nexus-fnOS-$FNOS_VERSION-amd64.fpk" \
+            "dist/Nexus-fnOS-$FNOS_VERSION-arm64.fpk" \
+            "dist/SHA256SUMS.txt" \
+            --verify-tag \
+            --title "Nexus $GITHUB_REF_NAME" \
+            --notes ""

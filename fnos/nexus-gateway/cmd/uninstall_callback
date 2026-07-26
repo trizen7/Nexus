@@ -1,3 +1,7 @@
 #!/bin/bash
 
+# Remove only the exact Nexus-owned local image. Never inspect or manage Hermes.
+if command -v docker >/dev/null 2>&1; then
+  docker image rm nexus-gateway-fnos:0.1.5 >/dev/null 2>&1 || true
+fi
 exit 0

@@ -49,3 +49,9 @@ gateway/logs/
 dist/
 .tools/
 成品/
+
+# Local research and generated fnOS image payloads
+.research/
+/fnos/nexus-gateway/app/docker/nexus-gateway-image.tar.gz
+/fnos/nexus-gateway/app/docker/nexus-gateway-image.sha256
+/fnos/nexus-gateway/app/docker/nexus-gateway-image.platform

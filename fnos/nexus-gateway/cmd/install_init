@@ -8,4 +8,5 @@ validate_username "${wizard_nexus_username:-}"
 validate_password "${wizard_nexus_password:-}"
 validate_hermes_url "${wizard_hermes_api_url:-}"
 [ -n "${wizard_hermes_api_token:-}" ] || fail_setup "Hermes API Server Key is required"
+load_packaged_image
 exit 0

@@ -4,7 +4,7 @@ Nexus 是一个面向 Hermes Agent 的社区移动客户端与轻量移动网关
 
 项目目标是让 Hermes 始终保持原版并由用户独立维护，同时把移动端所需的登录、会话、附件、缓存、下载、通知和断线续接能力放在客户端与移动网关中。Nexus 不修改、更新或管理任何 Hermes 文件。
 
-当前版本：0.1.4
+当前版本：0.1.5
 
 ## 组成
 
@@ -74,14 +74,14 @@ Android：
 
 ## 下载与发布物验证
 
-正式版本通过 GitHub Releases 发布，包含：
+正式版本通过 GitHub Releases 发布，且只包含：
 
 - 官方签名的 Android Release APK；
 - 可独立部署的 Gateway ZIP；
-- 飞牛 fnOS 应用中心安装包 FPK；
-- `SHA256SUMS.txt`。
+- 分别面向 amd64 与 arm64 的两个飞牛 fnOS 自包含 FPK；
+- 唯一的 `SHA256SUMS.txt`。
 
-安装前应使用唯一的 `SHA256SUMS.txt` 核对 APK、Gateway ZIP 和 FPK 发布附件。Android APK 由项目持久发布密钥签名，正式版本应保持相同签名系列。第三方许可声明保留在源码仓库与 Gateway ZIP 中，不再作为独立 Release 附件。
+安装前应使用 `SHA256SUMS.txt` 核对 APK、Gateway ZIP 和两个 FPK。Android APK 由项目持久发布密钥签名，正式版本应保持相同签名系列。第三方许可声明保留在源码仓库与 Gateway ZIP 中，不作为独立 Release 附件；正式 Release 不生成 AAB、独立 `.fpk.sha256`、发布清单、更新记录、开发计划或 TODO。
 
 ## 快速开始
 
@@ -125,17 +125,22 @@ Nexus Gateway 不再内置 TLS 或证书管理。局域网直连只适合受信�
 
 ### 2. 安装飞牛 fnOS 应用包
 
-飞牛 fnOS 用户可以在应用中心手动安装 `Nexus-fnOS-<版本>.fpk`。安装向导会收集 Nexus 登录账号、密码、Hermes API 地址和 API Server Key；敏感信息只保存到 Nexus 私有数据目录，不写入安装包或 Compose 明文环境变量。
+飞牛 fnOS 用户应根据 NAS 架构选择 `Nexus-fnOS-<版本>-amd64.fpk` 或 `Nexus-fnOS-<版本>-arm64.fpk`。安装向导会收集 Nexus 登录账号、密码、Hermes API 地址和 API Server Key；敏感信息只保存到 Nexus 私有数据目录，不写入安装包或 Compose 明文环境变量。
 
 Hermes 与 Nexus 安装在同一台 NAS 时，Hermes API 地址默认填写 `http://127.0.0.1:8642`；fnOS 包通过主机网络访问原版 Hermes 的回环 API，不修改 Hermes 任何文件或进程。
 
-Gateway 镜像固定为与源码版本一致的 GHCR 多架构标签。Windows 本地构建 FPK 不需要运行 Docker：
+每个 FPK 都内置对应架构的完整 Gateway Docker 镜像。安装、升级和启动通过本地 `docker load` 完成，不访问 GitHub、GHCR 或 Docker Hub，也不执行镜像拉取。包体比旧在线拉取版更大属于正常现象。GHCR 仅保留为普通 Docker 部署的可选渠道。
+
+本地打包脚本不运行 Docker，但需要传入预先生成的 gzip Docker save 归档：
 
 ~~~powershell
-./scripts/build_fnos_package.ps1
+./scripts/build_fnos_package.ps1 `
+  -Platform amd64 `
+  -ImageArchivePath .local-test\images\nexus-gateway-amd64.tar.gz `
+  -OutputDirectory dist
 ~~~
 
-安装、升级、同机 Hermes 地址和真实设备验收说明见 [`docs/fnos-deployment.md`](docs/fnos-deployment.md)。
+安装、升级、双架构构建、同机 Hermes 地址和真实设备验收说明见 [`docs/fnos-deployment.md`](docs/fnos-deployment.md)。
 
 ### 3. 构建 Android App
 

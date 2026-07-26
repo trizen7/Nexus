@@ -4,19 +4,24 @@ Nexus Gateway 提供飞牛 fnOS Docker 应用包。安装包只部署 Nexus 自�
 
 ## 发布物
 
-- 安装包：`Nexus-fnOS-<版本>.fpk`
+同一版本会提供两个架构专用安装包：
+
+- x86_64 / amd64 NAS：`Nexus-fnOS-0.1.5-fnos2-amd64.fpk`
+- ARM64 / aarch64 NAS：`Nexus-fnOS-0.1.5-fnos2-arm64.fpk`
 - 统一校验文件：`SHA256SUMS.txt`
-- 容器镜像：`ghcr.io/trizen7/nexus-gateway:<Gateway 版本>`
 - 默认主机端口：`8787`
 
-当前 fnOS 集成修订为 `0.1.4-fnos1`，对应 Gateway `0.1.4` 和镜像标签 `0.1.4`。后续 Gateway 版本升级时，必须同步更新 manifest、Compose 镜像标签、测试和发布物。
+当前 fnOS 集成修订为 `0.1.5-fnos2`，对应 Gateway `0.1.5`。每个 FPK 都内置该架构完整的 `nexus-gateway-fnos:0.1.5` Docker save gzip 镜像，因此安装、升级和启动时不会访问 GitHub、GHCR 或 Docker Hub，也不会执行 `docker pull`。GHCR 镜像仅作为普通 Docker 部署的可选渠道，不是 fnOS 安装包的运行依赖。
+
+由于完整容器镜像已放进 FPK，自包含安装包会明显大于旧的在线拉取版，这是正常现象。
 
 ## 安装前准备
 
-1. 飞牛 fnOS 已安装并启用 Docker，且能够访问 GitHub Container Registry。
-2. 用户已经独立运行原版 Hermes API Server。
-3. 已取得 Hermes API 地址和 API Server Key。
-4. NAS 的 `8787` 端口未被其他服务占用。
+1. 飞牛 fnOS 已安装并启用 Docker。
+2. 根据 NAS CPU 架构下载正确的 amd64 或 arm64 FPK，并使用 `SHA256SUMS.txt` 校验。
+3. 用户已经独立运行原版 Hermes API Server。
+4. 已取得 Hermes API 地址和 API Server Key。
+5. NAS 的 `8787` 端口未被其他服务占用，并为 FPK、临时解包和 Docker 镜像预留足够空间。
 
 Hermes 与 Nexus 位于同一台 NAS 时，fnOS 版 Nexus 使用主机网络，可直接访问 Hermes 默认的回环监听地址：
 
@@ -26,16 +31,17 @@ http://127.0.0.1:8642
 
 如果用户已为 Hermes API 修改端口，请将 `8642` 换成实际端口。Hermes 位于另一台设备时，填写该设备对 NAS 可达的局域网地址。
 
-从 `0.1.2-fnos1` 升级时，容器入口会把 Nexus 私有配置中的 `host.docker.internal`、`localhost`、IPv4 回环或 IPv6 回环地址规范化为 `127.0.0.1`，并保留原协议、端口、路径、Key 和 Session Secret。`0.0.0.0` 与 `::` 是监听用的未指定地址，不是可连接的 Hermes 目标，会被拒绝。迁移只写入 Nexus 的 fnOS 私有数据目录，不读取或修改任何 Hermes 文件。
+从旧版本升级时，容器入口会把 Nexus 私有配置中的 `host.docker.internal`、`localhost`、IPv4 回环或 IPv6 回环地址规范化为 `127.0.0.1`，并保留原协议、端口、路径、Key 和 Session Secret。`0.0.0.0` 与 `::` 是监听用的未指定地址，不是可连接的 Hermes 目标，会被拒绝。迁移只写入 Nexus 的 fnOS 私有数据目录，不读取或修改任何 Hermes 文件。
 
 ## 安装
 
-1. 在飞牛 fnOS 应用中心选择手动安装，上传 `.fpk`。
+1. 在飞牛 fnOS 应用中心选择手动安装，上传与 NAS 架构匹配的 `.fpk`。
 2. 设置 Nexus 登录账号和至少 8 个字符的密码。
 3. 填写 Hermes API 地址和 Hermes API Server Key。
-4. 安装完成后，fnOS 会拉取多架构 Gateway 镜像并启动 `nexus-gateway-fnos` 容器。
-5. 从应用中心打开 Nexus，或访问 `http://<NAS 地址>:8787/`。
-6. Android App 中填写相同的 Nexus 地址、账号和密码。
+4. 安装脚本先校验包内镜像的 SHA-256 与架构，再通过 `docker load` 导入本地镜像；不会连接任何容器仓库。
+5. fnOS 使用包内 Compose 定义启动 `nexus-gateway-fnos` 容器。
+6. 从应用中心打开 Nexus，或访问 `http://<NAS 地址>:8787/`。
+7. Android App 中填写相同的 Nexus 地址、账号和密码。
 
 安装向导不会把密码或 Hermes Key 写入 Compose 环境变量。向导值会先以仅包用户可读的一次性文件写入 Nexus 自有 `TRIM_PKGVAR`；容器首次启动后，密码会使用 scrypt 散列保存，同时生成随机 Session Secret，并删除一次性文件。
 
@@ -60,59 +66,69 @@ Gateway 提供 HTTP 源站。局域网可直接使用 `http://<NAS 地址>:8787`
 
 ## 升级
 
-升级 FPK 前应先备份 Nexus 私有数据目录。升级包会保留 `TRIM_PKGVAR`，并使用新包中的 Compose 定义重新创建 Nexus Docker 项目；不会接触 Hermes。
+升级 FPK 前应先备份 Nexus 私有数据目录。升级脚本会校验并导入新 FPK 内置的本地镜像，然后由 fnOS 使用新 Compose 定义重新创建 Nexus Docker 项目。升级不会访问 GitHub/GHCR，不会改变 `TRIM_PKGVAR`，也不会接触 Hermes。
 
 每次发布按以下顺序更新：
 
 1. 更新 Gateway `__version__`。
 2. 更新 `fnos/nexus-gateway/manifest` 的 fnOS 修订版本。
-3. 更新 FPK Compose 中固定的 GHCR 镜像标签。
-4. 发布相同 Gateway 版本的多架构 GHCR 镜像。
-5. 构建 FPK，校验 SHA-256，并在真实 fnOS 设备上完成升级测试。
+3. 更新 FPK Compose 和生命周期脚本中的本地镜像标签。
+4. 分别构建 `linux/amd64`、`linux/arm64` 的 Docker save gzip 镜像归档。
+5. 将两个归档分别封装为架构专用 FPK，校验统一 SHA-256，并在真实 fnOS 设备上完成安装与升级测试。
+6. 如有需要，另行发布普通 Docker 用户可选的 GHCR 多架构镜像；该步骤不影响 FPK 安装。
 
 ## 本地构建 FPK
 
-Windows 构建不需要本机 Docker。脚本会使用固定版本的官方 `fnpack 1.2.3`，校验工具 SHA-256，把打包副本统一为 UTF-8/LF，再生成 FPK：
+本机构建脚本不会运行 Docker。它要求维护者预先提供一个 gzip 压缩的 Docker save 归档，归档内必须只有对应架构的 `nexus-gateway-fnos:0.1.5` 镜像。正式归档通常由 GitHub Actions 的 Buildx 环境生成。
 
-~~~powershell
-./scripts/build_fnos_package.ps1
-~~~
-
-也可以显式指定已下载的 fnpack：
+Windows 示例：
 
 ~~~powershell
 ./scripts/build_fnos_package.ps1 `
-  -FnpackPath C:\tools\fnpack-1.2.3-windows-amd64.exe `
+  -Platform amd64 `
+  -ImageArchivePath .local-test\images\nexus-gateway-amd64.tar.gz `
+  -OutputDirectory dist
+
+./scripts/build_fnos_package.ps1 `
+  -Platform arm64 `
+  -ImageArchivePath .local-test\images\nexus-gateway-arm64.tar.gz `
   -OutputDirectory dist
 ~~~
 
-输出：
+也可以通过 `-FnpackPath` 显式指定已下载并校验的 `fnpack 1.2.3`。输出为：
 
 ~~~text
-dist/Nexus-fnOS-0.1.4-fnos1.fpk
+dist/Nexus-fnOS-0.1.5-fnos2-amd64.fpk
+dist/Nexus-fnOS-0.1.5-fnos2-arm64.fpk
 dist/SHA256SUMS.txt
 ~~~
 
-构建后可执行无解包静态验收，检查归档路径、文件集合、图标、版本、镜像标签、LF 换行、许可证、SHA-256、明文凭据和 Hermes 只读边界：
+构建后执行无解包静态验收：
 
 ~~~powershell
-.local-test\venv-fnos\Scripts\python.exe scripts\verify_fnos_package.py `
-  dist\Nexus-fnOS-0.1.4-fnos1.fpk `
+.local-test\venv\Scripts\python.exe scripts\verify_fnos_package.py `
+  dist\Nexus-fnOS-0.1.5-fnos2-amd64.fpk `
+  --sha256-file dist\SHA256SUMS.txt
+
+.local-test\venv\Scripts\python.exe scripts\verify_fnos_package.py `
+  dist\Nexus-fnOS-0.1.5-fnos2-arm64.fpk `
   --sha256-file dist\SHA256SUMS.txt
 ~~~
 
-GitHub Actions 的容器工作流会在 Ubuntu Runner 中构建并发布 `linux/amd64`、`linux/arm64` 镜像，再使用校验过的 Linux fnpack 构建 FPK。仓库不要求在开发机上运行 Docker。
+验证器会检查 FPK 文件名和 manifest 架构、包内镜像标签和架构、镜像归档 SHA-256、Compose 的 `pull_policy: never`、远程下载指令、归档路径、文件集合、图标、LF 换行、许可证、明文凭据和 Hermes 只读边界。
 
 ## 真实设备验收
 
 FPK 格式和静态契约可以在仓库中自动验证，但最终发布前仍需在真实飞牛 fnOS 设备上检查：
 
-- 干净安装、停止、启动和卸载流程
-- x86_64 与 ARM64 设备的镜像拉取和启动
+- x86_64 设备安装 amd64 FPK，ARM64 设备安装 arm64 FPK
+- 断开 GitHub、GHCR 和 Docker Hub 访问后仍可干净安装、升级、停止、启动和卸载
+- 安装日志中没有镜像拉取，并能从包内镜像正常创建容器
+- 错误架构 FPK 会在加载镜像前明确失败
 - 同机及异机 Hermes 地址的连通性
 - 错误 URL、错误 Key 和 Hermes 不可达时的提示
 - 单独修改账号、密码、URL 或 Key
 - 升级后 Nexus 数据保留，旧登录令牌按预期失效
 - 应用中心图标、说明、配置页和桌面入口显示
 
-参考飞牛开发者文档中的 Docker 应用案例、Manifest、Wizard、Resource、fnpack 和发布流程。
+真实设备验收也不得安装、升级、停止、启动、重启、修改或读取 Hermes 文件与进程；只能连接用户已经运行的原版 Hermes HTTP API。

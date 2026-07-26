@@ -1,6 +1,7 @@
 services:
   nexus-gateway:
-    image: ghcr.io/trizen7/nexus-gateway:0.1.4
+    image: nexus-gateway-fnos:0.1.5
+    pull_policy: never
     container_name: nexus-gateway-fnos
     restart: unless-stopped
     user: "${TRIM_UID}:${TRIM_GID}"
