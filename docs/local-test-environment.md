@@ -143,11 +143,11 @@ powershell -NoProfile -ExecutionPolicy Bypass -File ".\成品\本地测试环境
 
 普通升级后账号、Nexus 保存的 Hermes 上游连接配置副本、媒体和历史 TLS 文件哈希必须保持不变；日志不清理，每次启动前将已有非空 `gateway.stdout.log` / `gateway.stderr.log` 移入同目录带 UTC 时间戳的归档文件，再验证 `18787` 正在监听、`18788` 未监听、`process.json` 记录的 PID 与实际监听进程一致。
 
-## 0.1.0 开源正式版成品
+## 当前开源正式版成品
 
-正式成品由发布脚本生成到被 Git 忽略的 `成品/v0.1.0/`，包含官方签名 Release APK、Gateway ZIP 与 `SHA256SUMS.txt`。第三方许可声明保留在 Gateway ZIP 中。独立验收环境仍只部署 Gateway ZIP，不读取源码、不运行 Docker，也不接触签名私钥。
+正式成品由发布脚本生成到被 Git 忽略的 `成品/v0.1.1/`，包含官方签名 Release APK、Gateway ZIP 与 `SHA256SUMS.txt`。第三方许可声明保留在 Gateway ZIP 中。独立验收环境仍只部署 Gateway ZIP，不读取源码、不运行 Docker，也不接触签名私钥。
 
-手机验收应安装 `Nexus-Android-0.1.0-release.apk`；升级已有官方版本前应确认 APK 签名来自同一官方发布密钥。
+手机验收应安装 `Nexus-Android-0.1.1-release.apk`；升级已有官方版本前应确认 APK 签名来自同一官方发布密钥。
 
 ## 0.0.15 成品
 

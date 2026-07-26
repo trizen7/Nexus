@@ -9,7 +9,7 @@ Nexus Gateway 提供飞牛 fnOS Docker 应用包。安装包只部署 Nexus 自�
 - 容器镜像：`ghcr.io/trizen7/nexus-gateway:<Gateway 版本>`
 - 默认主机端口：`18787`
 
-首个 fnOS 集成修订为 `0.1.0-fnos1`，对应 Gateway `0.1.0` 和镜像标签 `0.1.0`。后续 Gateway 版本升级时，必须同步更新 manifest、Compose 镜像标签、测试和发布物。
+当前 fnOS 集成修订为 `0.1.1-fnos1`，对应 Gateway `0.1.1` 和镜像标签 `0.1.1`。后续 Gateway 版本升级时，必须同步更新 manifest、Compose 镜像标签、测试和发布物。
 
 ## 安装前准备
 
@@ -87,15 +87,15 @@ Windows 构建不需要本机 Docker。脚本会使用固定版本的官方 `fnp
 输出：
 
 ~~~text
-dist/Nexus-fnOS-0.1.0-fnos1.fpk
-dist/Nexus-fnOS-0.1.0-fnos1.fpk.sha256
+dist/Nexus-fnOS-0.1.1-fnos1.fpk
+dist/Nexus-fnOS-0.1.1-fnos1.fpk.sha256
 ~~~
 
 构建后可执行无解包静态验收，检查归档路径、文件集合、图标、版本、镜像标签、LF 换行、许可证、SHA-256、明文凭据和 Hermes 只读边界：
 
 ~~~powershell
 .local-test\venv-fnos\Scripts\python.exe scripts\verify_fnos_package.py `
-  dist\Nexus-fnOS-0.1.0-fnos1.fpk
+  dist\Nexus-fnOS-0.1.1-fnos1.fpk
 ~~~
 
 GitHub Actions 的容器工作流会在 Ubuntu Runner 中构建并发布 `linux/amd64`、`linux/arm64` 镜像，再使用校验过的 Linux fnpack 构建 FPK。仓库不要求在开发机上运行 Docker。
