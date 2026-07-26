@@ -205,6 +205,12 @@ def verify_package(fpk_path: Path, sha256_path: Path | None = None) -> str:
         _fail(f"Compose does not use {expected_image}")
     if re.search(r"(?m)^\s*(?:build|NEXUS_PASSWORD|HERMES_API_TOKEN|NEXUS_SESSION_SECRET)\s*:", compose):
         _fail("Compose contains a local build or plaintext secret environment field")
+    if not re.search(r"(?m)^\s*network_mode:\s*host\s*$", compose):
+        _fail("fnOS Compose must share the NAS host network")
+    if re.search(r"(?m)^\s*(?:ports|extra_hosts):\s*$", compose):
+        _fail("fnOS host networking must not include port mappings or bridge host aliases")
+    if not re.search(r"(?m)^\s*NEXUS_DEPLOYMENT_MODE:\s*fnos-host\s*$", compose):
+        _fail("fnOS Compose must identify its host-network deployment mode")
     if '"${TRIM_PKGVAR}:/data"' not in compose or "/opt/hermes" in compose.lower():
         _fail("Compose violates the Nexus-only data boundary")
     if "/api/setup/status" not in compose or "initialized" not in compose:

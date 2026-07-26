@@ -6,7 +6,7 @@ on:
       gateway_source_ref:
         description: Git ref containing the Gateway source to publish
         required: true
-        default: v0.1.2
+        default: v0.1.3
         type: string
       image_tag:
         description: GHCR tag; blank uses the Gateway source version

@@ -321,7 +321,7 @@ class HermesApiClientTest {
 
     @Test
     fun `login surfaces actionable gateway message for Hermes HTTP 503`() = runTest {
-        val serverMessage = "Nexus 已启动，但无法访问 Hermes API。请检查 Hermes 地址、端口、API Server Key 和服务状态；Docker 与 Hermes 位于同一台主机时，请勿使用 127.0.0.1，请使用 host.docker.internal 或宿主机局域网地址。"
+        val serverMessage = "Nexus 已启动，但无法访问 Hermes API。请检查 Hermes 地址、端口、API Server Key 和服务状态；fnOS 同机部署建议使用 http://127.0.0.1:8642。"
         server.enqueue(
             MockResponse()
                 .setResponseCode(503)

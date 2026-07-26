@@ -128,26 +128,45 @@ def _valid_account(value: dict[str, Any]) -> bool:
     return bool(username and (legacy_password or (salt and digest)))
 
 
-def _is_container_local_host(hostname: str) -> bool:
-    normalized = hostname.strip().lower().rstrip(".")
+def _normalized_hostname(hostname: str) -> str:
+    return hostname.strip().lower().rstrip(".")
+
+
+def _is_loopback_host(hostname: str) -> bool:
+    normalized = _normalized_hostname(hostname)
     if normalized == "localhost":
         return True
     try:
-        address = ipaddress.ip_address(normalized)
+        return ipaddress.ip_address(normalized).is_loopback
     except ValueError:
         return False
-    return address.is_loopback or address.is_unspecified
 
 
-def _container_safe_hermes_url(value: str) -> str:
+def _is_unspecified_host(hostname: str) -> bool:
+    try:
+        return ipaddress.ip_address(_normalized_hostname(hostname)).is_unspecified
+    except ValueError:
+        return False
+
+
+def _fnos_host_hermes_url(value: str) -> str:
+    # fnOS uses host networking so same-NAS aliases should resolve to the host loopback listener.
     try:
         parsed = urlsplit(value)
         port = parsed.port
     except ValueError:
         return value
-    if not parsed.hostname or not _is_container_local_host(parsed.hostname):
+    if (
+        not parsed.hostname
+        or parsed.username is not None
+        or parsed.password is not None
+        or (
+            _normalized_hostname(parsed.hostname) != "host.docker.internal"
+            and not _is_loopback_host(parsed.hostname)
+        )
+    ):
         return value
-    netloc = "host.docker.internal"
+    netloc = "127.0.0.1"
     if port is not None:
         netloc = f"{netloc}:{port}"
     return parsed._replace(netloc=netloc).geturl()
@@ -162,7 +181,7 @@ def _valid_hermes_url(value: str) -> bool:
     return bool(
         parsed.scheme in {"http", "https"}
         and parsed.hostname
-        and not _is_container_local_host(parsed.hostname)
+        and not _is_unspecified_host(parsed.hostname)
         and parsed.username is None
         and parsed.password is None
         and not parsed.query
@@ -206,10 +225,10 @@ def _validate_setup_directory() -> bool:
     return True
 
 
-def _migrate_legacy_loopback_config() -> None:
+def _migrate_fnos_host_config() -> None:
     existing_config = _read_json(CONFIG_PATH)
     current_url = str(existing_config.get("hermes_api_url", "")).strip().rstrip("/")
-    migrated_url = _container_safe_hermes_url(current_url)
+    migrated_url = _fnos_host_hermes_url(current_url)
     if not current_url or migrated_url == current_url:
         return
     updated_config = dict(existing_config)
@@ -219,7 +238,7 @@ def _migrate_legacy_loopback_config() -> None:
 
 
 def apply_pending_setup() -> None:
-    _migrate_legacy_loopback_config()
+    _migrate_fnos_host_config()
     if not _validate_setup_directory():
         return
 
@@ -234,7 +253,7 @@ def apply_pending_setup() -> None:
 
     supplied_username = _read_field("username").strip()
     supplied_password = _read_field("password")
-    supplied_url = _read_field("hermes_api_url").strip().rstrip("/")
+    supplied_url = _fnos_host_hermes_url(_read_field("hermes_api_url").strip().rstrip("/"))
     supplied_token = _read_field("hermes_api_token").strip()
 
     if mode == "install":
@@ -247,7 +266,9 @@ def apply_pending_setup() -> None:
     if supplied_password and len(supplied_password) < 8:
         raise SetupError("Nexus password must contain at least 8 characters")
 
-    hermes_api_url = supplied_url or str(existing_config.get("hermes_api_url", "")).rstrip("/")
+    hermes_api_url = _fnos_host_hermes_url(
+        supplied_url or str(existing_config.get("hermes_api_url", "")).rstrip("/")
+    )
     hermes_api_token = supplied_token or str(existing_config.get("hermes_api_token", ""))
     if not _valid_hermes_url(hermes_api_url):
         raise SetupError("Hermes API URL must be a valid http:// or https:// address")

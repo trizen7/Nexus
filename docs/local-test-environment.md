@@ -145,9 +145,9 @@ powershell -NoProfile -ExecutionPolicy Bypass -File ".\成品\本地测试环境
 
 ## 当前开源正式版成品
 
-正式成品由发布脚本生成到被 Git 忽略的 `成品/v0.1.2/`，包含官方签名 Release APK、Gateway ZIP 与 `SHA256SUMS.txt`。第三方许可声明保留在 Gateway ZIP 中。独立验收环境仍只部署 Gateway ZIP，不读取源码、不运行 Docker，也不接触签名私钥。
+正式成品由发布脚本生成到被 Git 忽略的 `成品/v0.1.3/`，包含官方签名 Release APK、Gateway ZIP 与 `SHA256SUMS.txt`。第三方许可声明保留在 Gateway ZIP 中。独立验收环境仍只部署 Gateway ZIP，不读取源码、不运行 Docker，也不接触签名私钥。
 
-手机验收应安装 `Nexus-Android-0.1.2-release.apk`；升级已有官方版本前应确认 APK 签名来自同一官方发布密钥。
+手机验收应安装 `Nexus-Android-0.1.3-release.apk`；升级已有官方版本前应确认 APK 签名来自同一官方发布密钥。
 
 ## 0.0.15 成品
 

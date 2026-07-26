@@ -69,10 +69,16 @@ PUBLIC_PATHS = {
     "/assets/app.js",
 }
 WEB_ROOT = Path(__file__).with_name("web")
-HERMES_UNAVAILABLE_MESSAGE = (
-    'Nexus 已启动，但无法访问 Hermes API。请检查 Hermes 地址、端口、API Server Key 和服务状态；'
-    'Docker 与 Hermes 位于同一台主机时，请勿使用 127.0.0.1，请使用 host.docker.internal 或宿主机局域网地址。'
-)
+
+
+def _hermes_unavailable_message() -> str:
+    base = 'Nexus 已启动，但无法访问 Hermes API。请检查 Hermes 地址、端口、API Server Key 和服务状态；'
+    if os.getenv("NEXUS_DEPLOYMENT_MODE", "").strip().casefold() == "fnos-host":
+        return base + 'fnOS 同机部署建议使用 http://127.0.0.1:8642，Hermes 在其他设备上时请使用其局域网地址。'
+    return base + '普通 Docker bridge 同机部署可使用 host.docker.internal，其他部署请使用 Hermes 的实际可达地址。'
+
+
+HERMES_UNAVAILABLE_MESSAGE = _hermes_unavailable_message()
 
 
 @dataclass

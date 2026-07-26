@@ -4,7 +4,7 @@
     "items": [
       {
         "type": "tips",
-        "helpText": "只填写需要修改的项目，留空会保留原值。修改 Nexus 账号或密码后，已登录设备需要重新登录。这里仅更新 Nexus 自有配置，不会修改 Hermes。"
+        "helpText": "只填写需要修改的项目，留空会保留原值。修改 Nexus 账号或密码后，已登录设备需要重新登录。这里只更新 Nexus 自有配置，不会修改 Hermes。Hermes 与 Nexus 在同一台 NAS 时，Hermes API 地址建议使用 http://127.0.0.1:8642。"
       },
       {
         "type": "text",

@@ -42,8 +42,8 @@ validate_hermes_url() {
   authority=${authority%%\#*}
   case "$authority" in
     ""|*@*) fail_setup "Hermes API URL must include a host and must not contain credentials" ;;
-    localhost|localhost:*|127.*|0.0.0.0|0.0.0.0:*|\[::1\]|\[::1\]:*|\[::\]|\[::\]:*)
-      fail_setup "Hermes API URL cannot use a container-local address; use host.docker.internal or the Hermes host LAN address"
+    0.0.0.0|0.0.0.0:*|\[::\]|\[::\]:*)
+      fail_setup "Hermes API URL cannot use an unspecified address"
       ;;
   esac
 }

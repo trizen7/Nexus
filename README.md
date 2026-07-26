@@ -4,7 +4,7 @@ Nexus 是一个面向 Hermes Agent 的社区移动客户端与轻量移动网关
 
 项目目标是让 Hermes 始终保持原版并由用户独立维护，同时把移动端所需的登录、会话、附件、缓存、下载、通知和断线续接能力放在客户端与移动网关中。Nexus 不修改、更新或管理任何 Hermes 文件。
 
-当前版本：0.1.2
+当前版本：0.1.3
 
 ## 组成
 
@@ -126,6 +126,8 @@ Nexus Gateway 不再内置 TLS 或证书管理。局域网直连只适合受信�
 ### 2. 安装飞牛 fnOS 应用包
 
 飞牛 fnOS 用户可以在应用中心手动安装 `Nexus-fnOS-<版本>.fpk`。安装向导会收集 Nexus 登录账号、密码、Hermes API 地址和 API Server Key；敏感信息只保存到 Nexus 私有数据目录，不写入安装包或 Compose 明文环境变量。
+
+Hermes 与 Nexus 安装在同一台 NAS 时，Hermes API 地址默认填写 `http://127.0.0.1:8642`；fnOS 包通过主机网络访问原版 Hermes 的回环 API，不修改 Hermes 任何文件或进程。
 
 Gateway 镜像固定为与源码版本一致的 GHCR 多架构标签。Windows 本地构建 FPK 不需要运行 Docker：
 

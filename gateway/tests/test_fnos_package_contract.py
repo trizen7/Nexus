@@ -98,13 +98,14 @@ def test_fnos_compose_uses_public_versioned_image_and_private_package_data() -> 
     assert "build" not in service
     assert service["container_name"] == "nexus-gateway-fnos"
     assert service["user"] == "${TRIM_UID}:${TRIM_GID}"
-    assert service["ports"] == ["${TRIM_SERVICE_PORT}:8787"]
+    assert service["network_mode"] == "host"
+    assert "ports" not in service
+    assert "extra_hosts" not in service
     assert service["volumes"][0] == "${TRIM_PKGVAR}:/data"
     assert all("shares" not in volume.lower() for volume in service["volumes"])
     assert service["read_only"] is True
     assert service["cap_drop"] == ["ALL"]
     assert service["security_opt"] == ["no-new-privileges:true"]
-    assert service["extra_hosts"] == ["host.docker.internal:host-gateway"]
     healthcheck_command = " ".join(service["healthcheck"]["test"])
     assert "/api/setup/status" in healthcheck_command
     assert "initialized" in healthcheck_command
@@ -114,6 +115,7 @@ def test_fnos_compose_uses_public_versioned_image_and_private_package_data() -> 
     assert service["healthcheck"]["start_period"] == "20s"
     assert service["entrypoint"] == ["python", "/opt/nexus/fnos_entrypoint.py"]
     assert service["command"][:3] == ["python", "-m", "nexus_gateway"]
+    assert service["environment"]["NEXUS_DEPLOYMENT_MODE"] == "fnos-host"
     assert "NEXUS_PASSWORD" not in service["environment"]
     assert "HERMES_API_TOKEN" not in service["environment"]
     assert "NEXUS_SESSION_SECRET" not in service["environment"]
@@ -142,6 +144,11 @@ def test_fnos_wizards_mark_secrets_as_password_and_embed_no_credentials() -> Non
     assert "initValue" not in install_by_field["wizard_hermes_api_token"]
     assert "initValue" not in config_by_field["wizard_nexus_password"]
     assert "initValue" not in config_by_field["wizard_hermes_api_token"]
+    assert install_by_field["wizard_hermes_api_url"]["initValue"] == "http://127.0.0.1:8642"
+    install_help = install[1]["items"][0]["helpText"]
+    config_help = config[0]["items"][0]["helpText"]
+    assert "http://127.0.0.1:8642" in install_help
+    assert "http://127.0.0.1:8642" in config_help
 
 
 def test_fnos_icons_have_required_dimensions_and_size() -> None:
@@ -194,8 +201,8 @@ def test_fnos_lifecycle_scripts_only_manage_nexus_owned_paths_and_container() ->
         assert "docker inspect nexus-gateway-fnos" in callback
         assert "docker restart nexus-gateway-fnos" in callback
     setup_common = (PACKAGE / "cmd" / "setup_common.sh").read_text(encoding="utf-8")
-    assert "host.docker.internal" in setup_common
-    assert "127.*" in setup_common
+    assert "Hermes API URL cannot use an unspecified address" in setup_common
+    assert "localhost|localhost:*|127.*" not in setup_common
 
 
 def test_fnos_entrypoint_initializes_gateway_without_plaintext_password(tmp_path: Path) -> None:
@@ -226,7 +233,7 @@ def test_fnos_entrypoint_initializes_gateway_without_plaintext_password(tmp_path
         dklen=32,
     ).hex()
     assert candidate == account["password_hash"]
-    assert config["hermes_api_url"] == "http://host.docker.internal:8000"
+    assert config["hermes_api_url"] == "http://127.0.0.1:8000"
     assert config["hermes_api_token"] == "test-token-not-a-real-secret"
     assert len(config["session_secret"]) >= 16
     assert not (tmp_path / ".fnos-setup").exists()
@@ -243,11 +250,8 @@ def test_fnos_entrypoint_initializes_gateway_without_plaintext_password(tmp_path
         "http://hermes.example:8000?debug=true",
         "http://hermes.example:8000#fragment",
         "http://hermes.example:70000",
-        "http://localhost:8000",
-        "http://127.0.0.1:8000",
-        "http://127.1.2.3:8000",
+        "http://user:password@127.0.0.1:8000",
         "http://0.0.0.0:8000",
-        "http://[::1]:8000",
         "http://[::]:8000",
     ],
 )
@@ -270,13 +274,13 @@ def test_fnos_entrypoint_rejects_invalid_hermes_urls(tmp_path: Path, invalid_url
 @pytest.mark.parametrize(
     ("legacy_url", "expected_url"),
     [
-        ("http://localhost:8000", "http://host.docker.internal:8000"),
-        ("http://127.0.0.1:8000/api", "http://host.docker.internal:8000/api"),
-        ("https://[::1]:8443", "https://host.docker.internal:8443"),
-        ("http://0.0.0.0:9000", "http://host.docker.internal:9000"),
+        ("http://host.docker.internal:8000", "http://127.0.0.1:8000"),
+        ("http://localhost:8000", "http://127.0.0.1:8000"),
+        ("http://127.1.2.3:8000/api", "http://127.0.0.1:8000/api"),
+        ("https://[::1]:8443", "https://127.0.0.1:8443"),
     ],
 )
-def test_fnos_entrypoint_migrates_legacy_container_local_hermes_urls(
+def test_fnos_entrypoint_migrates_same_nas_hermes_urls_for_host_network(
     tmp_path: Path,
     legacy_url: str,
     expected_url: str,

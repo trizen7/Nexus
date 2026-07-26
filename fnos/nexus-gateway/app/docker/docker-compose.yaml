@@ -1,6 +1,6 @@
 services:
   nexus-gateway:
-    image: ghcr.io/trizen7/nexus-gateway:0.1.2
+    image: ghcr.io/trizen7/nexus-gateway:0.1.3
     container_name: nexus-gateway-fnos
     restart: unless-stopped
     user: "${TRIM_UID}:${TRIM_GID}"
@@ -16,13 +16,11 @@ services:
       NEXUS_MAX_UPLOAD_BYTES: 52428800
       NEXUS_MAX_TOTAL_STORAGE_BYTES: 10737418240
       NEXUS_MIN_FREE_DISK_BYTES: 536870912
-    ports:
-      - "${TRIM_SERVICE_PORT}:8787"
+      NEXUS_DEPLOYMENT_MODE: fnos-host
+    network_mode: host
     volumes:
       - "${TRIM_PKGVAR}:/data"
       - "${TRIM_APPDEST}/docker/fnos_entrypoint.py:/opt/nexus/fnos_entrypoint.py:ro"
-    extra_hosts:
-      - "host.docker.internal:host-gateway"
     healthcheck:
       test: ["CMD", "python", "-c", "import json, urllib.request; data = json.load(urllib.request.urlopen('http://127.0.0.1:8787/api/setup/status', timeout=3)); raise SystemExit(0 if data.get('initialized') else 1)"]
       interval: 30s

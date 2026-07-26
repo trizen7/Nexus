@@ -26,6 +26,7 @@ from nexus_gateway.app import (
     MediaStore,
     RunTracker,
     StoredFile,
+    _hermes_unavailable_message,
     create_app,
     security_headers,
 )
@@ -1302,11 +1303,19 @@ async def test_health_returns_actionable_sanitized_error_when_hermes_is_unavaila
     assert body["error"]["code"] == "hermes_unavailable"
     assert "\u65e0\u6cd5\u8bbf\u95ee Hermes API" in body["error"]["message"]
     assert "host.docker.internal" in body["error"]["message"]
-    assert "127.0.0.1" in body["error"]["message"]
     serialized = json.dumps(body, ensure_ascii=False)
     assert "sensitive-upstream-detail" not in serialized
     assert "upstream-secret" not in serialized
     assert str(upstream_client.make_url("/")).rstrip("/") not in serialized
+
+
+def test_fnos_host_unavailable_message_uses_loopback_guidance(monkeypatch: pytest.MonkeyPatch):
+    monkeypatch.setenv("NEXUS_DEPLOYMENT_MODE", "fnos-host")
+
+    message = _hermes_unavailable_message()
+
+    assert "127.0.0.1:8642" in message
+    assert "host.docker.internal" not in message
 
 
 @pytest.mark.asyncio

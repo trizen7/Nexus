@@ -45,7 +45,7 @@
     "items": [
       {
         "type": "tips",
-        "helpText": "Nexus 仅调用原版 Hermes HTTP API，不会修改或管理 Hermes。Hermes 与 Nexus 在同一台 NAS 时可使用 host.docker.internal；请勿填写 127.0.0.1。"
+        "helpText": "Nexus 仅调用原版 Hermes HTTP API，不会修改或管理 Hermes。Hermes 与 Nexus 在同一台 NAS 时，建议使用 http://127.0.0.1:8642；Hermes 在其他设备上时，请填写该设备对 NAS 可达的局域网地址。"
       },
       {
         "type": "text",
@@ -60,7 +60,8 @@
             "pattern": "^https?://.+",
             "message": "地址必须以 http:// 或 https:// 开头"
           }
-        ]
+        ],
+        "initValue": "http://127.0.0.1:8642"
       },
       {
         "type": "password",
