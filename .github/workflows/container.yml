@@ -160,7 +160,7 @@ jobs:
         run: |
           python scripts/verify_fnos_package.py "dist/Nexus-fnOS-$FNOS_VERSION-amd64.fpk" --sha256-file dist/SHA256SUMS.txt
           python scripts/verify_fnos_package.py "dist/Nexus-fnOS-$FNOS_VERSION-arm64.fpk" --sha256-file dist/SHA256SUMS.txt
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: Nexus-fnOS-${{ needs.metadata.outputs.fnos_version }}-offline
           path: |
