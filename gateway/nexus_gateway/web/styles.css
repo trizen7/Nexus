@@ -111,6 +111,7 @@ button:focus-visible, input:focus-visible { outline: 3px solid rgba(79, 70, 229,
 .status-row strong { font-size: 13px; text-align: right; }
 .status-value[data-status="ok"] { color: var(--success); }
 .status-value[data-status="error"] { color: var(--danger); }
+.health-message { margin: 0 20px 18px; padding: 11px 13px; border: 1px solid #f4c9cd; border-radius: 13px; color: #9f2f3a; background: var(--danger-soft); font-size: 12px; overflow-wrap: anywhere; }
 .address-value { max-width: 65%; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .welcome-panel { padding: 25px; background: linear-gradient(145deg, #fff, #f2f4ff); }
 .welcome-panel h2 { margin: 7px 0 10px; font-size: 22px; letter-spacing: -.03em; }
@@ -143,6 +144,12 @@ tbody tr:last-child td { border-bottom: 0; }
 .account-form { display: grid; grid-template-columns: 1fr 1fr; gap: 0 16px; padding: 20px; }
 .account-form .form-actions { grid-column: 1 / -1; display: flex; align-items: center; gap: 14px; margin-top: 2px; }
 .account-form .form-message { margin: 0; }
+.hermes-config-panel { grid-column: 1 / -1; }
+.system-form { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 0 16px; padding: 20px; }
+.system-form .form-actions { display: flex; align-items: center; gap: 14px; }
+.system-form .form-message { margin: 0; }
+.hermes-key-state { display: grid; gap: 4px; margin: 0 0 18px; padding: 13px 14px; border: 1px solid #dce2ec; border-radius: 14px; color: #59657a; background: var(--surface-soft); font-size: 12px; }
+.hermes-key-state strong { color: #3e4a60; font-size: 13px; }
 .proxy-content { padding: 21px; }
 .proxy-content p { margin: 0 0 13px; color: #4f5b70; }
 .proxy-content .muted { margin-bottom: 0; color: var(--muted); font-size: 12px; }
@@ -170,8 +177,9 @@ tbody tr:last-child td { border-bottom: 0; }
   .page-head .button { min-height: 38px; padding: 7px 11px; }
   .toolbar { flex-wrap: wrap; }
   .search-box { flex-basis: 100%; max-width: none; }
-  .account-form { grid-template-columns: 1fr; }
-  .account-form .form-actions { grid-column: auto; align-items: flex-start; flex-direction: column; }
+  .account-form, .system-form { grid-template-columns: 1fr; }
+  .account-form .form-actions, .system-form .form-actions { grid-column: auto; align-items: flex-start; flex-direction: column; }
+  .system-form .span-two { grid-column: auto; }
 }
 
 @media (max-width: 540px) {

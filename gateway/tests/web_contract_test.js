@@ -37,6 +37,16 @@ if (!source.includes("fetch('/api/setup/status')") || !source.includes("fetch('/
 if (!source.includes("bootstrap_token: $('setupBootstrapToken').value")) throw Error('Bootstrap token setup contract missing');
 if (!source.includes("'/api/admin/files'") || !source.includes("'/api/admin/audio'") || !source.includes("'/api/admin/account'")) throw Error('Admin API contract missing');
 if (!source.includes("request.open('POST', '/api/uploads')")) throw Error('Managed upload API contract missing');
+if (typeof context.saveHermesConfig !== 'function') throw Error('Hermes configuration submission missing');
+if (!source.includes("api('/api/admin/hermes-config')") || !source.includes("api('/api/admin/hermes-config', {") || !source.includes("method: 'PUT'")) throw Error('Hermes configuration API contract missing');
+const overviewSource = source.slice(source.indexOf('async function loadOverview'), source.indexOf('async function loadHealth'));
+if (overviewSource.includes('gatewayStatus') || overviewSource.includes('hermesStatus')) throw Error('Overview must not overwrite connectivity state');
+const healthSource = source.slice(source.indexOf('async function loadHealth'), source.indexOf('async function loadHermesConfig'));
+if (!healthSource.includes('hermes_auth_failed') || !healthSource.includes('API Key 无效')) throw Error('Hermes authentication failure UI contract missing');
+const hermesIds = ['hermesHealthMessage', 'hermesConfigForm', 'hermesApiUrl', 'hermesApiToken', 'hermesCurrentPassword', 'hermesKeyConfigured', 'hermesConfigMessage'];
+for (const id of hermesIds) if (!html.includes('id="' + id + '"')) throw Error('Hermes configuration field missing: ' + id);
+if (!html.includes('留空保留当前 Key') || !html.includes('API Server Key 永远不会回显')) throw Error('Hermes API Key retention guidance missing');
+if (!css.includes('.health-message') || !css.includes('.system-form') || !css.includes('.hermes-config-panel')) throw Error('Hermes configuration styling missing');
 
 if (source.includes('/api/admin/tls') || source.includes('uploadTlsCertificate') || source.includes('loadTlsStatus')) throw Error('Removed TLS admin code is still present');
 if (html.includes('tlsCertificateFile') || html.includes('tlsPrivateKeyFile') || html.includes('nexus-local-ca.crt')) throw Error('Removed TLS certificate UI is still present');

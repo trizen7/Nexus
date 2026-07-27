@@ -16,7 +16,7 @@ import uuid
 from dataclasses import asdict, dataclass
 from pathlib import Path
 from typing import Any, Callable
-from urllib.parse import quote
+from urllib.parse import quote, urlsplit
 
 from aiohttp import ClientSession, ClientTimeout, web
 
@@ -82,6 +82,9 @@ HERMES_UNAVAILABLE_MESSAGE = _hermes_unavailable_message()
 HERMES_AUTH_FAILED_MESSAGE = (
     "Hermes API Server Key 无效或无权访问，请在 Nexus 配置中检查 Hermes API 地址和 API Server Key"
 )
+HERMES_AUTH_PROBE_PATHS = ("/health/detailed", "/v1/models", "/api/sessions")
+HERMES_AUTH_PROBE_FALLBACK_STATUSES = {404, 405, 501}
+HERMES_PROBE_TIMEOUT = ClientTimeout(total=10, connect=5)
 
 
 def _hermes_auth_failed_error() -> dict[str, dict[str, str]]:
@@ -977,6 +980,100 @@ def _upstream_headers(app: web.Application, request: web.Request) -> dict[str, s
     return headers
 
 
+def _normalize_hermes_api_url(value: str) -> str | None:
+    candidate = value.strip().rstrip("/")
+    if not candidate or any(char.isspace() for char in candidate):
+        return None
+    try:
+        parsed = urlsplit(candidate)
+        _ = parsed.port
+        if (
+            parsed.scheme not in {"http", "https"}
+            or not parsed.hostname
+            or parsed.username is not None
+            or parsed.password is not None
+            or parsed.query
+            or parsed.fragment
+        ):
+            return None
+    except ValueError:
+        return None
+    return candidate
+
+
+def _safe_upstream_label(value: Any) -> str | None:
+    if not isinstance(value, str) or not 1 <= len(value) <= 64:
+        return None
+    return value if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._+ -]*", value) else None
+
+
+def _upstream_summary(payload: Any, *, status: str, http_status: int | None = None) -> dict[str, Any]:
+    summary: dict[str, Any] = {"status": status}
+    if http_status is not None:
+        summary["http_status"] = http_status
+    if isinstance(payload, dict):
+        for key in ("platform", "version"):
+            value = _safe_upstream_label(payload.get(key))
+            if value is not None:
+                summary[key] = value
+    return summary
+
+
+async def _probe_hermes(
+    app: web.Application,
+    *,
+    upstream_url: str | None = None,
+    upstream_token: str | None = None,
+) -> dict[str, Any]:
+    config = app[GATEWAY_CONFIG_KEY]
+    url = (upstream_url or config.upstream_url).rstrip("/")
+    token = config.upstream_token if upstream_token is None else upstream_token
+    session = app[HTTP_SESSION_KEY]
+    try:
+        async with session.get(f"{url}/health", timeout=HERMES_PROBE_TIMEOUT) as response:
+            try:
+                payload = await response.json(content_type=None)
+            except (json.JSONDecodeError, ValueError):
+                payload = None
+            if response.status != 200 or not isinstance(payload, dict) or payload.get("status") != "ok":
+                public_status = payload.get("status") if isinstance(payload, dict) else None
+                safe_status = public_status if public_status in {"degraded", "error", "unavailable"} else "unavailable"
+                return {
+                    "state": "degraded",
+                    "upstream": _upstream_summary(payload, status=safe_status, http_status=response.status),
+                }
+    except Exception:
+        return {"state": "degraded", "upstream": {"status": "unavailable"}}
+
+    public_summary = _upstream_summary(payload, status="ok")
+    headers = {"Authorization": f"Bearer {token}"}
+    for index, probe_path in enumerate(HERMES_AUTH_PROBE_PATHS):
+        try:
+            async with session.get(
+                f"{url}{probe_path}", headers=headers, timeout=HERMES_PROBE_TIMEOUT,
+            ) as response:
+                status = response.status
+        except Exception:
+            unavailable = dict(public_summary)
+            unavailable["status"] = "unavailable"
+            return {"state": "degraded", "upstream": unavailable}
+        if 200 <= status < 300:
+            public_summary["authenticated"] = True
+            return {"state": "ok", "upstream": public_summary}
+        if status in {401, 403}:
+            failed = dict(public_summary)
+            failed.update({"status": "auth_failed", "http_status": status})
+            return {"state": "auth_failed", "upstream": failed}
+        if status in HERMES_AUTH_PROBE_FALLBACK_STATUSES and index < len(HERMES_AUTH_PROBE_PATHS) - 1:
+            continue
+        unavailable = dict(public_summary)
+        unavailable.update({"status": "unavailable", "http_status": status})
+        return {"state": "degraded", "upstream": unavailable}
+    unavailable = dict(public_summary)
+    unavailable["status"] = "unavailable"
+    return {"state": "degraded", "upstream": unavailable}
+
+
 async def admin_page(_request: web.Request) -> web.StreamResponse:
     return web.FileResponse(WEB_ROOT / "index.html")
 
@@ -1079,7 +1176,7 @@ async def setup(request: web.Request) -> web.Response:
         return web.json_response({"error": {"code": "invalid_json", "message": "请求 JSON 无效"}}, status=400)
     username = str(body.get("username", "")).strip()
     password = str(body.get("password", ""))
-    hermes_api_url = str(body.get("hermes_api_url", "")).strip().rstrip("/")
+    hermes_api_url = _normalize_hermes_api_url(str(body.get("hermes_api_url", "")))
     hermes_api_token = str(body.get("hermes_api_token", "")).strip()
     supplied_bootstrap_token = str(body.get("bootstrap_token", ""))
 
@@ -1087,7 +1184,7 @@ async def setup(request: web.Request) -> web.Response:
         return web.json_response({"error": {"code": "invalid_username", "message": "账号长度应为 3–48 个字符"}}, status=400)
     if len(password) < 8:
         return web.json_response({"error": {"code": "weak_password", "message": "密码至少需要 8 个字符"}}, status=400)
-    if not hermes_api_url.startswith(("http://", "https://")):
+    if hermes_api_url is None:
         return web.json_response({"error": {"code": "invalid_hermes_url", "message": "Hermes 地址必须使用 http:// 或 https://"}}, status=400)
     if not hermes_api_token:
         return web.json_response({"error": {"code": "missing_hermes_token", "message": "请填写 Hermes API Server Key"}}, status=400)
@@ -1180,6 +1277,68 @@ async def change_account(request: web.Request) -> web.Response:
     })
 
 
+async def admin_hermes_config(request: web.Request) -> web.Response:
+    config = request.app[GATEWAY_CONFIG_KEY]
+    return web.json_response({
+        "hermes_api_url": config.upstream_url,
+        "key_configured": bool(config.upstream_token),
+    })
+
+
+async def update_hermes_config(request: web.Request) -> web.Response:
+    try:
+        body = await request.json()
+    except (json.JSONDecodeError, ValueError):
+        return web.json_response({"error": {"code": "invalid_json", "message": "请求 JSON 无效"}}, status=400)
+
+    current_password = str(body.get("current_password", ""))
+    hermes_api_url = _normalize_hermes_api_url(str(body.get("hermes_api_url", "")))
+    supplied_token = str(body.get("hermes_api_token", "")).strip()
+    if not _verify_password(current_password, request.app[AUTH_STATE_KEY]):
+        return web.json_response({"error": {"code": "invalid_current_password", "message": "当前密码错误"}}, status=401)
+    if hermes_api_url is None:
+        return web.json_response({"error": {"code": "invalid_hermes_url", "message": "Hermes 地址必须是有效的 http:// 或 https:// 地址"}}, status=400)
+
+    async with request.app[SETUP_LOCK_KEY]:
+        config = request.app[GATEWAY_CONFIG_KEY]
+        hermes_api_token = supplied_token or config.upstream_token
+        if not hermes_api_token:
+            return web.json_response({"error": {"code": "missing_hermes_token", "message": "请填写 Hermes API Server Key"}}, status=400)
+
+        probe = await _probe_hermes(
+            request.app,
+            upstream_url=hermes_api_url,
+            upstream_token=hermes_api_token,
+        )
+        if probe["state"] == "auth_failed":
+            return web.json_response({
+                "status": "degraded",
+                "upstream": probe["upstream"],
+                **_hermes_auth_failed_error(),
+            }, status=422)
+        if probe["state"] != "ok":
+            return web.json_response({
+                "status": "degraded",
+                "upstream": probe["upstream"],
+                "error": {"code": "hermes_unavailable", "message": HERMES_UNAVAILABLE_MESSAGE},
+            }, status=502)
+
+        _write_config(
+            request.app[CONFIG_PATH_KEY],
+            hermes_api_url,
+            hermes_api_token,
+            config.session_secret,
+        )
+        config.upstream_url = hermes_api_url
+        config.upstream_token = hermes_api_token
+
+    return web.json_response({
+        "status": "ok",
+        "hermes_api_url": hermes_api_url,
+        "key_configured": True,
+    })
+
+
 async def admin_files(request: web.Request) -> web.Response:
     return web.json_response({"object": "list", "data": request.app[MEDIA_STORE_KEY].list_files("files")})
 
@@ -1198,11 +1357,16 @@ async def admin_overview(request: web.Request) -> web.Response:
         async with session.get(
             f"{request.app[GATEWAY_CONFIG_KEY].upstream_url}/api/sessions",
             headers={"Authorization": f"Bearer {request.app[GATEWAY_CONFIG_KEY].upstream_token}"},
+            timeout=HERMES_PROBE_TIMEOUT,
         ) as upstream:
-            payload = await upstream.json(content_type=None)
-            if upstream.status == 200:
-                session_count = len(payload.get("data", []))
-                upstream_status = "ok"
+            if upstream.status in {401, 403}:
+                upstream_status = "auth_failed"
+            elif upstream.status == 200:
+                payload = await upstream.json(content_type=None)
+                data = payload.get("data") if isinstance(payload, dict) else None
+                if isinstance(data, list):
+                    session_count = len(data)
+                    upstream_status = "ok"
     except Exception:
         pass
     return web.json_response({
@@ -1224,38 +1388,21 @@ async def health(request: web.Request) -> web.Response:
             "version": __version__,
             "initialized": False,
         })
-    session = request.app[HTTP_SESSION_KEY]
-    try:
-        async with session.get(f"{request.app[GATEWAY_CONFIG_KEY].upstream_url}/health") as upstream:
-            data = await upstream.json(content_type=None)
-            if upstream.status == 200 and isinstance(data, dict) and data.get("status") == "ok":
-                return web.json_response({
-                    "status": "ok",
-                    "gateway": "nexus-mobile-gateway",
-                    "version": __version__,
-                    "upstream": data,
-                })
-            upstream_summary = {
-                "status": data.get("status", "unavailable") if isinstance(data, dict) else "unavailable",
-                "http_status": upstream.status,
-            }
-            if isinstance(data, dict) and data.get("version"):
-                upstream_summary["version"] = data["version"]
-            return web.json_response({
-                "status": "degraded",
-                "gateway": "nexus-mobile-gateway",
-                "version": __version__,
-                "upstream": upstream_summary,
-                "error": {"code": "hermes_unavailable", "message": HERMES_UNAVAILABLE_MESSAGE},
-            }, status=503)
-    except Exception as exc:
-        return web.json_response({
-            "status": "degraded",
-            "gateway": "nexus-mobile-gateway",
-            "version": __version__,
-            "upstream": {"status": "unavailable", "error": type(exc).__name__},
-            "error": {"code": "hermes_unavailable", "message": HERMES_UNAVAILABLE_MESSAGE},
-        }, status=503)
+
+    probe = await _probe_hermes(request.app)
+    payload = {
+        "status": "ok" if probe["state"] == "ok" else "degraded",
+        "gateway": "nexus-mobile-gateway",
+        "version": __version__,
+        "upstream": probe["upstream"],
+    }
+    if probe["state"] == "ok":
+        return web.json_response(payload)
+    if probe["state"] == "auth_failed":
+        payload.update(_hermes_auth_failed_error())
+    else:
+        payload["error"] = {"code": "hermes_unavailable", "message": HERMES_UNAVAILABLE_MESSAGE}
+    return web.json_response(payload, status=503)
 
 
 async def upload(request: web.Request) -> web.Response:
@@ -2142,6 +2289,8 @@ def create_app(
     app.router.add_put("/api/admin/account", change_account)
     app.router.add_route("*", "/api/admin/tls", removed_tls_admin)
     app.router.add_get("/api/admin/overview", admin_overview)
+    app.router.add_get("/api/admin/hermes-config", admin_hermes_config)
+    app.router.add_put("/api/admin/hermes-config", update_hermes_config)
     app.router.add_get("/api/admin/files", admin_files)
     app.router.add_get("/api/admin/audio", admin_audio)
     app.router.add_post("/api/audio/transcriptions", transcribe_upload)

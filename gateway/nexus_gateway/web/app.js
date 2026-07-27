@@ -21,8 +21,16 @@ async function api(url, options = {}) {
   const request = { ...options, headers: { ...(options.headers || {}), ...authHeaders() } };
   const response = await fetch(url, request);
   if (response.status === 401) {
-    logout();
-    throw new Error('登录已失效');
+    let code = '';
+    try {
+      code = (await response.clone().json()).error?.code || '';
+    } catch (_error) {
+      // Only an explicit device-token failure should clear the browser login.
+    }
+    if (code === 'unauthorized') {
+      logout();
+      throw new Error('登录已失效');
+    }
   }
   return response;
 }
@@ -140,11 +148,11 @@ function showPage(name) {
   $('pageDesc').textContent = titles[name][1];
   if (name === 'files') loadFiles();
   if (name === 'audio') loadAudio();
-  if (name === 'system') loadHealth();
+  if (name === 'system') Promise.allSettled([loadHealth(), loadHermesConfig()]);
 }
 
 async function loadAll() {
-  await Promise.allSettled([loadOverview(), loadFiles(), loadAudio(), loadHealth()]);
+  await Promise.allSettled([loadOverview(), loadFiles(), loadAudio(), loadHealth(), loadHermesConfig()]);
 }
 
 async function loadOverview() {
@@ -155,28 +163,73 @@ async function loadOverview() {
   $('metricFiles').textContent = payload.file_count ?? 0;
   $('metricAudio').textContent = payload.audio_count ?? 0;
   $('metricBytes').textContent = size((payload.file_bytes || 0) + (payload.audio_bytes || 0));
-  $('gatewayVersion').textContent = payload.gateway_version || '—';
-  $('gatewayStatus').textContent = '正常';
-  $('gatewayStatus').dataset.status = 'ok';
-  $('hermesStatus').textContent = payload.status === 'ok' ? '正常' : '连接异常';
-  $('hermesStatus').dataset.status = payload.status === 'ok' ? 'ok' : 'error';
 }
 
 async function loadHealth() {
   try {
     const response = await fetch('/health');
     const payload = await response.json();
+    const authFailed = payload.error?.code === 'hermes_auth_failed' || payload.upstream?.status === 'auth_failed';
+    const hermesOk = response.ok && payload.status === 'ok' && payload.upstream?.status === 'ok';
     $('gatewayVersion').textContent = payload.version || '—';
     $('hermesVersion').textContent = payload.upstream?.version || '—';
-    $('gatewayStatus').textContent = payload.status === 'ok' ? '正常' : '异常';
-    $('gatewayStatus').dataset.status = payload.status === 'ok' ? 'ok' : 'error';
-    $('hermesStatus').textContent = payload.upstream?.status === 'ok' ? '正常' : '异常';
-    $('hermesStatus').dataset.status = payload.upstream?.status === 'ok' ? 'ok' : 'error';
+    $('gatewayStatus').textContent = '正常';
+    $('gatewayStatus').dataset.status = 'ok';
+    $('hermesStatus').textContent = authFailed ? 'API Key 无效' : (hermesOk ? '正常' : '连接异常');
+    $('hermesStatus').dataset.status = hermesOk ? 'ok' : 'error';
+    $('hermesHealthMessage').textContent = hermesOk ? '' : (payload.error?.message || '无法连接 Hermes API');
+    $('hermesHealthMessage').classList.toggle('hidden', hermesOk);
   } catch (_error) {
     $('gatewayStatus').textContent = '不可用';
     $('gatewayStatus').dataset.status = 'error';
     $('hermesStatus').textContent = '未知';
     $('hermesStatus').dataset.status = 'error';
+    $('hermesHealthMessage').textContent = '无法读取 Nexus Gateway 状态';
+    $('hermesHealthMessage').classList.remove('hidden');
+  }
+}
+
+async function loadHermesConfig() {
+  const response = await api('/api/admin/hermes-config');
+  if (!response.ok) throw new Error('Hermes 配置读取失败');
+  const payload = await response.json();
+  $('hermesApiUrl').value = payload.hermes_api_url || '';
+  $('hermesKeyConfigured').textContent = payload.key_configured ? '当前已配置 API Server Key' : '当前未配置 API Server Key';
+}
+
+async function saveHermesConfig(event) {
+  event.preventDefault();
+  const button = $('saveHermesConfigButton');
+  const message = $('hermesConfigMessage');
+  message.textContent = '';
+  message.className = 'form-message';
+  button.disabled = true;
+  try {
+    const response = await api('/api/admin/hermes-config', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        current_password: $('hermesCurrentPassword').value,
+        hermes_api_url: $('hermesApiUrl').value.trim(),
+        hermes_api_token: $('hermesApiToken').value,
+      }),
+    });
+    const payload = await response.json();
+    if (!response.ok) {
+      message.textContent = payload.error?.message || 'Hermes 配置保存失败';
+      message.className = 'form-message error';
+      return;
+    }
+    $('hermesApiToken').value = '';
+    $('hermesCurrentPassword').value = '';
+    message.textContent = 'Hermes 连接验证通过，配置已保存';
+    message.className = 'form-message success';
+    await Promise.allSettled([loadHermesConfig(), loadHealth(), loadOverview()]);
+  } catch (_error) {
+    message.textContent = '保存请求失败，请检查 Nexus Gateway 状态';
+    message.className = 'form-message error';
+  } finally {
+    button.disabled = false;
   }
 }
 
@@ -401,6 +454,7 @@ $('setupForm').onsubmit = submitSetup;
 $('loginForm').onsubmit = signIn;
 $('logoutButton').onclick = logout;
 $('accountForm').onsubmit = changeAccount;
+$('hermesConfigForm').onsubmit = saveHermesConfig;
 $('search').oninput = renderFiles;
 $('audioSearch').oninput = renderAudio;
 $('refreshFilesButton').onclick = loadFiles;

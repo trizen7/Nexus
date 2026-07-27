@@ -15,6 +15,7 @@ from aiohttp import FormData, web
 from aiohttp.test_utils import TestClient, TestServer, make_mocked_request
 
 from nexus_gateway.app import (
+    CONFIG_PATH_KEY,
     CREDENTIALS_PATH_KEY,
     EXTERNAL_RUN_OBSERVER_KEY,
     GATEWAY_CONFIG_KEY,
@@ -47,6 +48,11 @@ async def upstream_client():
         "status": 200,
         "payload": {"status": "ok", "gateway_busy": False, "active_agents": 0},
     }
+    models_state = {
+        "status": 200,
+        "payload": {"object": "list", "data": [{"id": "test-model"}]},
+    }
+    expected_auth = {"token": "upstream-secret"}
     session_state = {
         "status": 200,
         "rows": [
@@ -68,17 +74,28 @@ async def upstream_client():
     async def health(_request):
         return web.json_response(health_state["payload"], status=int(health_state["status"]))
 
+    def authorized(request) -> bool:
+        return request.headers.get("Authorization") == f"Bearer {expected_auth['token']}"
+
     async def detailed_health(request):
-        assert request.headers["Authorization"] == "Bearer upstream-secret"
         probe_counts["health_detailed"] += 1
+        if not authorized(request):
+            return web.json_response({"detail": "invalid upstream credential"}, status=401)
         return web.json_response(
             detailed_health_state["payload"],
             status=int(detailed_health_state["status"]),
         )
 
+    async def models(request):
+        probe_counts["models"] = probe_counts.get("models", 0) + 1
+        if not authorized(request):
+            return web.json_response({"detail": "invalid upstream credential"}, status=401)
+        return web.json_response(models_state["payload"], status=int(models_state["status"]))
+
     async def sessions(request):
-        assert request.headers["Authorization"] == "Bearer upstream-secret"
         probe_counts["sessions"] += 1
+        if not authorized(request):
+            return web.json_response({"detail": "invalid upstream credential"}, status=401)
         payload = session_state.get("payload")
         if not isinstance(payload, dict):
             payload = {"object": "list", "data": session_state["rows"]}
@@ -171,6 +188,7 @@ async def upstream_client():
     app = web.Application()
     app.router.add_get("/health", health)
     app.router.add_get("/health/detailed", detailed_health)
+    app.router.add_get("/v1/models", models)
     app.router.add_get("/api/sessions", sessions)
     app.router.add_post("/api/sessions", create_session)
     app.router.add_patch("/api/sessions/{session_id}", update_session)
@@ -188,6 +206,8 @@ async def upstream_client():
     client.chat_started = chat_started
     client.health_state = health_state
     client.detailed_health_state = detailed_health_state
+    client.models_state = models_state
+    client.expected_auth = expected_auth
     client.session_state = session_state
     client.chat_state = chat_state
     client.probe_counts = probe_counts
@@ -1293,6 +1313,57 @@ async def test_health_combines_gateway_and_upstream_state(gateway_client: TestCl
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize("upstream_status", [401, 403])
+async def test_health_rejects_publicly_healthy_hermes_when_api_key_is_invalid(
+    gateway_client: TestClient,
+    upstream_client: TestClient,
+    upstream_status: int,
+):
+    upstream_client.detailed_health_state.update({
+        "status": upstream_status,
+        "payload": {"detail": "bad upstream-secret at http://private-hermes.local"},
+    })
+
+    response = await gateway_client.get("/health")
+
+    assert response.status == 503
+    body = await response.json()
+    assert body["status"] == "degraded"
+    assert body["upstream"] == {
+        "status": "auth_failed",
+        "http_status": upstream_status,
+        "platform": "hermes-agent",
+        "version": "test",
+    }
+    assert body["error"] == {
+        "code": "hermes_auth_failed",
+        "message": "Hermes API Server Key 无效或无权访问，请在 Nexus 配置中检查 Hermes API 地址和 API Server Key",
+    }
+    serialized = json.dumps(body, ensure_ascii=False)
+    assert "upstream-secret" not in serialized
+    assert "private-hermes.local" not in serialized
+
+
+@pytest.mark.asyncio
+async def test_health_falls_back_to_sessions_when_legacy_hermes_lacks_newer_probes(
+    gateway_client: TestClient,
+    upstream_client: TestClient,
+):
+    upstream_client.detailed_health_state["status"] = 404
+    upstream_client.models_state["status"] = 404
+
+    response = await gateway_client.get("/health")
+
+    assert response.status == 200
+    body = await response.json()
+    assert body["status"] == "ok"
+    assert body["upstream"]["authenticated"] is True
+    assert upstream_client.probe_counts["health_detailed"] == 1
+    assert upstream_client.probe_counts["models"] == 1
+    assert upstream_client.probe_counts["sessions"] == 1
+
+
+@pytest.mark.asyncio
 async def test_health_returns_actionable_sanitized_error_when_hermes_is_unavailable(
     gateway_client: TestClient,
     upstream_client: TestClient,
@@ -1409,6 +1480,121 @@ async def test_changed_password_is_stored_as_scrypt_not_plaintext(gateway_client
     saved = json.loads(account_path.read_text(encoding="utf-8"))
     assert "password" not in saved
     assert saved["password_scheme"] == "scrypt"
+
+
+@pytest.mark.asyncio
+async def test_admin_hermes_config_never_returns_api_key(gateway_client: TestClient):
+    response = await gateway_client.get(
+        "/api/admin/hermes-config",
+        headers=await auth_headers(gateway_client),
+    )
+
+    assert response.status == 200
+    raw = await response.text()
+    body = json.loads(raw)
+    assert body == {
+        "hermes_api_url": gateway_client.server.app[GATEWAY_CONFIG_KEY].upstream_url,
+        "key_configured": True,
+    }
+    assert "hermes_api_token" not in body
+    assert "upstream-secret" not in raw
+
+
+@pytest.mark.asyncio
+async def test_admin_hermes_config_rejects_wrong_nexus_password_without_writing(
+    gateway_client: TestClient,
+):
+    config_path = gateway_client.server.app[CONFIG_PATH_KEY]
+    before = config_path.read_bytes()
+    response = await gateway_client.put(
+        "/api/admin/hermes-config",
+        headers=await auth_headers(gateway_client),
+        json={
+            "current_password": "wrong-password",
+            "hermes_api_url": gateway_client.server.app[GATEWAY_CONFIG_KEY].upstream_url,
+            "hermes_api_token": "candidate-secret",
+        },
+    )
+
+    assert response.status == 401
+    assert (await response.json())["error"]["code"] == "invalid_current_password"
+    assert config_path.read_bytes() == before
+    assert gateway_client.server.app[GATEWAY_CONFIG_KEY].upstream_token == "upstream-secret"
+
+
+@pytest.mark.asyncio
+async def test_admin_hermes_config_rejects_bad_key_without_overwriting_old_config(
+    gateway_client: TestClient,
+):
+    config_path = gateway_client.server.app[CONFIG_PATH_KEY]
+    before = config_path.read_bytes()
+    response = await gateway_client.put(
+        "/api/admin/hermes-config",
+        headers=await auth_headers(gateway_client),
+        json={
+            "current_password": "test-password",
+            "hermes_api_url": gateway_client.server.app[GATEWAY_CONFIG_KEY].upstream_url,
+            "hermes_api_token": "invalid-candidate-secret",
+        },
+    )
+
+    assert response.status == 422
+    raw = await response.text()
+    assert json.loads(raw)["error"]["code"] == "hermes_auth_failed"
+    assert "invalid-candidate-secret" not in raw
+    assert "upstream-secret" not in raw
+    assert config_path.read_bytes() == before
+    assert gateway_client.server.app[GATEWAY_CONFIG_KEY].upstream_token == "upstream-secret"
+
+
+@pytest.mark.asyncio
+async def test_admin_hermes_config_atomically_updates_verified_key_without_expiring_login(
+    gateway_client: TestClient,
+    upstream_client: TestClient,
+):
+    headers = await auth_headers(gateway_client)
+    upstream_client.expected_auth["token"] = "replacement-secret"
+    response = await gateway_client.put(
+        "/api/admin/hermes-config",
+        headers=headers,
+        json={
+            "current_password": "test-password",
+            "hermes_api_url": gateway_client.server.app[GATEWAY_CONFIG_KEY].upstream_url,
+            "hermes_api_token": "replacement-secret",
+        },
+    )
+
+    assert response.status == 200
+    raw = await response.text()
+    body = json.loads(raw)
+    assert body["status"] == "ok"
+    assert body["key_configured"] is True
+    assert "replacement-secret" not in raw
+    config = gateway_client.server.app[GATEWAY_CONFIG_KEY]
+    assert config.upstream_token == "replacement-secret"
+    saved = json.loads(gateway_client.server.app[CONFIG_PATH_KEY].read_text(encoding="utf-8"))
+    assert saved["hermes_api_token"] == "replacement-secret"
+    assert saved["session_secret"] == config.session_secret
+
+    still_logged_in = await gateway_client.get("/api/sessions", headers=headers)
+    assert still_logged_in.status == 200
+
+
+@pytest.mark.asyncio
+async def test_admin_hermes_config_blank_key_keeps_existing_verified_key(gateway_client: TestClient):
+    response = await gateway_client.put(
+        "/api/admin/hermes-config",
+        headers=await auth_headers(gateway_client),
+        json={
+            "current_password": "test-password",
+            "hermes_api_url": gateway_client.server.app[GATEWAY_CONFIG_KEY].upstream_url,
+            "hermes_api_token": "",
+        },
+    )
+
+    assert response.status == 200
+    saved = json.loads(gateway_client.server.app[CONFIG_PATH_KEY].read_text(encoding="utf-8"))
+    assert saved["hermes_api_token"] == "upstream-secret"
 
 
 @pytest.mark.asyncio
@@ -1656,6 +1842,30 @@ async def test_admin_overview_combines_gateway_files_and_hermes_sessions(gateway
     assert body["status"] == "ok"
     assert body["session_count"] == 1
     assert body["file_count"] == 0
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    ("upstream_status", "expected_status"),
+    [(401, "auth_failed"), (403, "auth_failed"), (503, "degraded")],
+)
+async def test_admin_overview_distinguishes_hermes_auth_and_availability_failures(
+    gateway_client: TestClient,
+    upstream_client: TestClient,
+    upstream_status: int,
+    expected_status: str,
+):
+    upstream_client.session_state["status"] = upstream_status
+
+    response = await gateway_client.get(
+        "/api/admin/overview",
+        headers=await auth_headers(gateway_client),
+    )
+
+    assert response.status == 200
+    body = await response.json()
+    assert body["status"] == expected_status
+    assert body["session_count"] == 0
 
 
 @pytest.mark.asyncio

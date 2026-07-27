@@ -145,9 +145,9 @@ powershell -NoProfile -ExecutionPolicy Bypass -File ".\成品\本地测试环境
 
 ## 当前正式版成品
 
-正式成品由发布脚本生成到被 Git 忽略的 `成品/v0.1.7/`，包含官方签名 Release APK、Gateway ZIP、amd64 与 arm64 两个原生自包含 fnOS FPK，以及唯一的 `SHA256SUMS.txt`。两个 FPK 均内置对应架构的 Gateway 原生运行时，fnOS 设备无需 Docker，安装、升级和启动时不访问 GitHub、GHCR 或 Docker Hub。第三方许可声明保留在 Gateway ZIP 中。独立验收环境仍只部署 Gateway ZIP，不读取源码、不运行 Docker，也不接触签名私钥；其 `18787` 端口与 fnOS 默认 `8787` 无关。
+正式成品由发布脚本生成到被 Git 忽略的 `成品/v0.1.8/`，包含官方签名 Release APK、Gateway ZIP、amd64 与 arm64 两个原生自包含 fnOS FPK，以及唯一的 `SHA256SUMS.txt`。两个 FPK 均内置对应架构的 Gateway 原生运行时，fnOS 设备无需 Docker，安装、升级和启动时不访问 GitHub、GHCR 或 Docker Hub。第三方许可声明保留在 Gateway ZIP 中。独立验收环境仍只部署 Gateway ZIP，不读取源码、不运行 Docker，也不接触签名私钥；其 `18787` 端口与 fnOS 默认 `8787` 无关。
 
-手机验收应安装 `Nexus-Android-0.1.7-release.apk`；升级已有官方版本前应确认 APK 签名来自同一官方发布密钥。
+手机验收应安装 `Nexus-Android-0.1.8-release.apk`；升级已有官方版本前应确认 APK 签名来自同一官方发布密钥。
 
 ## 0.0.15 成品
 
