@@ -9,7 +9,7 @@ ENV DEBIAN_FRONTEND=noninteractive \
 WORKDIR /build
 
 RUN apt-get update \
-    && apt-get install --yes --no-install-recommends ca-certificates \
+    && apt-get install --yes --no-install-recommends binutils ca-certificates \
     && rm -rf /var/lib/apt/lists/*
 
 COPY requirements.txt requirements-fnos.txt ./

@@ -597,6 +597,7 @@ def test_fnos_build_and_workflows_export_native_runtime_directories() -> None:
     assert "PythonPath" in build_script
     release_script = (ROOT / "scripts" / "build-android-release.ps1").read_text(encoding="utf-8")
     assert "PythonPath = $pythonCommand" in release_script
+    assert "binutils" in dockerfile
     assert "FROM scratch AS runtime" in dockerfile
     assert "cp -aL" in dockerfile
     assert "find /runtime -type l" in dockerfile
