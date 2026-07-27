@@ -49,6 +49,44 @@ jobs:
       - name: Validate Compose configuration
         run: docker compose config
 
+  fnos-native-package:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - uses: docker/setup-qemu-action@v3
+      - uses: docker/setup-buildx-action@v3
+      - name: Build architecture-specific native runtimes
+        run: |
+          set -euo pipefail
+          for architecture in amd64 arm64; do
+            docker buildx build \
+              --file gateway/FnOS.Dockerfile \
+              --platform "linux/$architecture" \
+              --output "type=local,dest=$RUNNER_TEMP/nexus-runtime-$architecture" \
+              --provenance=false \
+              gateway
+          done
+      - name: Download and verify official fnpack
+        env:
+          FNPACK_SHA256: 54b97fa7b70968c4d05c79840f5daeff508957d0bb2062fdb0376d00d9615c93
+        run: |
+          curl --fail --silent --show-error --location \
+            "https://static2.fnnas.com/fnpack/fnpack-1.2.3-linux-amd64" \
+            --output "$RUNNER_TEMP/fnpack"
+          echo "$FNPACK_SHA256  $RUNNER_TEMP/fnpack" | sha256sum --check --strict
+          chmod 0755 "$RUNNER_TEMP/fnpack"
+      - name: Build and verify native fnOS packages
+        shell: pwsh
+        run: |
+          ./scripts/build_fnos_package.ps1 -OutputDirectory dist -Platform amd64 -RuntimeDirectoryPath "$env:RUNNER_TEMP/nexus-runtime-amd64" -FnpackPath "$env:RUNNER_TEMP/fnpack"
+          ./scripts/build_fnos_package.ps1 -OutputDirectory dist -Platform arm64 -RuntimeDirectoryPath "$env:RUNNER_TEMP/nexus-runtime-arm64" -FnpackPath "$env:RUNNER_TEMP/fnpack"
+          $fnosVersion = (Select-String -Path fnos/nexus-gateway/manifest -Pattern '^version=(.+)$').Matches[0].Groups[1].Value
+          python scripts/verify_fnos_package.py "dist/Nexus-fnOS-$fnosVersion-amd64.fpk" --sha256-file dist/SHA256SUMS.txt
+          python scripts/verify_fnos_package.py "dist/Nexus-fnOS-$fnosVersion-arm64.fpk" --sha256-file dist/SHA256SUMS.txt
+
   android:
     runs-on: ubuntu-latest
     steps:

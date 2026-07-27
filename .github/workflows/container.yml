@@ -6,7 +6,7 @@ on:
       gateway_source_ref:
         description: Git ref containing the Gateway source to publish
         required: true
-        default: v0.1.5
+        default: main
         type: string
       image_tag:
         description: GHCR tag; blank uses the Gateway source version
@@ -70,12 +70,10 @@ jobs:
           if not re.fullmatch(rf"{re.escape(version)}-fnos[1-9][0-9]*", fnos_version):
               raise SystemExit("fnOS package version does not match Gateway version")
 
-          compose = Path("fnos/nexus-gateway/app/docker/docker-compose.yaml").read_text(encoding="utf-8")
-          expected = f"nexus-gateway-fnos:{version}"
-          if not re.search(rf"(?m)^\s*image:\s*{re.escape(expected)}\s*$", compose):
-              raise SystemExit(f"fnOS package must use the local image {expected}")
-          if not re.search(r"(?m)^\s*pull_policy:\s*never\s*$", compose):
-              raise SystemExit("fnOS package must disable remote image pulls")
+          if Path("fnos/nexus-gateway/app/docker").exists():
+              raise SystemExit("fnOS package source must not contain a Docker project")
+          if Path("fnos/nexus-gateway/config/resource").read_text(encoding="utf-8").strip() != "{}":
+              raise SystemExit("fnOS native package must use an empty resource declaration")
 
           source_ref = os.environ["GATEWAY_SOURCE_REF"].strip()
           if not source_ref:
@@ -127,20 +125,16 @@ jobs:
           ref: ${{ needs.metadata.outputs.gateway_source_ref }}
       - uses: docker/setup-qemu-action@v3
       - uses: docker/setup-buildx-action@v3
-      - name: Build architecture-specific fnOS image archives
-        env:
-          VERSION: ${{ needs.metadata.outputs.image_tag }}
+      - name: Build architecture-specific native fnOS runtimes
         run: |
           set -euo pipefail
           for architecture in amd64 arm64; do
             docker buildx build \
-              --file gateway/Dockerfile \
+              --file gateway/FnOS.Dockerfile \
               --platform "linux/$architecture" \
-              --tag "nexus-gateway-fnos:$VERSION" \
-              --output "type=docker,dest=$RUNNER_TEMP/nexus-gateway-$architecture.tar" \
+              --output "type=local,dest=$RUNNER_TEMP/nexus-runtime-$architecture" \
               --provenance=false \
               gateway
-            gzip --no-name --best "$RUNNER_TEMP/nexus-gateway-$architecture.tar"
           done
       - name: Download and verify official fnpack
         run: |
@@ -152,8 +146,8 @@ jobs:
       - name: Build self-contained fnOS packages
         shell: pwsh
         run: |
-          ./scripts/build_fnos_package.ps1 -OutputDirectory dist -Platform amd64 -ImageArchivePath "$env:RUNNER_TEMP/nexus-gateway-amd64.tar.gz" -FnpackPath "$env:RUNNER_TEMP/fnpack"
-          ./scripts/build_fnos_package.ps1 -OutputDirectory dist -Platform arm64 -ImageArchivePath "$env:RUNNER_TEMP/nexus-gateway-arm64.tar.gz" -FnpackPath "$env:RUNNER_TEMP/fnpack"
+          ./scripts/build_fnos_package.ps1 -OutputDirectory dist -Platform amd64 -RuntimeDirectoryPath "$env:RUNNER_TEMP/nexus-runtime-amd64" -FnpackPath "$env:RUNNER_TEMP/fnpack"
+          ./scripts/build_fnos_package.ps1 -OutputDirectory dist -Platform arm64 -RuntimeDirectoryPath "$env:RUNNER_TEMP/nexus-runtime-arm64" -FnpackPath "$env:RUNNER_TEMP/fnpack"
       - name: Verify self-contained fnOS packages
         env:
           FNOS_VERSION: ${{ needs.metadata.outputs.fnos_version }}

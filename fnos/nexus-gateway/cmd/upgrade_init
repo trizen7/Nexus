@@ -4,6 +4,5 @@ SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)"
 # shellcheck source=setup_common.sh
 . "$SCRIPT_DIR/setup_common.sh"
 
-# Nexus loads only its own packaged image. Hermes remains an external read-only API dependency.
-load_packaged_image
+validate_packaged_runtime
 exit 0

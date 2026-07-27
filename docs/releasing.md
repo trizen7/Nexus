@@ -5,7 +5,7 @@
 ## 1. 版本一致性
 
 1. 按语义化版本更新 Android `versionCode/versionName`、Gateway `__version__`、Compose 镜像标签、README 和 Docker 契约测试。
-2. 更新 `fnos/nexus-gateway/manifest` 的 fnOS 修订号，并同步本地镜像标签、测试与文档。
+2. 更新 `fnos/nexus-gateway/manifest` 的 fnOS 修订号，并同步原生运行时构建、测试与文档。
 3. 依赖、权限或数据流发生变化时，同步更新隐私说明和第三方依赖声明。
 4. 使用 Nexus 自有 Python 环境运行：
 
@@ -38,21 +38,21 @@
 
 发布密钥应使用 RSA 4096、SHA256withRSA 和 PKCS12，长期离线备份。密码不得出现在命令历史、日志、截图、Issue、提交或 Release。密钥丢失会阻止已安装用户直接升级；轮换必须作为安全事件单独处理。
 
-## 3. fnOS 自包含镜像归档
+## 3. fnOS 自包含原生运行时
 
-完整正式发布需要两个预先生成的 gzip Docker save 归档：
+完整正式发布需要两个预先生成的 Gateway 原生运行时目录：
 
-- `linux/amd64`，镜像标签为 `nexus-gateway-fnos:<Gateway 版本>`；
-- `linux/arm64`，镜像标签相同。
+- `linux/amd64`；
+- `linux/arm64`。
 
-本地发布脚本只校验并封装归档，不运行 Docker。正式归档通常由 GitHub Actions 使用 Buildx 分架构构建，并通过 `gzip --no-name --best` 压缩。归档、FPK 和任何临时载荷只能放在 Nexus 自有且被 Git 忽略的目录中，不得提交到源码树。
+每个目录只能包含 `ca-certificates.crt` 与 PyInstaller onedir 形式的 `nexus-gateway/`。本地发布脚本只校验并封装运行时，不运行 Docker。正式运行时通常由 GitHub Actions 使用 `gateway/FnOS.Dockerfile` 和 Buildx 分架构构建并以本地目录导出；Buildx 仅用于构建，FPK 不包含 Docker 镜像、Compose 或容器运行依赖。运行时、FPK 和任何临时载荷只能放在 Nexus 自有且被 Git 忽略的目录中，不得提交到源码树。
 
 ## 4. 本地正式构建
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\build-android-release.ps1 `
-  -FnOSAmd64ImageArchivePath .local-test\images\nexus-gateway-amd64.tar.gz `
-  -FnOSArm64ImageArchivePath .local-test\images\nexus-gateway-arm64.tar.gz
+  -FnOSAmd64RuntimeDirectoryPath .local-test\runtime\amd64 `
+  -FnOSArm64RuntimeDirectoryPath .local-test\runtime\arm64
 ```
 
 默认输出到 `成品/v<version>/`。完整版本只允许以下五个文件：
@@ -65,7 +65,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\build-android-rele
 
 `SHA256SUMS.txt` 只包含前四个二进制附件的 SHA-256。发布目录和 GitHub Release 不生成或上传 AAB、独立 `.fpk.sha256`、`release-manifest.json`、误拼的 `renease-manifest.json`、独立第三方声明、更新记录、开发计划或 TODO。第三方许可声明只保留在源码仓库与 Gateway ZIP 内。Release 正文保持为空。
 
-如果不提供两个 fnOS 镜像归档，脚本只构建 Android APK 与 Gateway ZIP，不能作为完整正式发布结果。
+如果不提供两个 fnOS 原生运行时目录，脚本只构建 Android APK 与 Gateway ZIP，不能作为完整正式发布结果。
 
 ## 5. GitHub Actions 签名秘密
 
@@ -85,10 +85,10 @@ Base64 只是一种传输编码，不是加密。私钥原件应保留离线备�
 3. 确认目标版本尚未存在正式 GitHub Release；已发布版本不得覆盖。
 4. 创建 Tag `v<version>`，Tag 必须指向 `main` 上已验证的发布提交。
 5. 推送 Tag。
-6. `.github/workflows/release.yml` 重新执行测试、构建签名 APK、分别构建 amd64/arm64 自包含 FPK，并创建空正文 Release。
+6. `.github/workflows/release.yml` 重新执行测试、构建签名 APK、分别构建 amd64/arm64 原生运行时与自包含 FPK，并创建空正文 Release。
 7. 下载五个 Release 附件，复核附件数量与名称、统一 SHA-256、APK 证书指纹、FPK 架构和 Gateway ZIP 清单。
 
-fnOS FPK 内置完整 Gateway 镜像，安装、升级和启动时不会访问 GitHub、GHCR 或 Docker Hub。工作流仍可额外发布 GHCR 多架构镜像，供普通 Docker 部署选择，但 FPK 不引用它。
+fnOS FPK 内置完整 Gateway 原生运行时，设备无需 Docker；安装、升级和启动时不会访问 GitHub、GHCR 或 Docker Hub。工作流仍可额外发布 GHCR 多架构镜像，供普通 Docker 部署选择，但 FPK 不引用它。
 
 ## 7. 私有仓库安全设置
 

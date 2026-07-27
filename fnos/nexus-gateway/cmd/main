@@ -1,26 +1,240 @@
 #!/bin/bash
 
-CONTAINER_NAME="nexus-gateway-fnos"
+set -u
 
-is_running() {
-  docker inspect --format '{{.State.Running}}' "$CONTAINER_NAME" 2>/dev/null | grep -qx 'true'
+SCRIPT_DIR="$(CDPATH= cd -- "$(dirname -- "$0")" && pwd -P)"
+# shellcheck source=setup_common.sh
+. "$SCRIPT_DIR/setup_common.sh"
+
+require_absolute_directory "${TRIM_APPDEST:-}" "Nexus application directory"
+require_pkgvar
+
+RUNTIME_DIR="$TRIM_APPDEST/runtime"
+EXECUTABLE="$RUNTIME_DIR/$RUNTIME_EXECUTABLE"
+PID_FILE="$TRIM_PKGVAR/nexus-gateway.pid"
+LOG_FILE="$TRIM_PKGVAR/nexus-gateway.log"
+MEDIA_DIR="$TRIM_PKGVAR/media"
+TMP_DIR="$TRIM_PKGVAR/tmp"
+
+resolve_expected_executable() {
+  local executable_dir
+  executable_dir=$(CDPATH= cd -- "$(dirname -- "$EXECUTABLE")" 2>/dev/null && pwd -P) || return 1
+  printf '%s/%s\n' "$executable_dir" "$(basename -- "$EXECUTABLE")"
+}
+
+process_start_ticks() {
+  local pid="$1"
+  local stat_line
+  local stat_fields
+  [ -r "/proc/$pid/stat" ] || return 1
+  stat_line=$(cat "/proc/$pid/stat" 2>/dev/null) || return 1
+  stat_fields=${stat_line##*) }
+  set -- $stat_fields
+  [ "$#" -ge 20 ] || return 1
+  shift 19
+  case "$1" in
+    ""|*[!0-9]*) return 1 ;;
+  esac
+  printf '%s\n' "$1"
+}
+
+read_pid_record() {
+  local size
+  local record
+  PID_VALUE=""
+  START_VALUE=""
+  [ -f "$PID_FILE" ] && [ ! -L "$PID_FILE" ] || return 1
+  size=$(wc -c < "$PID_FILE" 2>/dev/null) || return 1
+  [ "$size" -le 128 ] || return 1
+  record=$(cat "$PID_FILE" 2>/dev/null) || return 1
+  set -- $record
+  [ "$#" -eq 2 ] || return 1
+  case "$1" in
+    ""|0|1|*[!0-9]*) return 1 ;;
+  esac
+  case "$2" in
+    ""|0|*[!0-9]*) return 1 ;;
+  esac
+  PID_VALUE="$1"
+  START_VALUE="$2"
+  return 0
+}
+
+is_managed_process() {
+  local pid="$1"
+  local expected_start="$2"
+  local actual_start
+  local actual_executable
+  local expected_executable
+  kill -0 "$pid" 2>/dev/null || return 1
+  actual_start=$(process_start_ticks "$pid") || return 1
+  [ "$actual_start" = "$expected_start" ] || return 1
+  actual_executable=$(readlink "/proc/$pid/exe" 2>/dev/null) || return 1
+  expected_executable=$(resolve_expected_executable) || return 1
+  [ "$actual_executable" = "$expected_executable" ]
+}
+
+remove_stale_pid_file() {
+  case "$PID_FILE" in
+    "$TRIM_PKGVAR"/*) rm -f -- "$PID_FILE" 2>/dev/null || fail_setup "Unsafe Nexus PID file" ;;
+    *) fail_setup "Unsafe Nexus PID path" ;;
+  esac
+}
+
+status_gateway() {
+  if ! read_pid_record; then
+    remove_stale_pid_file
+    return 1
+  fi
+  if is_managed_process "$PID_VALUE" "$START_VALUE"; then
+    return 0
+  fi
+  remove_stale_pid_file
+  return 1
+}
+
+write_pid_record() {
+  local pid="$1"
+  local start_ticks="$2"
+  local temporary="$TRIM_PKGVAR/.nexus-gateway.pid.$$"
+  case "$temporary" in
+    "$TRIM_PKGVAR"/.nexus-gateway.pid.*) ;;
+    *) fail_setup "Unsafe Nexus PID path" ;;
+  esac
+  [ ! -L "$PID_FILE" ] || fail_setup "Unsafe Nexus PID file"
+  umask 077
+  printf '%s %s\n' "$pid" "$start_ticks" > "$temporary"
+  chmod 600 "$temporary"
+  mv -f -- "$temporary" "$PID_FILE"
+}
+
+ensure_private_directory() {
+  local directory="$1"
+  case "$directory" in
+    "$TRIM_PKGVAR"/*) ;;
+    *) fail_setup "Unsafe Nexus data path" ;;
+  esac
+  if [ -e "$directory" ] || [ -L "$directory" ]; then
+    [ -d "$directory" ] && [ ! -L "$directory" ] || fail_setup "Unsafe Nexus data directory"
+  else
+    mkdir -- "$directory" || fail_setup "Nexus data directory could not be created"
+  fi
+  chmod 700 "$directory"
+}
+
+prepare_log_file() {
+  local size
+  [ ! -L "$LOG_FILE" ] || fail_setup "Unsafe Nexus log path"
+  if [ -e "$LOG_FILE" ] && [ ! -f "$LOG_FILE" ]; then
+    fail_setup "Unsafe Nexus log path"
+  fi
+  if [ -f "$LOG_FILE" ]; then
+    size=$(wc -c < "$LOG_FILE" 2>/dev/null || printf '0')
+    case "$size" in
+      ""|*[!0-9]*) size=0 ;;
+    esac
+    if [ "$size" -gt 10485760 ]; then
+      [ ! -L "$LOG_FILE.1" ] || fail_setup "Unsafe Nexus rotated log path"
+      if [ -e "$LOG_FILE.1" ] && [ ! -f "$LOG_FILE.1" ]; then
+        fail_setup "Unsafe Nexus rotated log path"
+      fi
+      rm -f -- "$LOG_FILE.1"
+      mv -- "$LOG_FILE" "$LOG_FILE.1"
+    fi
+  fi
+  : >> "$LOG_FILE"
+  chmod 600 "$LOG_FILE"
+}
+
+start_gateway() {
+  local pid
+  local start_ticks
+  local count
+  if status_gateway; then
+    return 0
+  fi
+
+  validate_runtime_dir "$RUNTIME_DIR"
+  ensure_private_directory "$MEDIA_DIR"
+  ensure_private_directory "$TMP_DIR"
+  prepare_log_file
+
+  export HOME="$TRIM_PKGVAR"
+  export TMPDIR="$TMP_DIR"
+  export NEXUS_FNOS_DATA_DIR="$TRIM_PKGVAR"
+  export NEXUS_GATEWAY_HOST="0.0.0.0"
+  export NEXUS_GATEWAY_PORT="8787"
+  export NEXUS_CONFIG_FILE="$TRIM_PKGVAR/config.json"
+  export NEXUS_CREDENTIALS_FILE="$TRIM_PKGVAR/account.json"
+  export NEXUS_BOOTSTRAP_TOKEN_FILE="$TRIM_PKGVAR/bootstrap.token"
+  export NEXUS_MEDIA_DIR="$MEDIA_DIR"
+  export NEXUS_DEPLOYMENT_MODE="fnos-host"
+  export SSL_CERT_FILE="$RUNTIME_DIR/$RUNTIME_CA_BUNDLE"
+
+  command -v nohup >/dev/null 2>&1 || fail_setup "Nexus process launcher is unavailable on this device"
+  command -v readlink >/dev/null 2>&1 || fail_setup "Nexus process verification is unavailable on this device"
+  nohup "$EXECUTABLE" >> "$LOG_FILE" 2>&1 &
+  pid=$!
+  start_ticks=""
+  count=0
+  while [ "$count" -lt 10 ]; do
+    start_ticks=$(process_start_ticks "$pid" 2>/dev/null || true)
+    [ -n "$start_ticks" ] && break
+    kill -0 "$pid" 2>/dev/null || break
+    sleep 1
+    count=$((count + 1))
+  done
+  if [ -z "$start_ticks" ]; then
+    wait "$pid" 2>/dev/null || true
+    fail_setup "Nexus Gateway could not be started; see the private Nexus application log"
+  fi
+
+  write_pid_record "$pid" "$start_ticks"
+  sleep 2
+  if ! is_managed_process "$pid" "$start_ticks"; then
+    remove_stale_pid_file
+    wait "$pid" 2>/dev/null || true
+    fail_setup "Nexus Gateway stopped during startup; see the private Nexus application log"
+  fi
+  return 0
+}
+
+stop_gateway() {
+  local pid
+  local start_ticks
+  local count
+  if ! read_pid_record; then
+    remove_stale_pid_file
+    return 0
+  fi
+  pid="$PID_VALUE"
+  start_ticks="$START_VALUE"
+  if ! is_managed_process "$pid" "$start_ticks"; then
+    remove_stale_pid_file
+    return 0
+  fi
+
+  kill -TERM "$pid" 2>/dev/null || true
+  count=0
+  while is_managed_process "$pid" "$start_ticks" && [ "$count" -lt 20 ]; do
+    sleep 1
+    count=$((count + 1))
+  done
+  if is_managed_process "$pid" "$start_ticks"; then
+    kill -KILL "$pid" 2>/dev/null || true
+  fi
+  remove_stale_pid_file
+  return 0
 }
 
 case "${1:-}" in
-  start|stop)
-    # fnOS manages the declared Docker project lifecycle.
-    exit 0
-    ;;
+  start) start_gateway ;;
+  stop) stop_gateway ;;
   status)
-    if is_running; then
+    if status_gateway; then
       exit 0
     fi
     exit 3
     ;;
-  *)
-    if [ -n "${TRIM_TEMP_LOGFILE:-}" ]; then
-      printf '%s\n' "Unknown Nexus command" > "$TRIM_TEMP_LOGFILE"
-    fi
-    exit 1
-    ;;
+  *) fail_setup "Unknown Nexus command" ;;
 esac

@@ -22,8 +22,8 @@ android {
         applicationId = "app.nexus.mobile"
         minSdk = 26
         targetSdk = 35
-        versionCode = 21
-        versionName = "0.1.5"
+        versionCode = 22
+        versionName = "0.1.6"
 
         testInstrumentationRunner = "androidx.test.runner.AndroidJUnitRunner"
     }

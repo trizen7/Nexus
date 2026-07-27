@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Apply one-shot fnOS wizard values inside Nexus' own data directory."""
+"""Apply one-shot fnOS wizard values, then start the native Gateway runtime."""
 
 from __future__ import annotations
 
@@ -17,10 +17,10 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlsplit
 
-DATA_DIR = Path("/data")
+DATA_DIR = Path(os.getenv("NEXUS_FNOS_DATA_DIR", "/data"))
 SETUP_DIR = DATA_DIR / ".fnos-setup"
-ACCOUNT_PATH = DATA_DIR / "account.json"
-CONFIG_PATH = DATA_DIR / "config.json"
+ACCOUNT_PATH = Path(os.getenv("NEXUS_CREDENTIALS_FILE", str(DATA_DIR / "account.json")))
+CONFIG_PATH = Path(os.getenv("NEXUS_CONFIG_FILE", str(DATA_DIR / "config.json")))
 MAX_FIELD_BYTES = 64 * 1024
 SETUP_FIELDS = {
     "mode",
@@ -237,7 +237,20 @@ def _migrate_fnos_host_config() -> None:
         _atomic_json_write(CONFIG_PATH, updated_config)
 
 
+def _validate_nexus_paths() -> None:
+    if not DATA_DIR.is_absolute():
+        raise SetupError("Nexus data directory must be absolute")
+    data_root = DATA_DIR.resolve(strict=False)
+    for path in (SETUP_DIR, ACCOUNT_PATH, CONFIG_PATH):
+        if not path.is_absolute():
+            raise SetupError(f"Nexus data path must be absolute: {path.name}")
+        resolved = path.resolve(strict=False)
+        if resolved != data_root and data_root not in resolved.parents:
+            raise SetupError(f"Nexus data path is outside the Nexus data directory: {path.name}")
+
+
 def apply_pending_setup() -> None:
+    _validate_nexus_paths()
     _migrate_fnos_host_config()
     if not _validate_setup_directory():
         return
@@ -317,10 +330,10 @@ def apply_pending_setup() -> None:
 
 
 def main() -> None:
-    if len(sys.argv) < 2:
-        raise SetupError("missing Nexus Gateway command")
     apply_pending_setup()
-    os.execvp(sys.argv[1], sys.argv[1:])
+    from nexus_gateway.__main__ import main as gateway_main
+
+    gateway_main()
 
 
 if __name__ == "__main__":

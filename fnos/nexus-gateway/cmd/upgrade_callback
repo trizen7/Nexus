@@ -1,4 +1,4 @@
 #!/bin/bash
 
-# fnOS recreates the declared Docker project with the packaged Compose definition.
+# fnOS replaces only the Nexus application runtime. Persistent Nexus data stays in TRIM_PKGVAR.
 exit 0

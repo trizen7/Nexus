@@ -111,20 +111,16 @@ jobs:
       - uses: docker/setup-qemu-action@v3
       - uses: docker/setup-buildx-action@v3
 
-      - name: Build architecture-specific fnOS image archives
-        env:
-          VERSION: ${{ steps.release-metadata.outputs.version }}
+      - name: Build architecture-specific native fnOS runtimes
         run: |
           set -euo pipefail
           for architecture in amd64 arm64; do
             docker buildx build \
-              --file gateway/Dockerfile \
+              --file gateway/FnOS.Dockerfile \
               --platform "linux/$architecture" \
-              --tag "nexus-gateway-fnos:$VERSION" \
-              --output "type=docker,dest=$RUNNER_TEMP/nexus-gateway-$architecture.tar" \
+              --output "type=local,dest=$RUNNER_TEMP/nexus-runtime-$architecture" \
               --provenance=false \
               gateway
-            gzip --no-name --best "$RUNNER_TEMP/nexus-gateway-$architecture.tar"
           done
 
       - name: Log in to GitHub Container Registry
@@ -164,8 +160,8 @@ jobs:
       - name: Build self-contained fnOS packages
         shell: pwsh
         run: |
-          ./scripts/build_fnos_package.ps1 -OutputDirectory dist -Platform amd64 -ImageArchivePath "$env:RUNNER_TEMP/nexus-gateway-amd64.tar.gz" -FnpackPath "$env:RUNNER_TEMP/fnpack"
-          ./scripts/build_fnos_package.ps1 -OutputDirectory dist -Platform arm64 -ImageArchivePath "$env:RUNNER_TEMP/nexus-gateway-arm64.tar.gz" -FnpackPath "$env:RUNNER_TEMP/fnpack"
+          ./scripts/build_fnos_package.ps1 -OutputDirectory dist -Platform amd64 -RuntimeDirectoryPath "$env:RUNNER_TEMP/nexus-runtime-amd64" -FnpackPath "$env:RUNNER_TEMP/fnpack"
+          ./scripts/build_fnos_package.ps1 -OutputDirectory dist -Platform arm64 -RuntimeDirectoryPath "$env:RUNNER_TEMP/nexus-runtime-arm64" -FnpackPath "$env:RUNNER_TEMP/fnpack"
 
       - name: Verify self-contained fnOS packages
         env:

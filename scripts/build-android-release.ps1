@@ -1,8 +1,8 @@
 ﻿[CmdletBinding()]
 param(
     [string]$OutputDirectory,
-    [string]$FnOSAmd64ImageArchivePath,
-    [string]$FnOSArm64ImageArchivePath,
+    [string]$FnOSAmd64RuntimeDirectoryPath,
+    [string]$FnOSArm64RuntimeDirectoryPath,
     [string]$FnpackPath = ""
 )
 
@@ -70,12 +70,12 @@ if (-not (Test-Path -LiteralPath $CredentialsPath -PathType Leaf)) {
     throw "Release signing credentials are not initialized in .release-signing."
 }
 
-$HasAmd64Archive = -not [string]::IsNullOrWhiteSpace($FnOSAmd64ImageArchivePath)
-$HasArm64Archive = -not [string]::IsNullOrWhiteSpace($FnOSArm64ImageArchivePath)
-if ($HasAmd64Archive -ne $HasArm64Archive) {
-    throw "Provide both -FnOSAmd64ImageArchivePath and -FnOSArm64ImageArchivePath, or provide neither."
+$HasAmd64Runtime = -not [string]::IsNullOrWhiteSpace($FnOSAmd64RuntimeDirectoryPath)
+$HasArm64Runtime = -not [string]::IsNullOrWhiteSpace($FnOSArm64RuntimeDirectoryPath)
+if ($HasAmd64Runtime -ne $HasArm64Runtime) {
+    throw "Provide both -FnOSAmd64RuntimeDirectoryPath and -FnOSArm64RuntimeDirectoryPath, or provide neither."
 }
-$BuildFnOS = $HasAmd64Archive -and $HasArm64Archive
+$BuildFnOS = $HasAmd64Runtime -and $HasArm64Runtime
 
 $credentials = Get-Content -LiteralPath $CredentialsPath -Raw -Encoding UTF8 | ConvertFrom-Json
 $requiredFields = @("store_file", "store_password", "key_alias", "key_password")
@@ -116,13 +116,14 @@ try {
         Remove-Item -LiteralPath (Join-Path $OutputDirectory "SHA256SUMS.txt") -Force -ErrorAction SilentlyContinue
         $buildScript = Join-Path $RepoRoot "scripts\build_fnos_package.ps1"
         foreach ($item in @(
-            @{ Platform = "amd64"; Archive = $FnOSAmd64ImageArchivePath },
-            @{ Platform = "arm64"; Archive = $FnOSArm64ImageArchivePath }
+            @{ Platform = "amd64"; Runtime = $FnOSAmd64RuntimeDirectoryPath },
+            @{ Platform = "arm64"; Runtime = $FnOSArm64RuntimeDirectoryPath }
         )) {
             $fnosParams = @{
                 OutputDirectory = $OutputDirectory
                 Platform = $item.Platform
-                ImageArchivePath = $item.Archive
+                RuntimeDirectoryPath = $item.Runtime
+                PythonPath = $pythonCommand
             }
             if (-not [string]::IsNullOrWhiteSpace($FnpackPath)) {
                 $fnosParams.FnpackPath = $FnpackPath

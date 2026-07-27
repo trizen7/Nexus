@@ -1,12 +1,16 @@
+from __future__ import annotations
+
 import hashlib
-import io
 import importlib.util
+import io
 import json
 import re
 import struct
 import sys
 import tarfile
+from dataclasses import dataclass
 from pathlib import Path
+from types import ModuleType
 
 import pytest
 import yaml
@@ -14,8 +18,38 @@ import yaml
 
 ROOT = Path(__file__).resolve().parents[2]
 PACKAGE = ROOT / "fnos" / "nexus-gateway"
-ENTRYPOINT = PACKAGE / "app" / "docker" / "fnos_entrypoint.py"
+LAUNCHER = ROOT / "gateway" / "nexus_gateway" / "fnos_launcher.py"
 VERIFIER = ROOT / "scripts" / "verify_fnos_package.py"
+NORMALIZER = ROOT / "scripts" / "normalize_fnos_package.py"
+
+
+@dataclass(frozen=True)
+class TarEntry:
+    data: bytes = b""
+    mode: int = 0o644
+    link_target: str | None = None
+    is_directory: bool = False
+
+
+def _load_module(path: Path, name: str) -> ModuleType:
+    spec = importlib.util.spec_from_file_location(name, path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    sys.modules[name] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+def _load_launcher() -> ModuleType:
+    return _load_module(LAUNCHER, "nexus_fnos_launcher_test")
+
+
+def _load_verifier() -> ModuleType:
+    return _load_module(VERIFIER, "nexus_fnos_verifier_test")
+
+
+def _load_normalizer() -> ModuleType:
+    return _load_module(NORMALIZER, "nexus_fnos_normalizer_test")
 
 
 def _manifest() -> dict[str, str]:
@@ -34,56 +68,11 @@ def _png_size(path: Path) -> tuple[int, int]:
     return struct.unpack(">II", raw[16:24])
 
 
-def _load_entrypoint():
-    spec = importlib.util.spec_from_file_location("nexus_fnos_entrypoint", ENTRYPOINT)
-    assert spec and spec.loader
-    module = importlib.util.module_from_spec(spec)
-    previous = sys.dont_write_bytecode
-    sys.dont_write_bytecode = True
-    try:
-        spec.loader.exec_module(module)
-    finally:
-        sys.dont_write_bytecode = previous
-    return module
-
-
-def _load_verifier():
-    spec = importlib.util.spec_from_file_location("nexus_fnos_verifier", VERIFIER)
-    assert spec and spec.loader
-    module = importlib.util.module_from_spec(spec)
-    spec.loader.exec_module(module)
-    return module
-
-
-def _point_entrypoint_at(module, data_dir: Path) -> None:
+def _point_launcher_at(module: ModuleType, data_dir: Path) -> None:
     module.DATA_DIR = data_dir
     module.SETUP_DIR = data_dir / ".fnos-setup"
     module.ACCOUNT_PATH = data_dir / "account.json"
     module.CONFIG_PATH = data_dir / "config.json"
-
-
-def _docker_save_bytes(
-    architecture: str,
-    *,
-    image: str = "nexus-gateway-fnos:0.1.5",
-    include_config: bool = True,
-    include_layer: bool = True,
-) -> bytes:
-    config_name = "config.json"
-    layer_name = "layer/layer.tar"
-    manifest = [{"Config": config_name, "RepoTags": [image], "Layers": [layer_name]}]
-    buffer = io.BytesIO()
-    with tarfile.open(fileobj=buffer, mode="w:gz") as archive:
-        entries = {"manifest.json": json.dumps(manifest).encode("utf-8")}
-        if include_config:
-            entries[config_name] = json.dumps({"os": "linux", "architecture": architecture}).encode("utf-8")
-        if include_layer:
-            entries[layer_name] = b"synthetic layer"
-        for name, data in entries.items():
-            info = tarfile.TarInfo(name)
-            info.size = len(data)
-            archive.addfile(info, io.BytesIO(data))
-    return buffer.getvalue()
 
 
 def _write_setup(data_dir: Path, mode: str, **fields: str) -> None:
@@ -94,15 +83,215 @@ def _write_setup(data_dir: Path, mode: str, **fields: str) -> None:
         (setup / name).write_text(value, encoding="utf-8")
 
 
-def test_fnos_manifest_and_desktop_entry_are_consistent() -> None:
+def _minimal_elf(machine: int) -> bytes:
+    data = bytearray(64)
+    data[:4] = b"\x7fELF"
+    data[4] = 2
+    data[5] = 1
+    data[6] = 1
+    struct.pack_into("<H", data, 16, 2)
+    struct.pack_into("<H", data, 18, machine)
+    struct.pack_into("<I", data, 20, 1)
+    return bytes(data)
+
+
+def _tar_bytes(entries: dict[str, TarEntry], *, gzip: bool) -> bytes:
+    buffer = io.BytesIO()
+    with tarfile.open(fileobj=buffer, mode="w:gz" if gzip else "w") as archive:
+        for name in sorted(entries):
+            entry = entries[name]
+            info = tarfile.TarInfo(name)
+            info.mode = entry.mode
+            info.mtime = 0
+            info.uid = 0
+            info.gid = 0
+            info.uname = ""
+            info.gname = ""
+            if entry.is_directory:
+                info.type = tarfile.DIRTYPE
+                info.size = 0
+                archive.addfile(info)
+            elif entry.link_target is not None:
+                info.type = tarfile.SYMTYPE
+                info.linkname = entry.link_target
+                info.size = 0
+                archive.addfile(info)
+            else:
+                info.size = len(entry.data)
+                archive.addfile(info, io.BytesIO(entry.data))
+    return buffer.getvalue()
+
+
+def _archive_members(payload: bytes, *, gzip: bool = False) -> dict[str, tarfile.TarInfo]:
+    mode = "r:gz" if gzip else "r:*"
+    with tarfile.open(fileobj=io.BytesIO(payload), mode=mode) as archive:
+        return {member.name.rstrip("/"): member for member in archive.getmembers()}
+
+
+def _archive_file(payload: bytes, name: str, *, gzip: bool = False) -> bytes:
+    mode = "r:gz" if gzip else "r:*"
+    with tarfile.open(fileobj=io.BytesIO(payload), mode=mode) as archive:
+        member = archive.getmember(name)
+        stream = archive.extractfile(member)
+        assert stream is not None
+        return stream.read()
+
+
+def _generated_manifest(architecture: str, app_payload: bytes) -> bytes:
+    source = (PACKAGE / "manifest").read_text(encoding="utf-8")
+    platform = {"amd64": "x86", "arm64": "arm"}[architecture]
+    generated = re.sub(r"(?m)^platform=all$", f"platform={platform}", source)
+    if not generated.endswith("\n"):
+        generated += "\n"
+    checksum = hashlib.md5(app_payload, usedforsecurity=False).hexdigest()
+    generated += f"checksum={checksum}\n"
+    return generated.encode("utf-8")
+
+
+def _runtime_entries(
+    architecture: str,
+    *,
+    platform: str | None = None,
+    elf_machine: int | None = None,
+    executable_mode: int = 0o755,
+    missing: set[str] | None = None,
+    bad_checksum_for: str | None = None,
+) -> dict[str, TarEntry]:
+    expected_platform = {"amd64": "linux/amd64", "arm64": "linux/arm64"}[architecture]
+    expected_machine = {"amd64": 62, "arm64": 183}[architecture]
+    files: dict[str, TarEntry] = {
+        "runtime/runtime.platform": TarEntry(f"{platform or expected_platform}\n".encode("ascii")),
+        "runtime/ca-certificates.crt": TarEntry(
+            b"-----BEGIN CERTIFICATE-----\n" + b"A" * 1100 + b"\n-----END CERTIFICATE-----\n"
+        ),
+        "runtime/nexus-gateway/nexus-gateway": TarEntry(
+            _minimal_elf(elf_machine if elf_machine is not None else expected_machine), executable_mode
+        ),
+        "runtime/nexus-gateway/_internal/nexus_gateway/web/index.html": TarEntry(
+            (ROOT / "gateway" / "nexus_gateway" / "web" / "index.html").read_bytes()
+        ),
+        "runtime/nexus-gateway/_internal/nexus_gateway/web/app.js": TarEntry(
+            (ROOT / "gateway" / "nexus_gateway" / "web" / "app.js").read_bytes()
+        ),
+        "runtime/nexus-gateway/_internal/nexus_gateway/web/styles.css": TarEntry(
+            (ROOT / "gateway" / "nexus_gateway" / "web" / "styles.css").read_bytes()
+        ),
+    }
+    for name in missing or set():
+        files.pop(name, None)
+
+    checksum_lines: list[str] = []
+    for name in sorted(files):
+        relative = name.removeprefix("runtime/")
+        digest = hashlib.sha256(files[name].data).hexdigest()
+        if relative == bad_checksum_for:
+            digest = "0" * 64
+        checksum_lines.append(f"{digest}  {relative}")
+    files["runtime/runtime.sha256"] = TarEntry(("\n".join(checksum_lines) + "\n").encode("ascii"))
+    return files
+
+
+def _build_synthetic_fpk(
+    directory: Path,
+    architecture: str,
+    *,
+    platform: str | None = None,
+    elf_machine: int | None = None,
+    executable_mode: int = 0o755,
+    missing_runtime: set[str] | None = None,
+    bad_checksum_for: str | None = None,
+    extra_app: dict[str, TarEntry] | None = None,
+    app_symlink: tuple[str, str] | None = None,
+) -> Path:
+    verifier = _load_verifier()
+    app_entries: dict[str, TarEntry] = {}
+    for name in verifier.STATIC_APP_FILES:
+        source = PACKAGE / (name if name.startswith("ui/") else "")
+        if name.startswith("ui/"):
+            source = PACKAGE / "app" / name
+        else:
+            source = PACKAGE / name
+        app_entries[name] = TarEntry(source.read_bytes())
+    app_entries.update(
+        _runtime_entries(
+            architecture,
+            platform=platform,
+            elf_machine=elf_machine,
+            executable_mode=executable_mode,
+            missing=missing_runtime,
+            bad_checksum_for=bad_checksum_for,
+        )
+    )
+    if extra_app:
+        app_entries.update(extra_app)
+    if app_symlink is not None:
+        name, target = app_symlink
+        app_entries[name] = TarEntry(link_target=target)
+
+    app_payload = _tar_bytes(app_entries, gzip=True)
+    outer_entries: dict[str, TarEntry] = {}
+    for name in verifier.OUTER_FILES:
+        if name == "app.tgz":
+            outer_entries[name] = TarEntry(app_payload)
+        elif name == "manifest":
+            outer_entries[name] = TarEntry(_generated_manifest(architecture, app_payload))
+        else:
+            mode = 0o755 if name.startswith("cmd/") else 0o644
+            outer_entries[name] = TarEntry((PACKAGE / name).read_bytes(), mode)
+
+    version = _manifest()["version"]
+    fpk = directory / f"Nexus-fnOS-{version}-{architecture}.fpk"
+    fpk.write_bytes(_tar_bytes(outer_entries, gzip=True))
+    return fpk
+
+
+def _rewrite_with_windows_fnpack_permissions(fpk: Path) -> None:
+    outer_payload = fpk.read_bytes()
+    with tarfile.open(fileobj=io.BytesIO(outer_payload), mode="r:*") as outer_archive:
+        outer_files = {
+            member.name: outer_archive.extractfile(member).read()
+            for member in outer_archive.getmembers()
+            if member.isfile()
+        }
+
+    app_payload = outer_files["app.tgz"]
+    with tarfile.open(fileobj=io.BytesIO(app_payload), mode="r:gz") as app_archive:
+        app_files = {
+            member.name: app_archive.extractfile(member).read()
+            for member in app_archive.getmembers()
+            if member.isfile()
+        }
+
+    app_entries = {name: TarEntry(data=data, mode=0o666) for name, data in app_files.items()}
+    app_directories = {
+        str(parent)
+        for name in app_files
+        for parent in Path(name).parents
+        if str(parent) != "."
+    }
+    app_entries.update(
+        {name.replace("\\", "/"): TarEntry(mode=0o777, is_directory=True) for name in app_directories}
+    )
+    outer_files["app.tgz"] = _tar_bytes(app_entries, gzip=True)
+
+    outer_entries = {name: TarEntry(data=data, mode=0o666) for name, data in outer_files.items()}
+    outer_entries.update(
+        {name: TarEntry(mode=0o777, is_directory=True) for name in ("cmd", "config", "wizard")}
+    )
+    fpk.write_bytes(_tar_bytes(outer_entries, gzip=True))
+
+
+def test_fnos_manifest_desktop_and_icons_are_consistent() -> None:
     manifest = _manifest()
     gateway_version = re.search(
         r'__version__\s*=\s*"([^"]+)"',
         (ROOT / "gateway" / "nexus_gateway" / "__init__.py").read_text(encoding="utf-8"),
     ).group(1)
 
+    assert gateway_version == "0.1.6"
     assert manifest["appname"] == "nexus-gateway"
-    assert manifest["version"] == f"{gateway_version}-fnos2"
+    assert manifest["version"] == "0.1.6-fnos3"
+    assert manifest["version"].startswith(f"{gateway_version}-fnos")
     assert manifest["source"] == "thirdparty"
     assert manifest["platform"] == "all"
     assert manifest["desktop_uidir"] == "ui"
@@ -115,149 +304,38 @@ def test_fnos_manifest_and_desktop_entry_are_consistent() -> None:
     assert "maintainer_url" not in manifest
     assert "distributor_url" not in manifest
 
-    manifest_text = (PACKAGE / "manifest").read_text(encoding="utf-8").lower()
-    assert "github.com" not in manifest_text
-    assert "ghcr.io" not in manifest_text
-
     ui = json.loads((PACKAGE / "app" / "ui" / "config").read_text(encoding="utf-8"))
     entry = ui[".url"][manifest["desktop_applaunchname"]]
     assert entry["type"] == "url"
     assert entry["protocol"] == "http"
-    assert entry["port"] == manifest["service_port"]
+    assert entry["port"] == "8787"
     assert entry["url"] == "/"
+    assert _png_size(PACKAGE / "ICON.PNG") == (64, 64)
+    assert _png_size(PACKAGE / "ICON_256.PNG") == (256, 256)
+    assert _png_size(PACKAGE / "app" / "ui" / "images" / "icon_64.png") == (64, 64)
+    assert _png_size(PACKAGE / "app" / "ui" / "images" / "icon_256.png") == (256, 256)
 
 
-def test_fnos_compose_uses_packaged_versioned_image_and_private_package_data() -> None:
-    compose = yaml.safe_load((PACKAGE / "app" / "docker" / "docker-compose.yaml").read_text(encoding="utf-8"))
-    service = compose["services"]["nexus-gateway"]
-    gateway_version = re.search(
-        r'__version__\s*=\s*"([^"]+)"',
-        (ROOT / "gateway" / "nexus_gateway" / "__init__.py").read_text(encoding="utf-8"),
-    ).group(1)
+def test_fnos_source_is_native_offline_and_contains_no_generated_runtime() -> None:
+    assert json.loads((PACKAGE / "config" / "resource").read_text(encoding="utf-8")) == {}
+    privilege = json.loads((PACKAGE / "config" / "privilege").read_text(encoding="utf-8"))
+    assert privilege["defaults"]["run-as"] == "package"
+    assert not (PACKAGE / "app" / "docker").exists()
+    assert not (PACKAGE / "app" / "runtime").exists()
 
-    assert service["image"] == f"nexus-gateway-fnos:{gateway_version}"
-    assert service["pull_policy"] == "never"
-    assert "ghcr.io" not in service["image"]
-    assert "build" not in service
-    assert service["container_name"] == "nexus-gateway-fnos"
-    assert service["user"] == "${TRIM_UID}:${TRIM_GID}"
-    assert service["network_mode"] == "host"
-    assert "ports" not in service
-    assert "extra_hosts" not in service
-    assert service["volumes"][0] == "${TRIM_PKGVAR}:/data"
-    assert all("shares" not in volume.lower() for volume in service["volumes"])
-    assert service["read_only"] is True
-    assert service["cap_drop"] == ["ALL"]
-    assert service["security_opt"] == ["no-new-privileges:true"]
-    healthcheck_command = " ".join(service["healthcheck"]["test"])
-    assert "/api/setup/status" in healthcheck_command
-    assert "initialized" in healthcheck_command
-    assert service["healthcheck"]["interval"] == "30s"
-    assert service["healthcheck"]["timeout"] == "5s"
-    assert service["healthcheck"]["retries"] == 5
-    assert service["healthcheck"]["start_period"] == "20s"
-    assert service["entrypoint"] == ["python", "/opt/nexus/fnos_entrypoint.py"]
-    assert service["command"][:3] == ["python", "-m", "nexus_gateway"]
-    assert service["environment"]["NEXUS_DEPLOYMENT_MODE"] == "fnos-host"
-    assert "NEXUS_PASSWORD" not in service["environment"]
-    assert "HERMES_API_TOKEN" not in service["environment"]
-    assert "NEXUS_SESSION_SECRET" not in service["environment"]
-
-    resource = json.loads((PACKAGE / "config" / "resource").read_text(encoding="utf-8"))
-    assert resource == {
-        "docker-project": {
-            "projects": [{"name": "nexus-gateway", "path": "docker"}],
-        }
-    }
+    lifecycle = "\n".join(path.read_text(encoding="utf-8") for path in (PACKAGE / "cmd").iterdir() if path.is_file())
+    for pattern in (r"\bdocker\b", r"\b(?:curl|wget|git)\b", r"https?://[A-Za-z0-9]", r"/dev/tcp", r"\bnc\s"):
+        assert re.search(pattern, lifecycle, re.IGNORECASE) is None
+    lowered = lifecycle.lower()
+    assert "systemctl start hermes" not in lowered
+    assert "systemctl stop hermes" not in lowered
+    assert "/opt/hermes" not in lowered
+    assert "/var/lib/hermes" not in lowered
 
 
-def test_fnos_wizards_mark_secrets_as_password_and_embed_no_credentials() -> None:
-    install = json.loads((PACKAGE / "wizard" / "install").read_text(encoding="utf-8"))
-    config = json.loads((PACKAGE / "wizard" / "config").read_text(encoding="utf-8"))
-    install_items = [item for step in install for item in step["items"] if "field" in item]
-    config_items = [item for step in config for item in step["items"] if "field" in item]
-    install_by_field = {item["field"]: item for item in install_items}
-    config_by_field = {item["field"]: item for item in config_items}
-
-    assert install_by_field["wizard_nexus_password"]["type"] == "password"
-    assert install_by_field["wizard_hermes_api_token"]["type"] == "password"
-    assert config_by_field["wizard_nexus_password"]["type"] == "password"
-    assert config_by_field["wizard_hermes_api_token"]["type"] == "password"
-    assert "initValue" not in install_by_field["wizard_nexus_password"]
-    assert "initValue" not in install_by_field["wizard_hermes_api_token"]
-    assert "initValue" not in config_by_field["wizard_nexus_password"]
-    assert "initValue" not in config_by_field["wizard_hermes_api_token"]
-    assert install_by_field["wizard_hermes_api_url"]["initValue"] == "http://127.0.0.1:8642"
-    install_help = install[1]["items"][0]["helpText"]
-    config_help = config[0]["items"][0]["helpText"]
-    assert "http://127.0.0.1:8642" in install_help
-    assert "http://127.0.0.1:8642" in config_help
-
-
-def test_fnos_icons_have_required_dimensions_and_size() -> None:
-    expected = {
-        PACKAGE / "ICON.PNG": (64, 64),
-        PACKAGE / "ICON_256.PNG": (256, 256),
-        PACKAGE / "app" / "ui" / "images" / "icon_64.png": (64, 64),
-        PACKAGE / "app" / "ui" / "images" / "icon_256.png": (256, 256),
-    }
-    for path, size in expected.items():
-        assert _png_size(path) == size
-        assert path.stat().st_size <= 1024 * 1024
-
-
-def test_fnos_package_tree_contains_no_macos_metadata_and_text_is_clean() -> None:
-    assert not list(PACKAGE.rglob(".DS_Store"))
-    assert not list(PACKAGE.rglob("__pycache__"))
-    assert not list(PACKAGE.rglob("*.pyc"))
-    packaged_license = (PACKAGE / "LICENSE").read_text(encoding="utf-8")
-    assert packaged_license.startswith((ROOT / "LICENSE").read_text(encoding="utf-8").rstrip())
-    assert packaged_license.endswith((ROOT / "NOTICE").read_text(encoding="utf-8").strip() + "\n")
-
-    text_paths = [path for path in PACKAGE.rglob("*") if path.is_file() and path.suffix.lower() != ".png"]
-    text_paths.append(ROOT / "docs" / "fnos-deployment.md")
-    for path in text_paths:
-        raw = path.read_bytes()
-        assert not raw.startswith(b"\xef\xbb\xbf"), path
-        assert b"\r\n" not in raw, path
-        content = raw.decode("utf-8")
-        assert "\x0c" not in content, path
-        assert "\t" not in content, path
-        assert "???" not in content, path
-
-
-def test_fnos_lifecycle_scripts_only_manage_nexus_owned_paths_and_container() -> None:
-    scripts = "\n".join(path.read_text(encoding="utf-8") for path in (PACKAGE / "cmd").iterdir() if path.is_file())
-    forbidden = [
-        r"systemctl\s+(?:start|stop|restart).*hermes",
-        r"docker\s+(?:start|stop|restart|rm).*hermes",
-        r"pkill.*hermes",
-        r"/opt/hermes",
-        r"/var/lib/hermes",
-    ]
-    for pattern in forbidden:
-        assert re.search(pattern, scripts, re.IGNORECASE) is None
-    assert 'TRIM_PKGVAR' in scripts
-    install_callback = (PACKAGE / "cmd" / "install_callback").read_text(encoding="utf-8")
-    config_callback = (PACKAGE / "cmd" / "config_callback").read_text(encoding="utf-8")
-    for callback in (install_callback, config_callback):
-        assert "docker inspect nexus-gateway-fnos" in callback
-        assert "docker restart nexus-gateway-fnos" in callback
-    setup_common = (PACKAGE / "cmd" / "setup_common.sh").read_text(encoding="utf-8")
-    assert "Hermes API URL cannot use an unspecified address" in setup_common
-    assert "localhost|localhost:*|127.*" not in setup_common
-    assert "TRIM_PKGINST_TEMP_DIR" in setup_common
-    assert 'docker load --input "$archive"' in setup_common
-    assert "docker pull" not in setup_common.lower()
-    assert "ghcr.io" not in setup_common.lower()
-    assert "github.com" not in setup_common.lower()
-    assert "load_packaged_image" in (PACKAGE / "cmd" / "install_init").read_text(encoding="utf-8")
-    assert "load_packaged_image" in (PACKAGE / "cmd" / "upgrade_init").read_text(encoding="utf-8")
-
-
-def test_fnos_entrypoint_initializes_gateway_without_plaintext_password(tmp_path: Path) -> None:
-    module = _load_entrypoint()
-    _point_entrypoint_at(module, tmp_path)
+def test_fnos_launcher_initializes_without_plaintext_password(tmp_path: Path) -> None:
+    module = _load_launcher()
+    _point_launcher_at(module, tmp_path)
     _write_setup(
         tmp_path,
         "install",
@@ -283,6 +361,7 @@ def test_fnos_entrypoint_initializes_gateway_without_plaintext_password(tmp_path
         dklen=32,
     ).hex()
     assert candidate == account["password_hash"]
+    assert account["revision"] == 1
     assert config["hermes_api_url"] == "http://127.0.0.1:8000"
     assert config["hermes_api_token"] == "test-token-not-a-real-secret"
     assert len(config["session_secret"]) >= 16
@@ -300,14 +379,13 @@ def test_fnos_entrypoint_initializes_gateway_without_plaintext_password(tmp_path
         "http://hermes.example:8000?debug=true",
         "http://hermes.example:8000#fragment",
         "http://hermes.example:70000",
-        "http://user:password@127.0.0.1:8000",
         "http://0.0.0.0:8000",
         "http://[::]:8000",
     ],
 )
-def test_fnos_entrypoint_rejects_invalid_hermes_urls(tmp_path: Path, invalid_url: str) -> None:
-    module = _load_entrypoint()
-    _point_entrypoint_at(module, tmp_path)
+def test_fnos_launcher_rejects_invalid_hermes_urls(tmp_path: Path, invalid_url: str) -> None:
+    module = _load_launcher()
+    _point_launcher_at(module, tmp_path)
     _write_setup(
         tmp_path,
         "install",
@@ -330,13 +408,13 @@ def test_fnos_entrypoint_rejects_invalid_hermes_urls(tmp_path: Path, invalid_url
         ("https://[::1]:8443", "https://127.0.0.1:8443"),
     ],
 )
-def test_fnos_entrypoint_migrates_same_nas_hermes_urls_for_host_network(
+def test_fnos_launcher_migrates_same_nas_hermes_urls(
     tmp_path: Path,
     legacy_url: str,
     expected_url: str,
 ) -> None:
-    module = _load_entrypoint()
-    _point_entrypoint_at(module, tmp_path)
+    module = _load_launcher()
+    _point_launcher_at(module, tmp_path)
     original = {
         "hermes_api_url": legacy_url,
         "hermes_api_token": "legacy-test-token",
@@ -353,12 +431,12 @@ def test_fnos_entrypoint_migrates_same_nas_hermes_urls_for_host_network(
 
 
 @pytest.mark.parametrize("changed_field", ["username", "password", "hermes_api_url", "hermes_api_token"])
-def test_fnos_entrypoint_applies_partial_configuration_without_erasing_other_values(
+def test_fnos_launcher_applies_partial_configuration_without_erasing_values(
     tmp_path: Path,
     changed_field: str,
 ) -> None:
-    module = _load_entrypoint()
-    _point_entrypoint_at(module, tmp_path)
+    module = _load_launcher()
+    _point_launcher_at(module, tmp_path)
     _write_setup(
         tmp_path,
         "install",
@@ -402,9 +480,9 @@ def test_fnos_entrypoint_applies_partial_configuration_without_erasing_other_val
 
 
 @pytest.mark.parametrize("invalid_revision", [True, 0, -1, 1.5, "1.5", "not-an-integer"])
-def test_fnos_entrypoint_rejects_invalid_account_revision(tmp_path: Path, invalid_revision: object) -> None:
-    module = _load_entrypoint()
-    _point_entrypoint_at(module, tmp_path)
+def test_fnos_launcher_rejects_invalid_account_revision(tmp_path: Path, invalid_revision: object) -> None:
+    module = _load_launcher()
+    _point_launcher_at(module, tmp_path)
     _write_setup(
         tmp_path,
         "install",
@@ -425,9 +503,9 @@ def test_fnos_entrypoint_rejects_invalid_account_revision(tmp_path: Path, invali
         module.apply_pending_setup()
 
 
-def test_fnos_entrypoint_rejects_setup_symlink(tmp_path: Path) -> None:
-    module = _load_entrypoint()
-    _point_entrypoint_at(module, tmp_path)
+def test_fnos_launcher_rejects_setup_symlink(tmp_path: Path) -> None:
+    module = _load_launcher()
+    _point_launcher_at(module, tmp_path)
     target = tmp_path / "outside"
     target.mkdir()
     try:
@@ -438,146 +516,283 @@ def test_fnos_entrypoint_rejects_setup_symlink(tmp_path: Path) -> None:
         module.apply_pending_setup()
 
 
-def test_fnos_build_and_container_workflows_are_reproducible_contracts() -> None:
-    script = (ROOT / "scripts" / "build_fnos_package.ps1").read_text(encoding="utf-8")
-    workflow_path = ROOT / ".github" / "workflows" / "container.yml"
-    release_workflow_path = ROOT / ".github" / "workflows" / "release.yml"
-    workflow = workflow_path.read_text(encoding="utf-8")
-    release_workflow = release_workflow_path.read_text(encoding="utf-8")
-    verifier = (ROOT / "scripts" / "verify_fnos_package.py").read_text(encoding="utf-8")
-
-    assert '$OfficialFnpackVersion = "1.2.3"' in script
-    assert "d7af4bd716b009c58f5bcd931615f39db121e7d4b75dc759e575c4fb2879b6ee" in script
-    assert "54b97fa7b70968c4d05c79840f5daeff508957d0bb2062fdb0376d00d9615c93" in script
-    assert '[ValidateSet("amd64", "arm64")]' in script
-    assert "ImageArchivePath" in script
-    assert "Nexus-fnOS-$PackageVersion-$Platform.fpk" in script
-    assert "nexus-gateway-image.tar.gz" in script
-    assert "Update-ChecksumManifest" in script
-    assert "SHA256SUMS.txt" in script
-    assert "WriteAllText($HashPath" not in script
-    assert "docker build" not in script.lower()
-
-    for content in (workflow, release_workflow):
-        assert '--output "type=docker,dest=$RUNNER_TEMP/nexus-gateway-$architecture.tar"' in content
-        assert '--tag "nexus-gateway-fnos:$VERSION"' in content
-        assert 'gzip --no-name --best "$RUNNER_TEMP/nexus-gateway-$architecture.tar"' in content
-        assert "-Platform amd64" in content
-        assert "-Platform arm64" in content
-        assert "verify_fnos_package.py" in content
-        assert "SHA256SUMS.txt" in content
-
-    assert "linux/amd64,linux/arm64" in workflow
-    assert "docker/build-push-action@v6" in workflow
-    assert "ghcr.io/trizen7/nexus-gateway" in workflow
-    assert "fnpack-${FNPACK_VERSION}-linux-amd64" in workflow
-    assert "sha256sum --check --strict" in workflow
-    assert "--require-fnos" in release_workflow
-    assert "dist/*" not in release_workflow
-    assert '--notes ""' in release_workflow
-    compile(verifier, "scripts/verify_fnos_package.py", "exec")
-
-    parsed_container = yaml.safe_load(workflow)
-    assert parsed_container["jobs"]["fnos-package"]["needs"] == "metadata"
-
-    for parsed_path in (workflow_path, release_workflow_path):
-        parsed = yaml.safe_load(parsed_path.read_text(encoding="utf-8"))
-        for job in parsed["jobs"].values():
-            for step in job.get("steps", []):
-                if step.get("shell") == "python":
-                    compile(step["run"], f"{parsed_path}:{step.get('name', 'python step')}", "exec")
+def test_fnos_launcher_rejects_nexus_paths_outside_data_directory(tmp_path: Path) -> None:
+    module = _load_launcher()
+    _point_launcher_at(module, tmp_path / "data")
+    module.CONFIG_PATH = tmp_path / "outside-config.json"
+    with pytest.raises(module.SetupError, match="outside the Nexus data directory"):
+        module.apply_pending_setup()
 
 
-def test_fnos_verifier_reads_fpk_entry_from_unified_checksum_manifest(tmp_path: Path) -> None:
+def test_fnos_launcher_invokes_gateway_in_process(monkeypatch: pytest.MonkeyPatch) -> None:
+    module = _load_launcher()
+    calls: list[str] = []
+    monkeypatch.setattr(module, "apply_pending_setup", lambda: calls.append("setup"))
+    import nexus_gateway.__main__ as gateway_main_module
+
+    monkeypatch.setattr(gateway_main_module, "main", lambda: calls.append("gateway"))
+    module.main()
+    assert calls == ["setup", "gateway"]
+    source = LAUNCHER.read_text(encoding="utf-8")
+    assert "from nexus_gateway.__main__ import main as gateway_main" in source
+    assert "subprocess" not in source
+    assert "execvp" not in source
+
+
+def test_fnos_lifecycle_validates_runtime_and_manages_only_native_gateway() -> None:
+    setup_common = (PACKAGE / "cmd" / "setup_common.sh").read_text(encoding="utf-8")
+    install_init = (PACKAGE / "cmd" / "install_init").read_text(encoding="utf-8")
+    upgrade_init = (PACKAGE / "cmd" / "upgrade_init").read_text(encoding="utf-8")
+    config_callback = (PACKAGE / "cmd" / "config_callback").read_text(encoding="utf-8")
+    main = (PACKAGE / "cmd" / "main").read_text(encoding="utf-8")
+
+    assert "validate_packaged_runtime" in install_init
+    assert "validate_packaged_runtime" in upgrade_init
+    assert '"$SCRIPT_DIR/main" stop' in config_callback
+    assert '"$SCRIPT_DIR/main" start' in config_callback
+    for fragment in (
+        "runtime.platform",
+        "runtime.sha256",
+        "nexus-gateway/nexus-gateway",
+        "validate_runtime_elf",
+        "find \"$runtime_dir\" -type l",
+        "SHA-256 verification",
+    ):
+        assert fragment in setup_common
+    for fragment in (
+        '$TRIM_APPDEST/runtime',
+        "/proc/$pid/exe",
+        "/proc/$pid/stat",
+        'kill -TERM "$pid"',
+        'kill -KILL "$pid"',
+        "NEXUS_FNOS_DATA_DIR",
+        "NEXUS_DEPLOYMENT_MODE",
+        "SSL_CERT_FILE",
+    ):
+        assert fragment in main
+    assert "docker" not in (setup_common + main).lower()
+
+
+def test_fnos_build_and_workflows_export_native_runtime_directories() -> None:
+    build_script = (ROOT / "scripts" / "build_fnos_package.ps1").read_text(encoding="utf-8")
+    dockerfile = (ROOT / "gateway" / "FnOS.Dockerfile").read_text(encoding="utf-8")
+    spec = (ROOT / "gateway" / "nexus-gateway-fnos.spec").read_text(encoding="utf-8")
+    workflows = [
+        ROOT / ".github" / "workflows" / "ci.yml",
+        ROOT / ".github" / "workflows" / "container.yml",
+        ROOT / ".github" / "workflows" / "release.yml",
+    ]
+
+    assert "RuntimeDirectoryPath" in build_script
+    assert "ImageArchivePath" not in build_script
+    assert "app/docker" in build_script
+    assert "must not contain a container project" in build_script
+    assert "runtime.platform" in build_script
+    assert "runtime.sha256" in build_script
+    assert "Assert-NoLinks" in build_script
+    assert "Assert-RuntimeLayout" in build_script
+    assert "Get-ContainedRelativePath" in build_script
+    assert "[System.IO.Path]::GetRelativePath" not in build_script
+    assert "normalize_fnos_package.py" in build_script
+    assert "PythonPath" in build_script
+    release_script = (ROOT / "scripts" / "build-android-release.ps1").read_text(encoding="utf-8")
+    assert "PythonPath = $pythonCommand" in release_script
+    assert "FROM scratch AS runtime" in dockerfile
+    assert "cp -aL" in dockerfile
+    assert "find /runtime -type l" in dockerfile
+    assert "--help" in dockerfile
+    assert "fnos_launcher.py" in spec
+
+    for path in workflows:
+        workflow = path.read_text(encoding="utf-8")
+        parsed = yaml.safe_load(workflow)
+        assert isinstance(parsed["jobs"], dict)
+        assert "gateway/FnOS.Dockerfile" in workflow
+        assert 'type=local,dest=$RUNNER_TEMP/nexus-runtime-$architecture' in workflow
+        assert "-RuntimeDirectoryPath" in workflow
+        assert "type=docker" not in workflow
+        assert "ImageArchivePath" not in workflow
+        assert "docker save" not in workflow.lower()
+
+
+def test_fnos_source_tree_ignores_generated_native_runtime() -> None:
+    ignore = (ROOT / ".gitignore").read_text(encoding="utf-8").splitlines()
+    assert "/fnos/nexus-gateway/app/runtime/" in ignore
+    assert "/gateway/build/" in ignore
+    assert all("nexus-gateway-image" not in line for line in ignore)
+
+
+def test_fnos_normalizer_repairs_windows_fnpack_permissions_and_checksum(tmp_path: Path) -> None:
+    normalizer = _load_normalizer()
     verifier = _load_verifier()
-    fpk = tmp_path / "Nexus-fnOS-0.1.5-fnos2-amd64.fpk"
-    fpk.write_bytes(b"fnos-package")
+    fpk = _build_synthetic_fpk(tmp_path, "amd64", executable_mode=0o666)
+    _rewrite_with_windows_fnpack_permissions(fpk)
+
+    with pytest.raises(verifier.VerificationError, match="unsafe permissions"):
+        verifier.verify_package(fpk)
+
+    normalizer.normalize_package(fpk)
+
+    assert fpk.read_bytes().startswith(b"\x1f\x8b")
+    assert verifier.verify_package(fpk) == hashlib.sha256(fpk.read_bytes()).hexdigest()
+
+    outer_payload = fpk.read_bytes()
+    outer = _archive_members(outer_payload)
+    assert (outer["cmd"].mode & 0o7777) == 0o755
+    assert (outer["config"].mode & 0o7777) == 0o755
+    assert (outer["cmd/main"].mode & 0o7777) == 0o755
+    assert (outer["manifest"].mode & 0o7777) == 0o644
+    assert (outer["app.tgz"].mode & 0o7777) == 0o644
+
+    app_payload = _archive_file(outer_payload, "app.tgz")
+    manifest = _archive_file(outer_payload, "manifest").decode("utf-8")
+    expected_checksum = hashlib.md5(app_payload, usedforsecurity=False).hexdigest()
+    assert re.search(rf"(?m)^checksum\s*=\s*{expected_checksum}$", manifest)
+
+    app = _archive_members(app_payload, gzip=True)
+    assert (app["runtime"].mode & 0o7777) == 0o755
+    assert (app["runtime/nexus-gateway/nexus-gateway"].mode & 0o7777) == 0o755
+    assert (app["runtime/ca-certificates.crt"].mode & 0o7777) == 0o644
+    assert (app["ui/config"].mode & 0o7777) == 0o644
+
+
+def test_fnos_normalizer_rejects_path_traversal(tmp_path: Path) -> None:
+    normalizer = _load_normalizer()
+    fpk = tmp_path / "unsafe.fpk"
+    fpk.write_bytes(
+        _tar_bytes(
+            {
+                "../manifest": TarEntry(b"unsafe"),
+                "app.tgz": TarEntry(_tar_bytes({"file": TarEntry(b"data")}, gzip=True)),
+            },
+            gzip=True,
+        )
+    )
+
+    with pytest.raises(normalizer.NormalizationError, match="unsafe path"):
+        normalizer.normalize_package(fpk)
+
+
+def test_fnos_normalizer_rejects_symlink_in_app_archive(tmp_path: Path) -> None:
+    normalizer = _load_normalizer()
+    app_payload = _tar_bytes(
+        {
+            "unsafe-link": TarEntry(link_target="/etc/passwd"),
+        },
+        gzip=True,
+    )
+    manifest = b"appname = nexus-gateway\nchecksum = " + (b"0" * 32) + b"\n"
+    fpk = tmp_path / "unsafe.fpk"
+    fpk.write_bytes(
+        _tar_bytes(
+            {
+                "app.tgz": TarEntry(app_payload),
+                "manifest": TarEntry(manifest),
+            },
+            gzip=True,
+        )
+    )
+
+    with pytest.raises(normalizer.NormalizationError, match="unsupported link or device"):
+        normalizer.normalize_package(fpk)
+
+
+@pytest.mark.parametrize("architecture", ["amd64", "arm64"])
+def test_fnos_verifier_accepts_self_contained_native_packages(tmp_path: Path, architecture: str) -> None:
+    verifier = _load_verifier()
+    fpk = _build_synthetic_fpk(tmp_path, architecture)
     digest = hashlib.sha256(fpk.read_bytes()).hexdigest()
-    checksums = tmp_path / "SHA256SUMS.txt"
-    checksums.write_text(
-        "0" * 64 + "  Nexus-Android-0.1.5-release.apk\n" +
-        f"{digest}  {fpk.name}\n",
+    checksum = tmp_path / "SHA256SUMS.txt"
+    checksum.write_text(
+        "0" * 64 + "  Nexus-Android-0.1.6-release.apk\n" + f"{digest}  {fpk.name}\n",
         encoding="utf-8",
     )
 
-    verifier._verify_checksum_file(fpk, digest, checksums)
-
-    checksums.write_text("0" * 64 + f"  {fpk.name}\n", encoding="utf-8")
-    with pytest.raises(verifier.VerificationError, match="does not match"):
-        verifier._verify_checksum_file(fpk, digest, checksums)
+    assert verifier.verify_package(fpk, checksum) == digest
 
 
-def test_fnos_verifier_prefers_unified_checksum_manifest_but_accepts_legacy_sidecar(tmp_path: Path) -> None:
+def test_fnos_verifier_rejects_stale_manifest_checksum(tmp_path: Path) -> None:
     verifier = _load_verifier()
-    fpk = tmp_path / "Nexus-fnOS-0.1.5-fnos2-amd64.fpk"
-    fpk.write_bytes(b"fnos-package")
-    legacy = Path(f"{fpk}.sha256")
-    legacy.write_text("0" * 64 + f"  {fpk.name}\n", encoding="utf-8")
+    fpk = _build_synthetic_fpk(tmp_path, "amd64")
+    outer_payload = fpk.read_bytes()
+    with tarfile.open(fileobj=io.BytesIO(outer_payload), mode="r:*") as archive:
+        entries = {
+            member.name: TarEntry(
+                data=archive.extractfile(member).read(),
+                mode=member.mode,
+            )
+            for member in archive.getmembers()
+            if member.isfile()
+        }
+    entries["app.tgz"] = TarEntry(entries["app.tgz"].data + b"stale", mode=entries["app.tgz"].mode)
+    fpk.write_bytes(_tar_bytes(entries, gzip=True))
 
-    assert verifier._resolve_checksum_file(fpk, None) == legacy
+    with pytest.raises(verifier.VerificationError, match="does not match app.tgz"):
+        verifier.verify_package(fpk)
 
-    unified = tmp_path / "SHA256SUMS.txt"
-    unified.write_text("0" * 64 + f"  {fpk.name}\n", encoding="utf-8")
-    assert verifier._resolve_checksum_file(fpk, None) == unified
 
-@pytest.mark.parametrize("architecture", ["amd64", "arm64"])
-def test_fnos_verifier_accepts_matching_packaged_docker_archives(architecture: str) -> None:
+def test_fnos_verifier_rejects_bad_runtime_checksum(tmp_path: Path) -> None:
     verifier = _load_verifier()
-    verifier._verify_docker_archive(
-        _docker_save_bytes(architecture),
-        "nexus-gateway-fnos:0.1.5",
-        architecture,
+    fpk = _build_synthetic_fpk(tmp_path, "amd64", bad_checksum_for="ca-certificates.crt")
+    with pytest.raises(verifier.VerificationError, match="runtime checksum mismatch"):
+        verifier.verify_package(fpk)
+
+
+def test_fnos_verifier_rejects_missing_runtime_file(tmp_path: Path) -> None:
+    verifier = _load_verifier()
+    missing = {"runtime/nexus-gateway/_internal/nexus_gateway/web/app.js"}
+    fpk = _build_synthetic_fpk(tmp_path, "amd64", missing_runtime=missing)
+    with pytest.raises(verifier.VerificationError, match="native runtime is incomplete"):
+        verifier.verify_package(fpk)
+
+
+def test_fnos_verifier_rejects_unexpected_app_file(tmp_path: Path) -> None:
+    verifier = _load_verifier()
+    fpk = _build_synthetic_fpk(
+        tmp_path,
+        "amd64",
+        extra_app={"unexpected.txt": TarEntry(b"not allowed")},
     )
+    with pytest.raises(verifier.VerificationError, match="unexpected files"):
+        verifier.verify_package(fpk)
 
 
-def test_fnos_verifier_rejects_wrong_packaged_image_tag() -> None:
+def test_fnos_verifier_rejects_runtime_symlink(tmp_path: Path) -> None:
     verifier = _load_verifier()
-    with pytest.raises(verifier.VerificationError, match="tag must be exactly"):
-        verifier._verify_docker_archive(
-            _docker_save_bytes("amd64", image="ghcr.io/trizen7/nexus-gateway:0.1.5"),
-            "nexus-gateway-fnos:0.1.5",
-            "amd64",
-        )
+    fpk = _build_synthetic_fpk(
+        tmp_path,
+        "amd64",
+        app_symlink=("runtime/nexus-gateway/unsafe-link", "/etc/passwd"),
+    )
+    with pytest.raises(verifier.VerificationError, match="link or device"):
+        verifier.verify_package(fpk)
 
 
-def test_fnos_verifier_rejects_wrong_packaged_image_architecture() -> None:
+def test_fnos_verifier_rejects_non_executable_gateway(tmp_path: Path) -> None:
     verifier = _load_verifier()
-    with pytest.raises(verifier.VerificationError, match="target linux/amd64"):
-        verifier._verify_docker_archive(
-            _docker_save_bytes("arm64"),
-            "nexus-gateway-fnos:0.1.5",
-            "amd64",
-        )
+    fpk = _build_synthetic_fpk(tmp_path, "amd64", executable_mode=0o644)
+    with pytest.raises(verifier.VerificationError, match="not executable"):
+        verifier.verify_package(fpk)
 
 
-@pytest.mark.parametrize(
-    ("include_config", "include_layer", "message"),
-    [
-        (False, True, "missing its image config"),
-        (True, False, "missing layer"),
-    ],
-)
-def test_fnos_verifier_rejects_incomplete_packaged_images(
-    include_config: bool,
-    include_layer: bool,
-    message: str,
-) -> None:
+def test_fnos_verifier_rejects_wrong_elf_architecture(tmp_path: Path) -> None:
     verifier = _load_verifier()
-    with pytest.raises(verifier.VerificationError, match=message):
-        verifier._verify_docker_archive(
-            _docker_save_bytes("amd64", include_config=include_config, include_layer=include_layer),
-            "nexus-gateway-fnos:0.1.5",
-            "amd64",
-        )
+    fpk = _build_synthetic_fpk(tmp_path, "amd64", elf_machine=183)
+    with pytest.raises(verifier.VerificationError, match="ELF architecture"):
+        verifier.verify_package(fpk)
 
 
-def test_fnos_source_tree_does_not_commit_generated_image_payloads() -> None:
-    docker_dir = PACKAGE / "app" / "docker"
-    for name in (
-        "nexus-gateway-image.tar.gz",
-        "nexus-gateway-image.sha256",
-        "nexus-gateway-image.platform",
-    ):
-        assert not (docker_dir / name).exists()
-    ignore = (ROOT / ".gitignore").read_text(encoding="utf-8")
-    assert "/fnos/nexus-gateway/app/docker/nexus-gateway-image.tar.gz" in ignore
+def test_fnos_verifier_rejects_wrong_runtime_platform(tmp_path: Path) -> None:
+    verifier = _load_verifier()
+    fpk = _build_synthetic_fpk(tmp_path, "amd64", platform="linux/arm64")
+    with pytest.raises(verifier.VerificationError, match="platform marker"):
+        verifier.verify_package(fpk)
+
+
+def test_fnos_verifier_requires_unified_checksum_entry(tmp_path: Path) -> None:
+    verifier = _load_verifier()
+    fpk = _build_synthetic_fpk(tmp_path, "amd64")
+    checksum = tmp_path / "SHA256SUMS.txt"
+    checksum.write_text("0" * 64 + "  Nexus-Android-0.1.6-release.apk\n", encoding="utf-8")
+    with pytest.raises(verifier.VerificationError, match="does not contain"):
+        verifier.verify_package(fpk, checksum)

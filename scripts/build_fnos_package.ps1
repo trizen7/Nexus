@@ -2,11 +2,12 @@
 param(
     [string]$OutputDirectory = "dist",
     [string]$FnpackPath = "",
+    [string]$PythonPath = "",
     [Parameter(Mandatory = $true)]
     [ValidateSet("amd64", "arm64")]
     [string]$Platform,
     [Parameter(Mandatory = $true)]
-    [string]$ImageArchivePath
+    [string]$RuntimeDirectoryPath
 )
 
 Set-StrictMode -Version Latest
@@ -21,9 +22,9 @@ $OfficialFnpackVersion = "1.2.3"
 $OfficialWindowsSha256 = "d7af4bd716b009c58f5bcd931615f39db121e7d4b75dc759e575c4fb2879b6ee"
 $OfficialLinuxAmd64Sha256 = "54b97fa7b70968c4d05c79840f5daeff508957d0bb2062fdb0376d00d9615c93"
 $RunningOnWindows = $env:OS -eq "Windows_NT"
-$PackagedArchiveName = "nexus-gateway-image.tar.gz"
-$PackagedChecksumName = "nexus-gateway-image.sha256"
-$PackagedPlatformName = "nexus-gateway-image.platform"
+$RuntimePlatformName = "runtime.platform"
+$RuntimeChecksumName = "runtime.sha256"
+$RuntimeExecutableName = "nexus-gateway/nexus-gateway"
 
 function Resolve-RepositoryPath([string]$Value, [string]$Label) {
     $Candidate = if ([System.IO.Path]::IsPathRooted($Value)) { $Value } else { Join-Path $RepositoryRoot $Value }
@@ -38,13 +39,32 @@ function Resolve-RepositoryPath([string]$Value, [string]$Label) {
     return $Resolved
 }
 
-function Resolve-InputFile([string]$Value, [string]$Label) {
+function Resolve-InputDirectory([string]$Value, [string]$Label) {
     $Candidate = if ([System.IO.Path]::IsPathRooted($Value)) { $Value } else { Join-Path $RepositoryRoot $Value }
     $Resolved = [System.IO.Path]::GetFullPath($Candidate)
-    if (-not (Test-Path -LiteralPath $Resolved -PathType Leaf)) {
+    if (-not (Test-Path -LiteralPath $Resolved -PathType Container)) {
         throw "$Label was not found: $Resolved"
     }
     return $Resolved
+}
+
+function Get-ContainedRelativePath([string]$Root, [string]$Target) {
+    $ResolvedRoot = [System.IO.Path]::GetFullPath($Root).TrimEnd(
+        [System.IO.Path]::DirectorySeparatorChar,
+        [System.IO.Path]::AltDirectorySeparatorChar
+    )
+    $ResolvedTarget = [System.IO.Path]::GetFullPath($Target)
+    $Prefix = $ResolvedRoot + [System.IO.Path]::DirectorySeparatorChar
+    $Comparison = if ($RunningOnWindows) {
+        [System.StringComparison]::OrdinalIgnoreCase
+    }
+    else {
+        [System.StringComparison]::Ordinal
+    }
+    if (-not $ResolvedTarget.StartsWith($Prefix, $Comparison)) {
+        throw "Gateway runtime file escapes the runtime directory: $ResolvedTarget"
+    }
+    return $ResolvedTarget.Substring($Prefix.Length).Replace('\', '/')
 }
 
 function Remove-ContainedTree([string]$Path, [string]$AllowedRoot) {
@@ -78,6 +98,44 @@ function Normalize-StagingText([string]$Root) {
             [System.IO.File]::WriteAllText($_.FullName, $Text, $Utf8NoBom)
         }
     }
+}
+
+function Test-NexusPythonPath([string]$Candidate) {
+    if ([string]::IsNullOrWhiteSpace($Candidate)) { return $false }
+    try { $Full = [System.IO.Path]::GetFullPath($Candidate) } catch { return $false }
+    if (-not (Test-Path -LiteralPath $Full -PathType Leaf)) { return $false }
+    $Parts = @($Full -split '[\\/]')
+    if (@($Parts | Where-Object { $_ -ieq "hermes" }).Count -gt 0) { return $false }
+    return $true
+}
+
+function Resolve-NexusPython([string]$RequestedPath) {
+    $Candidates = New-Object System.Collections.Generic.List[string]
+    if (-not [string]::IsNullOrWhiteSpace($RequestedPath)) {
+        $Candidates.Add($RequestedPath)
+    }
+    if ($RunningOnWindows) {
+        $Candidates.Add((Join-Path $RepositoryRoot ".local-test/venv/Scripts/python.exe"))
+    }
+    else {
+        if (-not [string]::IsNullOrWhiteSpace($env:NEXUS_PYTHON)) {
+            $Candidates.Add($env:NEXUS_PYTHON)
+        }
+        foreach ($Name in @("python3", "python")) {
+            $Command = Get-Command $Name -ErrorAction SilentlyContinue
+            if ($null -ne $Command -and $Command.CommandType -eq "Application") {
+                $Candidates.Add($Command.Source)
+            }
+        }
+    }
+    $Seen = @{}
+    foreach ($Candidate in $Candidates) {
+        try { $Full = [System.IO.Path]::GetFullPath([string]$Candidate) } catch { continue }
+        if ($Seen.ContainsKey($Full)) { continue }
+        $Seen[$Full] = $true
+        if (Test-NexusPythonPath $Full) { return $Full }
+    }
+    throw "A Nexus-owned Python runtime is required to normalize the fnOS package."
 }
 
 function Resolve-Fnpack([string]$RequestedPath) {
@@ -155,26 +213,88 @@ function Test-Fnpack([string]$Executable) {
     }
 }
 
+function Assert-NoLinks([string]$Root) {
+    $Items = @((Get-Item -LiteralPath $Root -Force)) + @(Get-ChildItem -LiteralPath $Root -Recurse -Force)
+    foreach ($Item in $Items) {
+        $IsReparsePoint = (($Item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0)
+        $HasLinkType = $Item.PSObject.Properties.Name -contains "LinkType" -and -not [string]::IsNullOrEmpty([string]$Item.LinkType)
+        if ($IsReparsePoint -or $HasLinkType) {
+            throw "Gateway runtime must not contain links: $($Item.FullName)"
+        }
+    }
+}
+
+function Assert-RuntimeLayout([string]$RuntimeRoot, [hashtable]$PlatformMetadata) {
+    Assert-NoLinks $RuntimeRoot
+    $TopLevel = @(Get-ChildItem -LiteralPath $RuntimeRoot -Force | ForEach-Object { $_.Name } | Sort-Object)
+    $ExpectedTopLevel = @("ca-certificates.crt", "nexus-gateway")
+    if (($TopLevel -join "`n") -ne ($ExpectedTopLevel -join "`n")) {
+        throw "Gateway runtime must contain only ca-certificates.crt and nexus-gateway"
+    }
+    $GatewayDirectory = Join-Path $RuntimeRoot "nexus-gateway"
+    $Executable = Join-Path $RuntimeRoot ($RuntimeExecutableName.Replace('/', [System.IO.Path]::DirectorySeparatorChar))
+    $CaBundle = Join-Path $RuntimeRoot "ca-certificates.crt"
+    if (-not (Test-Path -LiteralPath $GatewayDirectory -PathType Container)) {
+        throw "Gateway runtime directory is missing"
+    }
+    if (-not (Test-Path -LiteralPath $Executable -PathType Leaf)) {
+        throw "Gateway runtime executable is missing"
+    }
+    if (-not (Test-Path -LiteralPath $CaBundle -PathType Leaf)) {
+        throw "Gateway runtime CA bundle is missing"
+    }
+    $Bytes = [System.IO.File]::ReadAllBytes($Executable)
+    if ($Bytes.Length -lt 20 -or $Bytes[0] -ne 0x7f -or $Bytes[1] -ne 0x45 -or $Bytes[2] -ne 0x4c -or $Bytes[3] -ne 0x46) {
+        throw "Gateway runtime executable is not ELF"
+    }
+    if ($Bytes[4] -ne 2 -or $Bytes[5] -ne 1) {
+        throw "Gateway runtime executable must be 64-bit little-endian ELF"
+    }
+    $Machine = [int]$Bytes[18] + (256 * [int]$Bytes[19])
+    if ($Machine -ne $PlatformMetadata.ElfMachine) {
+        throw "Gateway runtime executable architecture does not match $Platform"
+    }
+}
+
+function Write-RuntimeChecksumManifest([string]$RuntimeRoot) {
+    $Files = @(Get-ChildItem -LiteralPath $RuntimeRoot -Recurse -File | Where-Object { $_.Name -ne $RuntimeChecksumName })
+    $RelativePaths = [string[]]@($Files | ForEach-Object {
+        $Relative = Get-ContainedRelativePath $RuntimeRoot $_.FullName
+        if ($Relative.StartsWith('/') -or $Relative -match '(^|/)\.\.(/|$)' -or $Relative.Contains("`n") -or $Relative.Contains("`r")) {
+            throw "unsafe Gateway runtime path: $Relative"
+        }
+        $Relative
+    })
+    [Array]::Sort($RelativePaths, [System.StringComparer]::Ordinal)
+    $Lines = @()
+    foreach ($Relative in $RelativePaths) {
+        $NativeRelative = $Relative.Replace('/', [System.IO.Path]::DirectorySeparatorChar)
+        $Target = Join-Path $RuntimeRoot $NativeRelative
+        $Digest = (Get-FileHash -LiteralPath $Target -Algorithm SHA256).Hash.ToLowerInvariant()
+        $Lines += "$Digest  $Relative"
+    }
+    if ($Lines.Count -eq 0) {
+        throw "Gateway runtime contains no files"
+    }
+    [System.IO.File]::WriteAllText(
+        (Join-Path $RuntimeRoot $RuntimeChecksumName),
+        (($Lines -join "`n") + "`n"),
+        $Utf8NoBom
+    )
+}
+
 $ResolvedOutput = Resolve-RepositoryPath $OutputDirectory "output directory"
-$ResolvedImageArchive = Resolve-InputFile $ImageArchivePath "Gateway image archive"
-$ArchiveStream = [System.IO.File]::OpenRead($ResolvedImageArchive)
-try {
-    $FirstByte = $ArchiveStream.ReadByte()
-    $SecondByte = $ArchiveStream.ReadByte()
-} finally {
-    $ArchiveStream.Dispose()
-}
-if ($FirstByte -ne 0x1f -or $SecondByte -ne 0x8b) {
-    throw "Gateway image archive must be a gzip-compressed Docker save archive"
-}
+$ResolvedRuntime = Resolve-InputDirectory $RuntimeDirectoryPath "Gateway runtime directory"
 $Fnpack = Resolve-Fnpack $FnpackPath
 Test-Fnpack $Fnpack
+$Python = Resolve-NexusPython $PythonPath
 
 $PlatformMetadata = switch ($Platform) {
-    "amd64" { @{ Manifest = "x86"; Docker = "linux/amd64" } }
-    "arm64" { @{ Manifest = "arm"; Docker = "linux/arm64" } }
+    "amd64" { @{ Manifest = "x86"; Runtime = "linux/amd64"; ElfMachine = 62 } }
+    "arm64" { @{ Manifest = "arm"; Runtime = "linux/arm64"; ElfMachine = 183 } }
     default { throw "unsupported fnOS package platform: $Platform" }
 }
+Assert-RuntimeLayout $ResolvedRuntime $PlatformMetadata
 
 $GatewayInit = [System.IO.File]::ReadAllText((Join-Path $RepositoryRoot "gateway/nexus_gateway/__init__.py"))
 $GatewayMatch = [regex]::Match($GatewayInit, '__version__\s*=\s*"([^"]+)"')
@@ -190,21 +310,17 @@ if ($PackageVersion -notmatch ("^" + [regex]::Escape($GatewayVersion) + "-fnos[1
 if ((Read-ManifestValue $Manifest "platform") -ne "all") {
     throw "the fnOS source manifest must remain an architecture-neutral build template"
 }
-$Compose = [System.IO.File]::ReadAllText((Join-Path $PackageSource "app/docker/docker-compose.yaml"))
-$ExpectedImage = "nexus-gateway-fnos:$GatewayVersion"
-if ($Compose -notmatch ("(?m)^\s*image:\s*" + [regex]::Escape($ExpectedImage) + "\s*$")) {
-    throw "fnOS Compose image must be $ExpectedImage"
+if (Test-Path -LiteralPath (Join-Path $PackageSource "app/runtime")) {
+    throw "generated fnOS runtime files must not be committed to the package source"
 }
-if ($Compose -notmatch '(?m)^\s*pull_policy:\s*never\s*$') {
-    throw "fnOS Compose must disable remote image pulls"
-}
-if ($Compose -match '(?i)ghcr\.io|github\.com') {
-    throw "fnOS Compose must not reference GitHub or GHCR"
+if (Test-Path -LiteralPath (Join-Path $PackageSource "app/docker")) {
+    throw "fnOS package source must not contain a container project"
 }
 
 New-Item -ItemType Directory -Path $StagingRoot -Force | Out-Null
 Remove-ContainedTree $StagingPackage $StagingRoot
 Copy-Item -LiteralPath $PackageSource -Destination $StagingPackage -Recurse
+Normalize-StagingText $StagingPackage
 
 $StagingManifestPath = Join-Path $StagingPackage "manifest"
 $StagingManifest = [System.IO.File]::ReadAllText($StagingManifestPath)
@@ -218,21 +334,25 @@ if ((Read-ManifestValue $StagingManifest "platform") -ne $PlatformMetadata.Manif
 }
 [System.IO.File]::WriteAllText($StagingManifestPath, $StagingManifest, $Utf8NoBom)
 
-$StagingDocker = Join-Path $StagingPackage "app/docker"
-$StagingArchive = Join-Path $StagingDocker $PackagedArchiveName
-Copy-Item -LiteralPath $ResolvedImageArchive -Destination $StagingArchive
-$ImageDigest = (Get-FileHash -LiteralPath $StagingArchive -Algorithm SHA256).Hash.ToLowerInvariant()
+$StagingRuntime = Join-Path $StagingPackage "app/runtime"
+New-Item -ItemType Directory -Path $StagingRuntime -Force | Out-Null
+Get-ChildItem -LiteralPath $ResolvedRuntime -Force | ForEach-Object {
+    Copy-Item -LiteralPath $_.FullName -Destination $StagingRuntime -Recurse
+}
+Assert-NoLinks $StagingRuntime
 [System.IO.File]::WriteAllText(
-    (Join-Path $StagingDocker $PackagedChecksumName),
-    "$ImageDigest  $PackagedArchiveName`n",
+    (Join-Path $StagingRuntime $RuntimePlatformName),
+    "$($PlatformMetadata.Runtime)`n",
     $Utf8NoBom
 )
-[System.IO.File]::WriteAllText(
-    (Join-Path $StagingDocker $PackagedPlatformName),
-    "$($PlatformMetadata.Docker)`n",
-    $Utf8NoBom
-)
-Normalize-StagingText $StagingPackage
+if (-not $RunningOnWindows) {
+    $StagingExecutable = Join-Path $StagingRuntime ($RuntimeExecutableName.Replace('/', [System.IO.Path]::DirectorySeparatorChar))
+    & chmod 0755 $StagingExecutable
+    if ($LASTEXITCODE -ne 0) {
+        throw "failed to mark the Gateway runtime executable"
+    }
+}
+Write-RuntimeChecksumManifest $StagingRuntime
 
 New-Item -ItemType Directory -Path $ResolvedOutput -Force | Out-Null
 $OutputName = "Nexus-fnOS-$PackageVersion-$Platform.fpk"
@@ -252,6 +372,10 @@ try {
         throw "fnpack did not produce nexus-gateway.fpk"
     }
     Copy-Item -LiteralPath $Generated -Destination $OutputPath
+    & $Python (Join-Path $RepositoryRoot "scripts/normalize_fnos_package.py") $OutputPath
+    if ($LASTEXITCODE -ne 0) {
+        throw "fnOS package permission normalization failed with exit code $LASTEXITCODE"
+    }
 }
 finally {
     Pop-Location
@@ -263,6 +387,6 @@ $Digest = (Get-FileHash -LiteralPath $OutputPath -Algorithm SHA256).Hash.ToLower
 $ChecksumManifest = Update-ChecksumManifest $ResolvedOutput $OutputName
 
 Write-Host "Built $OutputPath"
-Write-Host "Embedded $($PlatformMetadata.Docker) image archive $ResolvedImageArchive"
+Write-Host "Embedded native $($PlatformMetadata.Runtime) runtime $ResolvedRuntime"
 Write-Host "Updated $ChecksumManifest"
 Write-Host "SHA-256 $Digest"
