@@ -6,20 +6,9 @@ RUNTIME_PLATFORM_FILE="runtime.platform"
 RUNTIME_CHECKSUM_FILE="runtime.sha256"
 RUNTIME_EXECUTABLE="nexus-gateway/nexus-gateway"
 RUNTIME_CA_BUNDLE="ca-certificates.crt"
-VERIFY_TEMP_DIR=""
-
-cleanup_verify_temp() {
-  if [ -n "${VERIFY_TEMP_DIR:-}" ] && [ -n "${TRIM_PKGVAR:-}" ]; then
-    case "$VERIFY_TEMP_DIR" in
-      "$TRIM_PKGVAR"/.runtime-verify.*) rm -rf -- "$VERIFY_TEMP_DIR" ;;
-    esac
-  fi
-  VERIFY_TEMP_DIR=""
-}
 
 fail_setup() {
   local message="$1"
-  cleanup_verify_temp
   if [ -n "${TRIM_TEMP_LOGFILE:-}" ]; then
     printf '%s\n' "$message" > "$TRIM_TEMP_LOGFILE"
   fi
@@ -176,26 +165,20 @@ validate_runtime_dir() {
   local runtime_dir="$1"
   local packaged_platform
   local device_platform
-  local actual_files
-  local listed_files
-  local sorted_files
   local checksum_manifest
   local line
   local expected_checksum
-  local invalid_checksum
   local relative
   local target
   local actual_checksum
-  local duplicate
+  local listed_paths=""
+  local listed_count=0
+  local actual_count=0
 
   runtime_directory_is_complete "$runtime_dir" || fail_setup "The packaged Nexus Gateway runtime is incomplete"
   command -v find >/dev/null 2>&1 || fail_setup "Runtime file verification is unavailable on this device"
-  command -v sort >/dev/null 2>&1 || fail_setup "Runtime file verification is unavailable on this device"
-  command -v uniq >/dev/null 2>&1 || fail_setup "Runtime file verification is unavailable on this device"
-  command -v cmp >/dev/null 2>&1 || fail_setup "Runtime file verification is unavailable on this device"
-  command -v tr >/dev/null 2>&1 || fail_setup "Runtime file verification is unavailable on this device"
 
-  if find "$runtime_dir" -type l -print -quit 2>/dev/null | grep -q .; then
+  if [ -n "$(find "$runtime_dir" -type l -print -quit 2>/dev/null)" ]; then
     fail_setup "The packaged Nexus Gateway runtime contains a symbolic link"
   fi
 
@@ -204,53 +187,43 @@ validate_runtime_dir() {
   [ "$packaged_platform" = "$device_platform" ] || fail_setup "This Nexus package is for $packaged_platform, but this device is $device_platform"
   validate_runtime_elf "$runtime_dir/$RUNTIME_EXECUTABLE" "$packaged_platform"
 
-  require_pkgvar
-  VERIFY_TEMP_DIR="$TRIM_PKGVAR/.runtime-verify.$$"
-  case "$VERIFY_TEMP_DIR" in
-    "$TRIM_PKGVAR"/.runtime-verify.*) ;;
-    *) fail_setup "Unsafe Nexus runtime verification path" ;;
-  esac
-  rm -rf -- "$VERIFY_TEMP_DIR"
-  mkdir -- "$VERIFY_TEMP_DIR" || fail_setup "Nexus runtime verification could not be initialized"
-  actual_files="$VERIFY_TEMP_DIR/actual"
-  listed_files="$VERIFY_TEMP_DIR/listed"
-  sorted_files="$VERIFY_TEMP_DIR/listed.sorted"
-  : > "$actual_files"
-  : > "$listed_files"
-
-  find "$runtime_dir" -type f -print | while IFS= read -r target; do
-    relative=${target#"$runtime_dir"/}
-    [ "$relative" = "$RUNTIME_CHECKSUM_FILE" ] || printf '%s\n' "$relative"
-  done | LC_ALL=C sort > "$actual_files"
-
   checksum_manifest="$runtime_dir/$RUNTIME_CHECKSUM_FILE"
+  while IFS= read -r -d '' target; do
+    [ "$target" = "$checksum_manifest" ] || actual_count=$((actual_count + 1))
+  done < <(find "$runtime_dir" -type f -print0)
+
   while IFS= read -r line || [ -n "$line" ]; do
     [ -n "$line" ] || fail_setup "The packaged runtime checksum manifest contains an empty line"
     expected_checksum=${line%%  *}
     relative=${line#*  }
     [ "$relative" != "$line" ] || fail_setup "The packaged runtime checksum manifest is invalid"
     [ "${#expected_checksum}" -eq 64 ] || fail_setup "The packaged runtime checksum is invalid"
-    invalid_checksum=$(printf '%s' "$expected_checksum" | tr -d '0-9a-f')
-    [ -z "$invalid_checksum" ] || fail_setup "The packaged runtime checksum is invalid"
+    case "$expected_checksum" in
+      *[!0-9a-f]*) fail_setup "The packaged runtime checksum is invalid" ;;
+    esac
     case "$relative" in
       ""|/*|.|..|../*|*/../*|*/..|*\\*|"$RUNTIME_CHECKSUM_FILE")
         fail_setup "The packaged runtime checksum path is unsafe"
         ;;
     esac
+    case $'\n'"$listed_paths"$'\n' in
+      *$'\n'"$relative"$'\n'*) fail_setup "The packaged runtime checksum manifest contains a duplicate file" ;;
+    esac
+    if [ -n "$listed_paths" ]; then
+      listed_paths="$listed_paths"$'\n'"$relative"
+    else
+      listed_paths="$relative"
+    fi
+    listed_count=$((listed_count + 1))
+
     target="$runtime_dir/$relative"
     [ -f "$target" ] && [ ! -L "$target" ] || fail_setup "The packaged runtime checksum references a missing file"
     actual_checksum=$(sha256_file "$target")
     [ "$actual_checksum" = "$expected_checksum" ] || fail_setup "The packaged Nexus Gateway runtime failed SHA-256 verification"
-    printf '%s\n' "$relative" >> "$listed_files"
   done < "$checksum_manifest"
 
-  LC_ALL=C sort "$listed_files" > "$sorted_files"
-  duplicate=$(uniq -d "$sorted_files" | head -n 1 || true)
-  [ -z "$duplicate" ] || fail_setup "The packaged runtime checksum manifest contains a duplicate file"
-  cmp -s "$actual_files" "$sorted_files" || fail_setup "The packaged runtime checksum file set is incomplete"
-  cleanup_verify_temp
+  [ "$listed_count" -eq "$actual_count" ] || fail_setup "The packaged runtime checksum file set is incomplete"
 }
-
 validate_packaged_runtime() {
   local runtime_dir
   runtime_dir=$(resolve_packaged_runtime_dir)

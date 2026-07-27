@@ -6,12 +6,12 @@ Nexus Gateway 提供飞牛 fnOS 原生应用包。安装包只部署 Nexus 自�
 
 同一版本提供两个架构专用安装包：
 
-- x86_64 / amd64 NAS：`Nexus-fnOS-0.1.6-fnos3-amd64.fpk`
-- ARM64 / aarch64 NAS：`Nexus-fnOS-0.1.6-fnos3-arm64.fpk`
+- x86_64 / amd64 NAS：`Nexus-fnOS-0.1.7-fnos4-amd64.fpk`
+- ARM64 / aarch64 NAS：`Nexus-fnOS-0.1.7-fnos4-arm64.fpk`
 - 统一校验文件：`SHA256SUMS.txt`
 - 默认 HTTP 端口：`8787`
 
-当前 fnOS 集成修订为 `0.1.6-fnos3`，对应 Gateway `0.1.6`。每个 FPK 都内置对应架构的 Gateway 原生可执行运行时和 CA 信任库，不包含 Docker 镜像、Compose 项目或在线下载器。
+当前 fnOS 集成修订为 `0.1.7-fnos4`，对应 Gateway `0.1.7`。每个 FPK 都内置对应架构的 Gateway 原生可执行运行时和 CA 信任库，不包含 Docker 镜像、Compose 项目或在线下载器。
 
 **fnOS 设备不需要安装 Docker，也不需要授予 Nexus Docker 权限。** 安装、升级和启动均不会访问 GitHub、GHCR、Docker Hub 或其他容器仓库。GHCR/Docker 镜像仅作为普通 Gateway 部署的可选渠道，不是 fnOS FPK 的依赖。
 
@@ -39,7 +39,7 @@ http://127.0.0.1:8642
 1. 在飞牛 fnOS 应用中心选择手动安装，上传与 NAS 架构匹配的 `.fpk`。
 2. 设置 Nexus 登录账号和至少 8 个字符的密码。
 3. 填写 Hermes API 地址和 Hermes API Server Key。
-4. 安装脚本校验包内运行时的文件集合、SHA-256、ELF 格式和 CPU 架构。
+4. 安装前预检只读校验临时解包运行时的文件集合、SHA-256、ELF 格式和 CPU 架构，不创建或写入 `TRIM_PKGVAR`。
 5. fnOS 直接启动包内 Gateway 原生可执行文件，不调用 Docker，也不联网下载组件。
 6. 从应用中心打开 Nexus，或访问 `http://<NAS 地址>:8787/`。
 7. Android App 中填写相同的 Nexus 地址、账号和密码。
@@ -110,8 +110,8 @@ Windows 示例：
 也可以通过 `-FnpackPath` 显式指定已下载并校验的 `fnpack 1.2.3`。输出为：
 
 ~~~text
-dist/Nexus-fnOS-0.1.6-fnos3-amd64.fpk
-dist/Nexus-fnOS-0.1.6-fnos3-arm64.fpk
+dist/Nexus-fnOS-0.1.7-fnos4-amd64.fpk
+dist/Nexus-fnOS-0.1.7-fnos4-arm64.fpk
 dist/SHA256SUMS.txt
 ~~~
 
@@ -119,11 +119,11 @@ dist/SHA256SUMS.txt
 
 ~~~powershell
 .local-test\venv\Scripts\python.exe scripts\verify_fnos_package.py `
-  dist\Nexus-fnOS-0.1.6-fnos3-amd64.fpk `
+  dist\Nexus-fnOS-0.1.7-fnos4-amd64.fpk `
   --sha256-file dist\SHA256SUMS.txt
 
 .local-test\venv\Scripts\python.exe scripts\verify_fnos_package.py `
-  dist\Nexus-fnOS-0.1.6-fnos3-arm64.fpk `
+  dist\Nexus-fnOS-0.1.7-fnos4-arm64.fpk `
   --sha256-file dist\SHA256SUMS.txt
 ~~~
 

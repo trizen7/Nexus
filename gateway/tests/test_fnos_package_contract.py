@@ -4,8 +4,12 @@ import hashlib
 import importlib.util
 import io
 import json
+import os
+import platform as host_platform
 import re
+import shutil
 import struct
+import subprocess
 import sys
 import tarfile
 from dataclasses import dataclass
@@ -288,9 +292,9 @@ def test_fnos_manifest_desktop_and_icons_are_consistent() -> None:
         (ROOT / "gateway" / "nexus_gateway" / "__init__.py").read_text(encoding="utf-8"),
     ).group(1)
 
-    assert gateway_version == "0.1.6"
+    assert gateway_version == "0.1.7"
     assert manifest["appname"] == "nexus-gateway"
-    assert manifest["version"] == "0.1.6-fnos3"
+    assert manifest["version"] == "0.1.7-fnos4"
     assert manifest["version"].startswith(f"{gateway_version}-fnos")
     assert manifest["source"] == "thirdparty"
     assert manifest["platform"] == "all"
@@ -548,6 +552,24 @@ def test_fnos_lifecycle_validates_runtime_and_manages_only_native_gateway() -> N
 
     assert "validate_packaged_runtime" in install_init
     assert "validate_packaged_runtime" in upgrade_init
+    assert "TRIM_PKGVAR" not in install_init + upgrade_init
+    runtime_validation = re.search(
+        r"(?ms)^validate_runtime_dir\(\) \{\n(.*?)^\}$",
+        setup_common,
+    )
+    assert runtime_validation is not None
+    validation_body = runtime_validation.group(1)
+    for forbidden in (
+        "TRIM_PKGVAR",
+        "require_pkgvar",
+        "VERIFY_TEMP_DIR",
+        "mkdir",
+        "rm -rf",
+        "sort",
+        "uniq",
+        "cmp",
+    ):
+        assert forbidden not in validation_body
     assert '"$SCRIPT_DIR/main" stop' in config_callback
     assert '"$SCRIPT_DIR/main" start' in config_callback
     for fragment in (
@@ -571,6 +593,65 @@ def test_fnos_lifecycle_validates_runtime_and_manages_only_native_gateway() -> N
     ):
         assert fragment in main
     assert "docker" not in (setup_common + main).lower()
+
+
+def _write_shell_test_runtime(package_root: Path) -> None:
+    machine = host_platform.machine().lower()
+    if machine in {"x86_64", "amd64"}:
+        runtime_platform = "linux/amd64"
+        elf_machine = 62
+    elif machine in {"aarch64", "arm64"}:
+        runtime_platform = "linux/arm64"
+        elf_machine = 183
+    else:
+        pytest.skip(f"unsupported shell-test architecture: {machine}")
+
+    runtime = package_root / "runtime"
+    executable = runtime / "nexus-gateway" / "nexus-gateway"
+    executable.parent.mkdir(parents=True)
+    (runtime / "runtime.platform").write_text(runtime_platform + "\n", encoding="utf-8")
+    (runtime / "ca-certificates.crt").write_text(
+        "-----BEGIN CERTIFICATE-----\nTEST\n-----END CERTIFICATE-----\n",
+        encoding="utf-8",
+    )
+    executable.write_bytes(_minimal_elf(elf_machine))
+    executable.chmod(0o755)
+
+    entries = []
+    for target in sorted(path for path in runtime.rglob("*") if path.is_file()):
+        relative = target.relative_to(runtime).as_posix()
+        if relative != "runtime.sha256":
+            entries.append(f"{hashlib.sha256(target.read_bytes()).hexdigest()}  {relative}")
+    (runtime / "runtime.sha256").write_text("\n".join(entries) + "\n", encoding="utf-8")
+
+
+@pytest.mark.skipif(sys.platform != "linux" or shutil.which("bash") is None, reason="requires Linux bash")
+@pytest.mark.parametrize("command_name", ["install_init", "upgrade_init"])
+def test_fnos_preflight_does_not_require_or_write_pkgvar(tmp_path: Path, command_name: str) -> None:
+    package_root = tmp_path / "package"
+    _write_shell_test_runtime(package_root)
+
+    env = os.environ.copy()
+    env.update(
+        {
+            "TRIM_PKGINST_TEMP_DIR": str(package_root),
+            "TRIM_PKGVAR": f"/proc/nexus-preflight-must-not-write-{os.getpid()}",
+            "wizard_nexus_username": "admin",
+            "wizard_nexus_password": "correct horse battery staple",
+            "wizard_hermes_api_url": "http://127.0.0.1:8000/",
+            "wizard_hermes_api_token": "test-key-not-a-secret",
+        }
+    )
+    result = subprocess.run(
+        ["bash", str(PACKAGE / "cmd" / command_name)],
+        env=env,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stdout + result.stderr
+    assert not Path(env["TRIM_PKGVAR"]).exists()
 
 
 def test_fnos_build_and_workflows_export_native_runtime_directories() -> None:
@@ -705,7 +786,7 @@ def test_fnos_verifier_accepts_self_contained_native_packages(tmp_path: Path, ar
     digest = hashlib.sha256(fpk.read_bytes()).hexdigest()
     checksum = tmp_path / "SHA256SUMS.txt"
     checksum.write_text(
-        "0" * 64 + "  Nexus-Android-0.1.6-release.apk\n" + f"{digest}  {fpk.name}\n",
+        "0" * 64 + "  Nexus-Android-0.1.7-release.apk\n" + f"{digest}  {fpk.name}\n",
         encoding="utf-8",
     )
 
@@ -794,6 +875,6 @@ def test_fnos_verifier_requires_unified_checksum_entry(tmp_path: Path) -> None:
     verifier = _load_verifier()
     fpk = _build_synthetic_fpk(tmp_path, "amd64")
     checksum = tmp_path / "SHA256SUMS.txt"
-    checksum.write_text("0" * 64 + "  Nexus-Android-0.1.6-release.apk\n", encoding="utf-8")
+    checksum.write_text("0" * 64 + "  Nexus-Android-0.1.7-release.apk\n", encoding="utf-8")
     with pytest.raises(verifier.VerificationError, match="does not contain"):
         verifier.verify_package(fpk, checksum)
