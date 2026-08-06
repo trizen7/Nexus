@@ -35,6 +35,9 @@ jobs:
           cache: pip
           cache-dependency-path: gateway/requirements-dev.txt
       - run: pip install -r gateway/requirements-dev.txt
+      - name: Audit Gateway runtime dependencies
+        working-directory: gateway
+        run: python -m pip_audit -r requirements.txt
       - working-directory: gateway
         run: python -m pytest tests -q
       - working-directory: gateway
