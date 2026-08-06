@@ -69,6 +69,15 @@ async def upstream_client():
         "status": 200,
         "payload": None,
     }
+    capabilities_state = {
+        "status": 404,
+        "payload": {},
+    }
+    audio_transcription_state = {
+        "status": 200,
+        "payload": {"text": "HTTP 语音转写", "provider": "test-http"},
+    }
+    audio_requests: list[dict[str, object]] = []
     probe_counts = {"health_detailed": 0, "sessions": 0}
 
     async def health(_request):
@@ -156,6 +165,34 @@ async def upstream_client():
             content_type="text/event-stream",
         )
 
+    async def capabilities(request):
+        if not authorized(request):
+            return web.json_response({"detail": "invalid upstream credential"}, status=401)
+        return web.json_response(
+            capabilities_state["payload"],
+            status=int(capabilities_state["status"]),
+        )
+
+    async def audio_transcriptions(request):
+        if not authorized(request):
+            return web.json_response({"detail": "invalid upstream credential"}, status=401)
+        reader = await request.multipart()
+        uploaded = b""
+        filename = ""
+        async for field in reader:
+            if field.name == "file":
+                filename = field.filename or ""
+                uploaded = await field.read(decode=False)
+        audio_requests.append({
+            "authorization": request.headers.get("Authorization", ""),
+            "filename": filename,
+            "content": uploaded,
+        })
+        return web.json_response(
+            audio_transcription_state["payload"],
+            status=int(audio_transcription_state["status"]),
+        )
+
     async def messages(request):
         assert request.headers["Authorization"] == "Bearer upstream-secret"
         data = [
@@ -185,10 +222,59 @@ async def upstream_client():
         return web.json_response(payload)
 
 
+    profile_captured_chat: dict = {}
+    profile_requests: list[tuple[str, str]] = []
+
+    def profile_authorized(request) -> bool:
+        return request.headers.get("Authorization") == "Bearer profile-secret"
+
+    async def profile_health(_request):
+        return web.json_response({"status": "ok", "platform": "hermes-agent", "version": "profile-test"})
+
+    async def profile_detailed_health(request):
+        if not profile_authorized(request):
+            return web.json_response({"detail": "invalid profile credential"}, status=401)
+        return web.json_response({"status": "ok", "gateway_busy": False, "active_agents": 0})
+
+    async def profile_models(request):
+        if not profile_authorized(request):
+            return web.json_response({"detail": "invalid profile credential"}, status=401)
+        return web.json_response({"object": "list", "data": [{"id": "work", "parent": None}]})
+
+    async def profile_sessions(request):
+        profile_requests.append((request.method, request.path))
+        if not profile_authorized(request):
+            return web.json_response({"detail": "invalid profile credential"}, status=401)
+        return web.json_response({
+            "object": "list",
+            "data": [{
+                "id": "work-session",
+                "title": "Work",
+                "source": "api_server",
+                "message_count": 0,
+                "last_active": 2.0,
+            }],
+        })
+
+    async def profile_chat(request):
+        profile_requests.append((request.method, request.path))
+        if not profile_authorized(request):
+            return web.json_response({"detail": "invalid profile credential"}, status=401)
+        profile_captured_chat.clear()
+        profile_captured_chat.update(await request.json())
+        response = web.StreamResponse(headers={"Content-Type": "text/event-stream"})
+        await response.prepare(request)
+        await response.write(b'event: assistant.delta\ndata: {"delta":"work"}\n\n')
+        await response.write(b'event: run.completed\ndata: {"completed":true}\n\n')
+        await response.write_eof()
+        return response
+
     app = web.Application()
     app.router.add_get("/health", health)
     app.router.add_get("/health/detailed", detailed_health)
     app.router.add_get("/v1/models", models)
+    app.router.add_get("/v1/capabilities", capabilities)
+    app.router.add_post("/v1/audio/transcriptions", audio_transcriptions)
     app.router.add_get("/api/sessions", sessions)
     app.router.add_post("/api/sessions", create_session)
     app.router.add_patch("/api/sessions/{session_id}", update_session)
@@ -197,6 +283,11 @@ async def upstream_client():
     app.router.add_post("/api/sessions/{session_id}/chat", chat)
     app.router.add_post("/api/sessions/{session_id}/chat/stream", chat)
     app.router.add_post("/v1/chat/completions", chat_completions)
+    app.router.add_get("/profile-a/health", profile_health)
+    app.router.add_get("/profile-a/health/detailed", profile_detailed_health)
+    app.router.add_get("/profile-a/v1/models", profile_models)
+    app.router.add_get("/profile-a/api/sessions", profile_sessions)
+    app.router.add_post("/profile-a/api/sessions/{session_id}/chat/stream", profile_chat)
     server = TestServer(app)
     client = TestClient(server)
     client.captured_chat = captured_chat
@@ -210,7 +301,12 @@ async def upstream_client():
     client.expected_auth = expected_auth
     client.session_state = session_state
     client.chat_state = chat_state
+    client.capabilities_state = capabilities_state
+    client.audio_transcription_state = audio_transcription_state
+    client.audio_requests = audio_requests
     client.probe_counts = probe_counts
+    client.profile_captured_chat = profile_captured_chat
+    client.profile_requests = profile_requests
     await client.start_server()
     try:
         yield client
@@ -237,6 +333,21 @@ async def gateway_client(tmp_path: Path, upstream_client: TestClient):
         yield client
     finally:
         await client.close()
+
+
+def create_http_transcription_gateway(tmp_path: Path, upstream_client: TestClient):
+    return create_app(
+        username="nexus",
+        password="test-password",
+        session_secret="test-session-secret",
+        upstream_url=str(upstream_client.make_url("/")).rstrip("/"),
+        upstream_token="upstream-secret",
+        storage_dir=tmp_path / "media",
+        credentials_path=tmp_path / "auth.json",
+        config_path=tmp_path / "config.json",
+        max_upload_bytes=1024 * 1024,
+        transcribe_audio=None,
+    )
 
 
 async def login(client: TestClient) -> str:
@@ -1048,6 +1159,27 @@ async def auth_headers(client: TestClient) -> dict[str, str]:
     return {"Authorization": f"Bearer {await login(client)}"}
 
 
+async def configure_work_profile(gateway_client: TestClient, upstream_client: TestClient) -> dict[str, str]:
+    headers = await auth_headers(gateway_client)
+    response = await gateway_client.put(
+        "/api/admin/hermes-config",
+        headers=headers,
+        json={
+            "current_password": "test-password",
+            "hermes_api_url": gateway_client.server.app[GATEWAY_CONFIG_KEY].upstream_url,
+            "hermes_api_token": "",
+            "profiles": [{
+                "id": "work",
+                "name": "工作",
+                "hermes_api_url": str(upstream_client.make_url("/profile-a")).rstrip("/"),
+                "hermes_api_token": "profile-secret",
+            }],
+        },
+    )
+    assert response.status == 200, await response.text()
+    return {**headers, "X-Nexus-Hermes-Profile": "work"}
+
+
 @pytest.mark.asyncio
 async def test_protected_routes_require_device_token(gateway_client: TestClient):
     response = await gateway_client.get("/api/sessions")
@@ -1105,6 +1237,11 @@ async def test_gateway_keeps_hermes_run_alive_after_mobile_disconnect(
             break
     assert body["status"] == "completed"
     assert body["active"] is False
+    await asyncio.sleep(0)
+    tracker = gateway_client.server.app[RUN_TRACKER_KEY]
+    assert "session-1" not in tracker.tasks
+    assert "session-1" not in tracker.buffers
+    assert "session-1" not in tracker.last_persisted
 
 
 @pytest.mark.asyncio
@@ -1495,6 +1632,7 @@ async def test_admin_hermes_config_never_returns_api_key(gateway_client: TestCli
     assert body == {
         "hermes_api_url": gateway_client.server.app[GATEWAY_CONFIG_KEY].upstream_url,
         "key_configured": True,
+        "profiles": [],
     }
     assert "hermes_api_token" not in body
     assert "upstream-secret" not in raw
@@ -1595,6 +1733,239 @@ async def test_admin_hermes_config_blank_key_keeps_existing_verified_key(gateway
     assert response.status == 200
     saved = json.loads(gateway_client.server.app[CONFIG_PATH_KEY].read_text(encoding="utf-8"))
     assert saved["hermes_api_token"] == "upstream-secret"
+
+
+@pytest.mark.asyncio
+async def test_admin_hermes_profiles_are_verified_persisted_and_never_return_keys(
+    gateway_client: TestClient,
+    upstream_client: TestClient,
+):
+    headers = await configure_work_profile(gateway_client, upstream_client)
+
+    response = await gateway_client.get("/api/admin/hermes-config", headers=headers)
+    assert response.status == 200
+    raw = await response.text()
+    body = json.loads(raw)
+    assert body["profiles"] == [{
+        "id": "work",
+        "name": "工作",
+        "is_default": False,
+        "hermes_api_url": str(upstream_client.make_url("/profile-a")).rstrip("/"),
+        "key_configured": True,
+    }]
+    assert "profile-secret" not in raw
+    assert "upstream-secret" not in raw
+
+    saved = json.loads(gateway_client.server.app[CONFIG_PATH_KEY].read_text(encoding="utf-8"))
+    assert saved["hermes_profiles"][0]["id"] == "work"
+    assert saved["hermes_profiles"][0]["hermes_api_token"] == "profile-secret"
+
+
+@pytest.mark.asyncio
+async def test_profile_directory_and_proxy_use_selected_original_hermes_api(
+    gateway_client: TestClient,
+    upstream_client: TestClient,
+):
+    headers = await configure_work_profile(gateway_client, upstream_client)
+
+    directory = await gateway_client.get("/api/hermes/profiles", headers=headers)
+    assert directory.status == 200
+    profiles = (await directory.json())["data"]
+    assert profiles == [
+        {"id": "default", "name": "Hermes 默认（default）", "is_default": True},
+        {"id": "work", "name": "工作", "is_default": False},
+    ]
+
+    sessions = await gateway_client.get("/api/sessions", headers=headers)
+    assert sessions.status == 200
+    assert [item["id"] for item in (await sessions.json())["data"]] == ["work-session"]
+    assert ("GET", "/profile-a/api/sessions") in upstream_client.profile_requests
+
+    chat = await gateway_client.post(
+        "/api/sessions/work-session/chat/stream",
+        headers=headers,
+        json={"message": "profile chat", "persona_model": "legacy-wrong-field"},
+    )
+    assert chat.status == 200
+    assert "work" in await chat.text()
+    assert upstream_client.profile_captured_chat == {"message": "profile chat"}
+
+
+@pytest.mark.asyncio
+async def test_run_tracker_status_is_isolated_for_same_session_id_across_profiles(
+    gateway_client: TestClient,
+    upstream_client: TestClient,
+):
+    profile_headers = await configure_work_profile(gateway_client, upstream_client)
+    default_headers = {key: value for key, value in profile_headers.items() if key != "X-Nexus-Hermes-Profile"}
+    tracker = gateway_client.server.app[RUN_TRACKER_KEY]
+    tracker.start("shared-session", "run-default")
+    tracker.start("profile:work:shared-session", "run-work")
+
+    default_status = await gateway_client.get(
+        "/api/sessions/shared-session/run",
+        headers=default_headers,
+    )
+    work_status = await gateway_client.get(
+        "/api/sessions/shared-session/run",
+        headers=profile_headers,
+    )
+
+    default_payload = await default_status.json()
+    work_payload = await work_status.json()
+    assert default_payload["run_id"] == "run-default"
+    assert work_payload["run_id"] == "run-work"
+    assert default_payload["session_id"] == "shared-session"
+    assert work_payload["session_id"] == "shared-session"
+
+
+@pytest.mark.asyncio
+async def test_default_hermes_url_change_requires_key_to_prevent_secret_forwarding(
+    gateway_client: TestClient,
+):
+    headers = await auth_headers(gateway_client)
+    config = gateway_client.server.app[GATEWAY_CONFIG_KEY]
+    original_url = config.upstream_url
+
+    response = await gateway_client.put(
+        "/api/admin/hermes-config",
+        headers=headers,
+        json={
+            "current_password": "test-password",
+            "hermes_api_url": f"{original_url}/moved",
+            "hermes_api_token": "",
+        },
+    )
+
+    assert response.status == 400
+    assert (await response.json())["error"]["code"] == "missing_hermes_token"
+    assert config.upstream_url == original_url
+    assert config.upstream_token == "upstream-secret"
+
+
+@pytest.mark.asyncio
+async def test_profile_blank_key_is_retained_only_when_profile_url_is_unchanged(
+    gateway_client: TestClient,
+    upstream_client: TestClient,
+):
+    headers = await configure_work_profile(gateway_client, upstream_client)
+    config = gateway_client.server.app[GATEWAY_CONFIG_KEY]
+    original_url = config.profiles["work"].upstream_url
+
+    retained = await gateway_client.put(
+        "/api/admin/hermes-config",
+        headers=headers,
+        json={
+            "current_password": "test-password",
+            "hermes_api_url": config.upstream_url,
+            "hermes_api_token": "",
+            "profiles": [{
+                "id": "work",
+                "name": "工作助手",
+                "hermes_api_url": original_url,
+                "hermes_api_token": "",
+            }],
+        },
+    )
+    assert retained.status == 200, await retained.text()
+    assert config.profiles["work"].upstream_token == "profile-secret"
+    assert config.profiles["work"].name == "工作助手"
+
+    rejected = await gateway_client.put(
+        "/api/admin/hermes-config",
+        headers=headers,
+        json={
+            "current_password": "test-password",
+            "hermes_api_url": config.upstream_url,
+            "hermes_api_token": "",
+            "profiles": [{
+                "id": "work",
+                "name": "工作助手",
+                "hermes_api_url": f"{original_url}/moved",
+                "hermes_api_token": "",
+            }],
+        },
+    )
+    assert rejected.status == 400
+    assert (await rejected.json())["error"]["code"] == "missing_hermes_profile_token"
+    assert config.profiles["work"].upstream_url == original_url
+    assert config.profiles["work"].upstream_token == "profile-secret"
+
+
+@pytest.mark.asyncio
+async def test_profile_can_be_removed_from_persisted_directory(
+    gateway_client: TestClient,
+    upstream_client: TestClient,
+):
+    headers = await configure_work_profile(gateway_client, upstream_client)
+    config = gateway_client.server.app[GATEWAY_CONFIG_KEY]
+
+    response = await gateway_client.put(
+        "/api/admin/hermes-config",
+        headers=headers,
+        json={
+            "current_password": "test-password",
+            "hermes_api_url": config.upstream_url,
+            "hermes_api_token": "",
+            "profiles": [],
+        },
+    )
+
+    assert response.status == 200, await response.text()
+    directory = await gateway_client.get("/api/hermes/profiles", headers=headers)
+    assert [item["id"] for item in (await directory.json())["data"]] == ["default"]
+    saved = json.loads(gateway_client.server.app[CONFIG_PATH_KEY].read_text(encoding="utf-8"))
+    assert "hermes_profiles" not in saved
+
+
+@pytest.mark.asyncio
+async def test_saved_profiles_are_restored_after_gateway_restart(
+    tmp_path: Path,
+    upstream_client: TestClient,
+):
+    config_path = tmp_path / "config.json"
+    config_path.write_text(json.dumps({
+        "hermes_api_url": str(upstream_client.make_url("/")).rstrip("/"),
+        "hermes_api_token": "upstream-secret",
+        "session_secret": "restart-session-secret",
+        "hermes_profiles": [{
+            "id": "work",
+            "name": "工作",
+            "hermes_api_url": str(upstream_client.make_url("/profile-a")).rstrip("/"),
+            "hermes_api_token": "profile-secret",
+        }],
+    }, ensure_ascii=False), encoding="utf-8")
+    app = create_app(
+        username="nexus",
+        password="test-password",
+        session_secret=None,
+        upstream_url=None,
+        upstream_token=None,
+        storage_dir=tmp_path / "media",
+        credentials_path=tmp_path / "auth.json",
+        config_path=config_path,
+        transcribe_audio=lambda _path: {"success": False, "transcript": ""},
+    )
+
+    async with TestClient(TestServer(app)) as client:
+        headers = await auth_headers(client)
+        directory = await client.get("/api/hermes/profiles", headers=headers)
+        assert [item["id"] for item in (await directory.json())["data"]] == ["default", "work"]
+        profile_headers = {**headers, "X-Nexus-Hermes-Profile": "work"}
+        sessions = await client.get("/api/sessions", headers=profile_headers)
+        assert sessions.status == 200
+        assert [item["id"] for item in (await sessions.json())["data"]] == ["work-session"]
+
+
+@pytest.mark.asyncio
+async def test_unknown_profile_header_fails_before_contacting_upstream(gateway_client: TestClient):
+    headers = await auth_headers(gateway_client)
+    headers["X-Nexus-Hermes-Profile"] = "missing"
+
+    response = await gateway_client.get("/api/sessions", headers=headers)
+
+    assert response.status == 400
+    assert (await response.json())["error"]["code"] == "unknown_hermes_profile"
 
 
 @pytest.mark.asyncio
@@ -2056,6 +2427,85 @@ async def test_audio_upload_is_transcribed_on_server(gateway_client: TestClient)
     assert len((await audio.json())["data"]) == 1
 
 
+@pytest.mark.asyncio
+async def test_packaged_gateway_reports_transcription_unavailable_without_http_capability(
+    tmp_path: Path,
+    upstream_client: TestClient,
+):
+    upstream_client.capabilities_state.update({"status": 404, "payload": {}})
+    app = create_http_transcription_gateway(tmp_path, upstream_client)
+    async with TestClient(TestServer(app)) as client:
+        form = FormData()
+        form.add_field("file", io.BytesIO(b"audio-bytes"), filename="voice.m4a", content_type="audio/mp4")
+        response = await client.post(
+            "/api/audio/transcriptions",
+            data=form,
+            headers=await auth_headers(client),
+        )
+
+        raw = await response.text()
+        assert response.status == 501
+        assert json.loads(raw)["error"]["code"] == "transcription_unavailable"
+        assert "upstream-secret" not in raw
+        assert upstream_client.audio_requests == []
+
+
+@pytest.mark.asyncio
+async def test_packaged_gateway_does_not_leak_key_when_capability_auth_fails(
+    tmp_path: Path,
+    upstream_client: TestClient,
+):
+    upstream_client.expected_auth["token"] = "different-secret"
+    app = create_http_transcription_gateway(tmp_path, upstream_client)
+    async with TestClient(TestServer(app)) as client:
+        form = FormData()
+        form.add_field("file", io.BytesIO(b"audio-bytes"), filename="voice.m4a", content_type="audio/mp4")
+        response = await client.post(
+            "/api/audio/transcriptions",
+            data=form,
+            headers=await auth_headers(client),
+        )
+
+        raw = await response.text()
+        assert response.status == 502
+        assert json.loads(raw)["error"]["code"] == "hermes_auth_failed"
+        assert "upstream-secret" not in raw
+        assert "different-secret" not in raw
+
+
+@pytest.mark.asyncio
+async def test_packaged_gateway_uses_only_capability_advertised_http_transcription(
+    tmp_path: Path,
+    upstream_client: TestClient,
+):
+    upstream_client.capabilities_state.update({
+        "status": 200,
+        "payload": {
+            "features": {"audio_api": True},
+            "endpoints": {"audio_transcriptions": {"path": "/v1/audio/transcriptions"}},
+        },
+    })
+    app = create_http_transcription_gateway(tmp_path, upstream_client)
+    async with TestClient(TestServer(app)) as client:
+        form = FormData()
+        form.add_field("file", io.BytesIO(b"audio-bytes"), filename="voice.m4a", content_type="audio/mp4")
+        response = await client.post(
+            "/api/audio/transcriptions",
+            data=form,
+            headers=await auth_headers(client),
+        )
+
+        assert response.status == 200, await response.text()
+        payload = await response.json()
+        assert payload["transcript"] == "HTTP 语音转写"
+        assert payload["provider"] == "test-http"
+        assert upstream_client.audio_requests == [{
+            "authorization": "Bearer upstream-secret",
+            "filename": "voice.m4a",
+            "content": b"audio-bytes",
+        }]
+
+
 def mobile_client_context() -> dict[str, object]:
     return {
         "platform": "android",
@@ -2316,7 +2766,7 @@ async def test_chat_without_model_keeps_native_session_route(
 
 
 @pytest.mark.asyncio
-async def test_persona_model_stays_on_native_session_route(
+async def test_legacy_persona_model_is_not_forwarded_as_an_inference_model(
     gateway_client: TestClient,
     upstream_client: TestClient,
 ):
@@ -2328,7 +2778,7 @@ async def test_persona_model_stays_on_native_session_route(
 
     assert response.status == 200
     await response.text()
-    assert upstream_client.captured_chat == {"message": "persona", "model": "profile-a"}
+    assert upstream_client.captured_chat == {"message": "persona"}
     assert upstream_client.captured_completion == {}
 
 

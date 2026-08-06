@@ -255,14 +255,18 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun handleNotificationIntent(intent: Intent?) {
-        intent?.getStringExtra(NotificationHelper.EXTRA_SESSION_ID)?.let { sessionId ->
-            viewModel.selectSession(sessionId)
-            intent.removeExtra(NotificationHelper.EXTRA_SESSION_ID)
+        val profileId = intent?.getStringExtra(NotificationHelper.EXTRA_PROFILE_ID)
+        val sessionId = intent?.getStringExtra(NotificationHelper.EXTRA_SESSION_ID)
+        val fileKey = intent?.getStringExtra(NotificationHelper.EXTRA_FILE_KEY)
+        if (sessionId != null) {
+            viewModel.openNotificationSession(profileId, sessionId, fileKey)
+        } else {
+            viewModel.openNotificationProfile(profileId)
+            fileKey?.let(viewModel::openDownloadFromNotification)
         }
-        intent?.getStringExtra(NotificationHelper.EXTRA_FILE_KEY)?.let { fileKey ->
-            viewModel.openDownloadFromNotification(fileKey)
-            intent.removeExtra(NotificationHelper.EXTRA_FILE_KEY)
-        }
+        intent?.removeExtra(NotificationHelper.EXTRA_SESSION_ID)
+        intent?.removeExtra(NotificationHelper.EXTRA_PROFILE_ID)
+        intent?.removeExtra(NotificationHelper.EXTRA_FILE_KEY)
     }
 }
 

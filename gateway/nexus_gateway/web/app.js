@@ -3,6 +3,7 @@
 let token = localStorage.getItem('nexus_token') || '';
 let files = [];
 let audioFiles = [];
+let hermesProfiles = [];
 
 const $ = id => document.getElementById(id);
 const titles = {
@@ -195,6 +196,49 @@ async function loadHermesConfig() {
   const payload = await response.json();
   $('hermesApiUrl').value = payload.hermes_api_url || '';
   $('hermesKeyConfigured').textContent = payload.key_configured ? '当前已配置 API Server Key' : '当前未配置 API Server Key';
+  hermesProfiles = Array.isArray(payload.profiles) ? payload.profiles.map(profile => ({ ...profile })) : [];
+  renderHermesProfiles();
+}
+
+function renderHermesProfiles() {
+  const container = $('hermesProfileRows');
+  if (!hermesProfiles.length) {
+    container.innerHTML = '<div class="profile-empty">尚未配置其他人格，App 将仅显示默认 Hermes Profile。</div>';
+    return;
+  }
+  container.innerHTML = hermesProfiles.map((profile, index) => `
+    <div class="profile-row" data-profile-index="${index}">
+      <label class="field"><span>人格 ID</span><input data-profile-field="id" value="${escAttr(profile.id || '')}" maxlength="64" placeholder="work" required></label>
+      <label class="field"><span>显示名称</span><input data-profile-field="name" value="${escAttr(profile.name || '')}" maxlength="64" placeholder="工作助手" required></label>
+      <label class="field"><span>Hermes Profile API 地址</span><input data-profile-field="hermes_api_url" type="url" value="${escAttr(profile.hermes_api_url || '')}" placeholder="http://Hermes主机:8642/p/work" required></label>
+      <label class="field"><span>API Server Key</span><input data-profile-field="hermes_api_token" type="password" autocomplete="off" value="${escAttr(profile.hermes_api_token || '')}" placeholder="${profile.key_configured ? '地址不变时可留空；修改地址需重填' : '请填写 Key'}"></label>
+      <button class="button compact danger" type="button" data-remove-profile="${index}">删除</button>
+    </div>
+  `).join('');
+  container.querySelectorAll('[data-profile-field]').forEach(input => {
+    input.addEventListener('input', event => {
+      const row = event.target.closest('[data-profile-index]');
+      const index = Number(row?.dataset.profileIndex);
+      if (!Number.isInteger(index) || !hermesProfiles[index]) return;
+      hermesProfiles[index][event.target.dataset.profileField] = event.target.value;
+    });
+  });
+  container.querySelectorAll('[data-remove-profile]').forEach(button => {
+    button.addEventListener('click', () => {
+      const index = Number(button.dataset.removeProfile);
+      if (!Number.isInteger(index)) return;
+      hermesProfiles.splice(index, 1);
+      renderHermesProfiles();
+    });
+  });
+}
+
+function addHermesProfile() {
+  hermesProfiles.push({ id: '', name: '', hermes_api_url: '', hermes_api_token: '', key_configured: false });
+  renderHermesProfiles();
+  const rows = $('hermesProfileRows').querySelectorAll('[data-profile-index]');
+  const row = rows[rows.length - 1];
+  row?.querySelector('[data-profile-field="id"]')?.focus();
 }
 
 async function saveHermesConfig(event) {
@@ -212,6 +256,12 @@ async function saveHermesConfig(event) {
         current_password: $('hermesCurrentPassword').value,
         hermes_api_url: $('hermesApiUrl').value.trim(),
         hermes_api_token: $('hermesApiToken').value,
+        profiles: hermesProfiles.map(profile => ({
+          id: (profile.id || '').trim(),
+          name: (profile.name || '').trim(),
+          hermes_api_url: (profile.hermes_api_url || '').trim(),
+          hermes_api_token: profile.hermes_api_token || '',
+        })),
       }),
     });
     const payload = await response.json();
@@ -455,6 +505,7 @@ $('loginForm').onsubmit = signIn;
 $('logoutButton').onclick = logout;
 $('accountForm').onsubmit = changeAccount;
 $('hermesConfigForm').onsubmit = saveHermesConfig;
+$('addHermesProfileButton').onclick = addHermesProfile;
 $('search').oninput = renderFiles;
 $('audioSearch').oninput = renderAudio;
 $('refreshFilesButton').onclick = loadFiles;

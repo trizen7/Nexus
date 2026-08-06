@@ -22,17 +22,17 @@ class ConnectionStore(context: Context) {
     private val tokenCipher = TokenCipher()
 
     fun load(): SavedConnection {
-        migratePersonaSelection()
+        migrateProfileSelection()
         val storedServerUrl = preferences.getString(KEY_SERVER_URL, "").orEmpty()
+        val selectedProfileId = preferences.getString(KEY_SELECTED_PROFILE, "default").orEmpty().ifBlank { "default" }
         return SavedConnection(
             serverUrl = storedServerUrl,
             username = preferences.getString(KEY_USERNAME, "").orEmpty(),
             token = tokenCipher.decrypt(preferences.getString(KEY_TOKEN, "").orEmpty()),
-            activeSessionId = preferences.getString(KEY_ACTIVE_SESSION, null),
+            activeSessionId = loadActiveSession(selectedProfileId),
             autoRefresh = preferences.getBoolean(KEY_AUTO_REFRESH, true),
             themeMode = ThemeMode.fromStored(preferences.getString(KEY_THEME_MODE, null)),
-            selectedPersonaModelId = preferences.getString(KEY_SELECTED_PERSONA_MODEL, null)
-                ?: preferences.getString(KEY_LEGACY_SELECTED_MODEL, null),
+            selectedProfileId = selectedProfileId,
             selectedInferenceModelId = preferences.getString(KEY_SELECTED_INFERENCE_MODEL, null),
             selectedReasoningEffort = ReasoningEffort.fromStored(
                 preferences.getString(KEY_SELECTED_REASONING_EFFORT, null)
@@ -40,12 +40,18 @@ class ConnectionStore(context: Context) {
         )
     }
 
-    fun saveLogin(serverUrl: String, username: String, token: String, activeSessionId: String?) {
+    fun saveLogin(
+        serverUrl: String,
+        username: String,
+        token: String,
+        profileId: String,
+        activeSessionId: String?
+    ) {
         preferences.edit()
             .putString(KEY_SERVER_URL, serverUrl)
             .putString(KEY_USERNAME, username)
             .putString(KEY_TOKEN, tokenCipher.encrypt(token))
-            .putString(KEY_ACTIVE_SESSION, activeSessionId)
+            .putString(activeSessionPreferenceKey(profileId), activeSessionId)
             .remove(KEY_PASSWORD)
             .remove(KEY_LEGACY_TOKEN)
             .apply()
@@ -59,8 +65,11 @@ class ConnectionStore(context: Context) {
             .apply()
     }
 
-    fun saveActiveSession(activeSessionId: String?) {
-        preferences.edit().putString(KEY_ACTIVE_SESSION, activeSessionId).apply()
+    fun loadActiveSession(profileId: String): String? =
+        preferences.getString(activeSessionPreferenceKey(profileId), null)
+
+    fun saveActiveSession(profileId: String, activeSessionId: String?) {
+        preferences.edit().putString(activeSessionPreferenceKey(profileId), activeSessionId).apply()
     }
 
     fun saveAutoRefresh(enabled: Boolean) {
@@ -71,16 +80,13 @@ class ConnectionStore(context: Context) {
         preferences.edit().putString(KEY_THEME_MODE, mode.name).apply()
     }
 
-    fun saveSelectedPersonaModel(modelId: String?) {
-        val editor = preferences.edit()
+    fun saveSelectedProfile(profileId: String) {
+        preferences.edit()
+            .putString(KEY_SELECTED_PROFILE, profileId.ifBlank { "default" })
+            .remove(KEY_SELECTED_PERSONA_MODEL)
             .remove(KEY_LEGACY_SELECTED_MODEL)
-            .putInt(KEY_PERSONA_SELECTION_SCHEMA, PERSONA_SELECTION_SCHEMA_VERSION)
-        if (modelId.isNullOrBlank()) {
-            editor.remove(KEY_SELECTED_PERSONA_MODEL)
-        } else {
-            editor.putString(KEY_SELECTED_PERSONA_MODEL, modelId)
-        }
-        editor.apply()
+            .putInt(KEY_PROFILE_SELECTION_SCHEMA, PROFILE_SELECTION_SCHEMA_VERSION)
+            .apply()
     }
 
     fun saveSelectedInferenceModel(modelId: String?) {
@@ -147,12 +153,13 @@ class ConnectionStore(context: Context) {
 
     private fun cacheKey(sessionId: String): String = messageCacheKey(sessionId)
 
-    private fun migratePersonaSelection() {
-        if (preferences.getInt(KEY_PERSONA_SELECTION_SCHEMA, 0) >= PERSONA_SELECTION_SCHEMA_VERSION) return
+    private fun migrateProfileSelection() {
+        if (preferences.getInt(KEY_PROFILE_SELECTION_SCHEMA, 0) >= PROFILE_SELECTION_SCHEMA_VERSION) return
         preferences.edit()
             .remove(KEY_SELECTED_PERSONA_MODEL)
             .remove(KEY_LEGACY_SELECTED_MODEL)
-            .putInt(KEY_PERSONA_SELECTION_SCHEMA, PERSONA_SELECTION_SCHEMA_VERSION)
+            .putString(KEY_SELECTED_PROFILE, "default")
+            .putInt(KEY_PROFILE_SELECTION_SCHEMA, PROFILE_SELECTION_SCHEMA_VERSION)
             .apply()
     }
 
@@ -163,19 +170,22 @@ class ConnectionStore(context: Context) {
         const val KEY_PASSWORD = "password"
         const val KEY_TOKEN = "encrypted_token"
         const val KEY_LEGACY_TOKEN = "token"
-        const val KEY_ACTIVE_SESSION = "active_session_id"
         const val KEY_AUTO_REFRESH = "auto_refresh"
         const val KEY_THEME_MODE = "theme_mode"
         const val KEY_LEGACY_SELECTED_MODEL = "selected_model_id"
         const val KEY_SELECTED_PERSONA_MODEL = "selected_persona_model_id"
+        const val KEY_SELECTED_PROFILE = "selected_hermes_profile_id"
         const val KEY_SELECTED_INFERENCE_MODEL = "selected_inference_model_id"
         const val KEY_SELECTED_REASONING_EFFORT = "selected_reasoning_effort"
-        const val KEY_PERSONA_SELECTION_SCHEMA = "persona_selection_schema"
-        const val PERSONA_SELECTION_SCHEMA_VERSION = 2
+        const val KEY_PROFILE_SELECTION_SCHEMA = "profile_selection_schema"
+        const val PROFILE_SELECTION_SCHEMA_VERSION = 1
         const val KEY_RUNTIME_CONFIGS = "conversation_runtime_configs_v1"
         const val KEY_DRAFTS = "composer_drafts_v1"
     }
 }
+
+fun activeSessionPreferenceKey(profileId: String?): String =
+    profileScopedStorageKey(profileId, "active_session_id")
 
 fun messageCacheKey(sessionId: String): String =
     "message_cache_v2_${JavaBase64.getUrlEncoder().withoutPadding().encodeToString(sessionId.toByteArray(StandardCharsets.UTF_8))}"
@@ -246,6 +256,7 @@ fun decodeRuntimeConfigBundle(json: String): PersistedRuntimeConfigBundle = runC
 
 data class PersistedDraftBundle(
     val localDraftKey: String = "",
+    val localDraftKeys: Map<String, String> = emptyMap(),
     val drafts: Map<String, PersistedComposerDraft> = emptyMap()
 )
 

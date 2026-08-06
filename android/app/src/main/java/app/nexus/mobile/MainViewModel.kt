@@ -12,6 +12,7 @@ import app.nexus.mobile.network.ChatRole
 import app.nexus.mobile.network.HermesApiClient
 import app.nexus.mobile.network.HermesCronJob
 import app.nexus.mobile.network.HermesModel
+import app.nexus.mobile.network.HermesProfile
 import app.nexus.mobile.network.HermesSession
 import app.nexus.mobile.network.HermesStreamDetachedException
 import app.nexus.mobile.network.HermesStreamEvent
@@ -37,11 +38,12 @@ data class MainUiState(
     val hermesVersion: String? = null,
     val sessions: List<HermesSession> = emptyList(),
     val activeSessionId: String? = null,
-    val personaModels: List<HermesModel> = emptyList(),
-    val selectedPersonaModelId: String? = null,
+    val profiles: List<HermesProfile> = emptyList(),
+    val selectedProfileId: String = "default",
     val inferenceModels: List<HermesModel> = emptyList(),
     val selectedInferenceModelId: String? = null,
     val selectedReasoningEffort: ReasoningEffort = ReasoningEffort.DEFAULT,
+    val profilesLoading: Boolean = false,
     val modelsLoading: Boolean = false,
     val modelPicker: ModelPickerKind? = null,
     val cronManagerOpen: Boolean = false,
@@ -85,14 +87,14 @@ data class MainUiState(
     val activeSession: HermesSession?
         get() = sessions.firstOrNull { it.id == activeSessionId }
 
-    val selectedPersonaModel: HermesModel?
-        get() = personaModels.firstOrNull { it.id == selectedPersonaModelId }
+    val selectedProfile: HermesProfile?
+        get() = profiles.firstOrNull { it.id == selectedProfileId }
 
     val selectedInferenceModel: HermesModel?
         get() = inferenceModels.firstOrNull { it.id == selectedInferenceModelId }
 
-    val selectedPersonaModelLabel: String
-        get() = selectedPersonaModel?.displayName ?: selectedPersonaModelId ?: "Hermes 默认（default）"
+    val selectedProfileLabel: String
+        get() = selectedProfile?.displayName ?: "Hermes 默认（default）"
 
     val selectedInferenceModelLabel: String
         get() = selectedInferenceModel?.displayName ?: selectedInferenceModelId ?: "Hermes 默认"
@@ -104,6 +106,21 @@ data class MainUiState(
 
 enum class ConnectionStatus { NOT_CONFIGURED, CONNECTING, CONNECTED, FAILED }
 
+private data class ConnectionBootstrap(
+    val client: HermesApiClient,
+    val accessToken: String,
+    val health: app.nexus.mobile.network.HermesHealth,
+    val profiles: List<HermesProfile>,
+    val selectedProfileId: String,
+    val sessions: List<HermesSession>
+)
+
+private data class PendingNotificationSession(
+    val profileId: String,
+    val sessionId: String,
+    val fileKey: String? = null
+)
+
 class MainViewModel(application: Application) : AndroidViewModel(application) {
     private companion object {
         const val MESSAGE_PAGE_SIZE = 10
@@ -114,21 +131,28 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private val savedConnection = connectionStore.load()
     private val persistedDraftBundle = connectionStore.loadDrafts()
     private val persistedRuntimeConfigBundle = connectionStore.loadRuntimeConfigs()
-    private var localDraftKey = persistedDraftBundle.localDraftKey
-        .ifBlank { persistedRuntimeConfigBundle.localDraftKey }
+    private val legacyLocalDraftKey = persistedRuntimeConfigBundle.localDraftKey
+        .ifBlank { persistedDraftBundle.localDraftKey }
         .ifBlank { "local-draft-${UUID.randomUUID()}" }
+    private var localDraftKeys = persistedDraftBundle.localDraftKeys.toMutableMap().apply {
+        val profileId = savedConnection.selectedProfileId.ifBlank { "default" }
+        val initialKey = get(profileId).orEmpty().ifBlank { legacyLocalDraftKey }
+        put(profileId, initialKey)
+    }
+    private val initialLocalDraftKey = localDraftKeys.getValue(savedConnection.selectedProfileId.ifBlank { "default" })
     private val migratedRuntimeConfigBundle = migrateRuntimeConfigBundle(
         bundle = persistedRuntimeConfigBundle,
         activeSessionId = savedConnection.activeSessionId,
-        localDraftKey = localDraftKey,
+        localDraftKey = initialLocalDraftKey,
         legacyInferenceModelId = savedConnection.selectedInferenceModelId,
         legacyReasoningEffort = savedConnection.selectedReasoningEffort
     )
     private var runtimeConfigs = migratedRuntimeConfigBundle.configs
         .mapValues { it.value.toRuntimeConfig() }
         .toMutableMap()
-    private val initialRuntimeConfig = runtimeConfigs[savedConnection.activeSessionId ?: localDraftKey]
-        ?: ConversationRuntimeConfig()
+    private val initialRuntimeConfig = runtimeConfigs[
+        profileScopedStorageKey(savedConnection.selectedProfileId, savedConnection.activeSessionId ?: initialLocalDraftKey)
+    ] ?: ConversationRuntimeConfig()
     private val _input = MutableStateFlow("")
     val input: StateFlow<String> = _input.asStateFlow()
 
@@ -139,7 +163,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             password = "",
             token = savedConnection.token,
             activeSessionId = savedConnection.activeSessionId,
-            selectedPersonaModelId = savedConnection.selectedPersonaModelId,
+            selectedProfileId = savedConnection.selectedProfileId,
             selectedInferenceModelId = initialRuntimeConfig.inferenceModelId,
             selectedReasoningEffort = initialRuntimeConfig.reasoningEffort,
             autoRefresh = savedConnection.autoRefresh,
@@ -154,6 +178,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private var answerStatusJob: Job? = null
     private val fileUploadJobs = mutableMapOf<String, Job>()
     private val imageUploadJobs = mutableMapOf<String, Job>()
+    private var attachmentPreparationsInFlight = 0
+    private var attachmentPreparationGeneration = 0L
     private val downloadJobs = mutableMapOf<String, Job>()
     private val downloadGenerations = mutableMapOf<String, Long>()
     private var pollingJob: Job? = null
@@ -161,8 +187,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private var runStatusJob: Job? = null
     private var draftPersistJob: Job? = null
     private var draftPersistRevision = 0L
+    private var connectionGeneration = 0L
+    private var profileLoadGeneration = 0L
+    private var modelLoadGeneration = 0L
+    private var pendingNotificationSession: PendingNotificationSession? = null
+    private var pendingNotificationRefreshAttempted = false
     private var liveAssistantMessageId: String? = null
-    private var stopRequestedSessionId: String? = null
+    private var stopRequestedRunKey: String? = null
     private var sessionLoadGeneration = 0L
     private val observedActiveRuns = mutableSetOf<String>()
     private var drafts = ConversationDrafts()
@@ -203,12 +234,20 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             _uiState.update { it.copy(serverUrl = normalizedUrl, error = message) }
             return
         }
+        val generation = ++connectionGeneration
+        client = null
+        profileLoadGeneration += 1
+        modelLoadGeneration += 1
+        sessionLoadJob?.cancel()
+        runStatusJob?.cancel()
         viewModelScope.launch {
             _uiState.update {
                 it.copy(
                     serverUrl = normalizedUrl,
                     connectionStatus = ConnectionStatus.CONNECTING,
                     loading = true,
+                    profilesLoading = false,
+                    modelsLoading = false,
                     error = null
                 )
             }
@@ -216,22 +255,44 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 val api = HermesApiClient(normalizedUrl, snapshot.token)
                 val accessToken = snapshot.token.ifBlank { api.login(snapshot.username, snapshot.password) }
                 val health = api.health()
+                val profiles = api.listProfiles()
+                val selectedProfileId = resolveSelectedProfileId(profiles, snapshot.selectedProfileId)
+                api.selectProfile(selectedProfileId)
                 val sessions = visibleSessions(api.listSessions())
-                client = api
-                Triple(accessToken, health, sessions)
-            }.onSuccess { (accessToken, health, sessions) ->
-                val selected = resolveVisibleActiveSessionId(sessions, _uiState.value.activeSessionId)
-                connectionStore.saveLogin(normalizedUrl, snapshot.username, accessToken, selected)
+                ConnectionBootstrap(api, accessToken, health, profiles, selectedProfileId, sessions)
+            }.onSuccess { bootstrap ->
+                if (generation != connectionGeneration) return@onSuccess
+                client = bootstrap.client
+                val preferredSessionId = if (bootstrap.selectedProfileId == snapshot.selectedProfileId) {
+                    snapshot.activeSessionId
+                } else {
+                    connectionStore.loadActiveSession(bootstrap.selectedProfileId)
+                }
+                val selected = resolveVisibleActiveSessionId(bootstrap.sessions, preferredSessionId)
+                connectionStore.saveLogin(
+                    normalizedUrl,
+                    snapshot.username,
+                    bootstrap.accessToken,
+                    bootstrap.selectedProfileId,
+                    selected
+                )
+                connectionStore.saveSelectedProfile(bootstrap.selectedProfileId)
                 _uiState.update { state ->
                     applyRuntimeConfig(
                         state.copy(
+                            serverUrl = normalizedUrl,
+                            username = snapshot.username,
                             password = "",
-                            token = accessToken,
+                            token = bootstrap.accessToken,
                             connectionStatus = ConnectionStatus.CONNECTED,
-                            gatewayVersion = health.gatewayVersion,
-                            hermesVersion = health.hermesVersion,
-                            sessions = sessions,
+                            gatewayVersion = bootstrap.health.gatewayVersion,
+                            hermesVersion = bootstrap.health.hermesVersion,
+                            profiles = bootstrap.profiles,
+                            selectedProfileId = bootstrap.selectedProfileId,
+                            sessions = bootstrap.sessions,
                             activeSessionId = selected,
+                            profilesLoading = false,
+                            modelsLoading = false,
                             loading = false,
                             error = null
                         ),
@@ -239,11 +300,16 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     )
                 }
                 refreshModels(showErrors = false)
-                if (selected != null) {
-                    loadSession(selected)
-                    refreshActiveRunStatus()
-                } else createSession()
+                if (!routePendingNotificationSessionIfReady()) {
+                    if (selected != null) {
+                        loadSession(selected)
+                        refreshActiveRunStatus()
+                    } else createSession()
+                }
             }.onFailure { error ->
+                if (generation != connectionGeneration || error is kotlinx.coroutines.CancellationException) {
+                    return@onFailure
+                }
                 val tokenExpired = snapshot.token.isNotBlank() && requiresPasswordReauthentication(error)
                 if (tokenExpired) {
                     connectionStore.clearToken()
@@ -253,6 +319,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     it.copy(
                         token = if (tokenExpired) "" else it.token,
                         connectionStatus = ConnectionStatus.FAILED,
+                        profilesLoading = false,
+                        modelsLoading = false,
                         loading = false,
                         error = friendlyNetworkError(error, normalizedUrl)
                     )
@@ -263,9 +331,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun refreshSessions(reportTransientErrors: Boolean = true) {
         val api = client ?: return
+        val requestedProfileId = _uiState.value.selectedProfileId
         viewModelScope.launch {
             runCatching { visibleSessions(api.listSessions()) }
                 .onSuccess { sessions ->
+                    if (client !== api || _uiState.value.selectedProfileId != requestedProfileId) {
+                        return@onSuccess
+                    }
                     val currentSessionId = _uiState.value.activeSessionId
                     val selected = resolveVisibleActiveSessionId(
                         sessions = sessions,
@@ -280,8 +352,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         )
                         if (currentSessionId != selected) applyRuntimeConfig(updated, selected) else updated
                     }
-                    if (currentSessionId != selected) {
-                        connectionStore.saveActiveSession(selected)
+                    if (!routePendingNotificationSessionIfReady() && currentSessionId != selected) {
+                        connectionStore.saveActiveSession(requestedProfileId, selected)
                         if (selected != null) {
                             restoreDraft(selected)
                             loadSession(selected)
@@ -291,6 +363,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     }
                 }
                 .onFailure { error ->
+                    if (client !== api || _uiState.value.selectedProfileId != requestedProfileId) {
+                        return@onFailure
+                    }
                     if (reportTransientErrors || requiresPasswordReauthentication(error)) showError(error)
                 }
         }
@@ -317,15 +392,21 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     internal fun refreshActiveRunStatus() {
         val api = client ?: return
+        val requestedProfileId = _uiState.value.selectedProfileId
         val sessionId = _uiState.value.activeSessionId ?: return
         runStatusJob?.cancel()
         runStatusJob = viewModelScope.launch {
             runCatching { api.getSessionRunStatus(sessionId) }
                 .onSuccess { status ->
-                    if (_uiState.value.activeSessionId != sessionId) return@onSuccess
-                    if (stopRequestedSessionId == sessionId) {
+                    if (
+                        client !== api ||
+                        _uiState.value.selectedProfileId != requestedProfileId ||
+                        _uiState.value.activeSessionId != sessionId
+                    ) return@onSuccess
+                    val runKey = profileScopedStorageKey(requestedProfileId, sessionId)
+                    if (stopRequestedRunKey == runKey) {
                         if (status.active || status.status in setOf("queued", "running", "stopping")) return@onSuccess
-                        stopRequestedSessionId = null
+                        stopRequestedRunKey = null
                         observedActiveRuns.remove(sessionId)
                         _uiState.update { it.copy(streaming = false, runStoppable = false, thinking = false, toolStatus = null) }
                         showTransientAnswerStatus(AnswerStatus.STOPPED)
@@ -341,7 +422,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                                     "tool" -> AnswerStatus.TOOL
                                     else -> AnswerStatus.THINKING
                                 }
-                                if (stopRequestedSessionId == sessionId) return@update state
                                 val messages = reconcileRunSnapshot(
                                     state.messages,
                                     liveAssistantMessageId,
@@ -359,10 +439,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                             }
                         }
                         status.status == "completed" && observedActiveRuns.remove(sessionId) -> {
-                            if (stopRequestedSessionId == sessionId) {
-                                showTransientAnswerStatus(AnswerStatus.STOPPED)
-                                return@onSuccess
-                            }
                             _uiState.update {
                                 it.copy(
                                     streaming = false,
@@ -381,7 +457,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                             refreshCurrentMessages()
                         }
                         status.status == "stopped" && observedActiveRuns.remove(sessionId) -> {
-                            stopRequestedSessionId = null
                             _uiState.update { it.copy(streaming = false, runStoppable = false, thinking = false, toolStatus = null) }
                             showTransientAnswerStatus(AnswerStatus.STOPPED)
                             refreshCurrentMessages()
@@ -424,10 +499,15 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         }
                     }
                 }
-                .onFailure {
+                .onFailure { error ->
+                    if (error is kotlinx.coroutines.CancellationException) return@onFailure
                     // Older servers do not expose run status. Unknown means connected,
                     // never "completed" or "still processing" by guesswork.
-                    if (_uiState.value.activeSessionId == sessionId) {
+                    if (
+                        client === api &&
+                        _uiState.value.selectedProfileId == requestedProfileId &&
+                        _uiState.value.activeSessionId == sessionId
+                    ) {
                         _uiState.update { it.copy(answerStatus = AnswerStatus.IDLE) }
                     }
                 }
@@ -436,6 +516,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     private fun refreshCurrentMessages() {
         val api = client ?: return
+        val requestedProfileId = _uiState.value.selectedProfileId
         val sessionId = _uiState.value.activeSessionId ?: return
         if (_uiState.value.streaming || _uiState.value.loading || _uiState.value.loadingOlder) return
         val limit = _uiState.value.loadedMessageCount.coerceAtLeast(MESSAGE_PAGE_SIZE)
@@ -443,10 +524,15 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             runCatching { api.loadMessagePage(sessionId, limit, 0) }
                 .onSuccess { page ->
                     _uiState.update { state ->
-                        if (state.activeSessionId != sessionId || state.streaming) state
+                        if (
+                            client !== api ||
+                            state.selectedProfileId != requestedProfileId ||
+                            state.activeSessionId != sessionId ||
+                            state.streaming
+                        ) state
                         else {
                             val merged = mergeAuthoritativeMessages(state.messages, page.messages)
-                            connectionStore.saveMessageCache(sessionId, merged)
+                            connectionStore.saveMessageCache(profileScopedStorageKey(requestedProfileId, sessionId), merged)
                             state.copy(
                                 messages = merged,
                                 loadedMessageCount = merged.size,
@@ -483,9 +569,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         runStatusJob = null
         sessionLoadGeneration += 1
         liveAssistantMessageId = null
-        connectionStore.saveActiveSession(null)
-        localDraftKey = "local-draft-${UUID.randomUUID()}"
+        connectionStore.saveActiveSession(_uiState.value.selectedProfileId, null)
+        rotateLocalDraftKey()
         persistRuntimeConfigs()
+        persistAllDrafts()
         _uiState.update { state ->
             applyRuntimeConfig(
                 state.copy(
@@ -517,25 +604,97 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         restoreDraft(null)
     }
 
-    private suspend fun persistDraftSession(): String {
-        val api = client ?: error("尚未连接 Hermes")
-        val draftRuntimeKey = localDraftKey
+    private suspend fun persistDraftSession(api: HermesApiClient, profileId: String): String {
+        val draftRuntimeKey = profileScopedStorageKey(profileId, localDraftKey(profileId))
         val session = api.createSession()
-        moveRuntimeConfig(draftRuntimeKey, session.id)
-        connectionStore.saveActiveSession(session.id)
-        _uiState.update {
-            it.copy(
-                sessions = listOf(session) + it.sessions.filterNot { old -> old.id == session.id },
+        check(client === api && _uiState.value.selectedProfileId == profileId) {
+            "Hermes 人格已切换"
+        }
+        moveRuntimeConfig(draftRuntimeKey, profileScopedStorageKey(profileId, session.id))
+        connectionStore.saveActiveSession(profileId, session.id)
+        _uiState.update { state ->
+            if (client !== api || state.selectedProfileId != profileId) state
+            else state.copy(
+                sessions = listOf(session) + state.sessions.filterNot { old -> old.id == session.id },
                 activeSessionId = session.id
             )
         }
         return session.id
     }
 
+    fun openNotificationProfile(profileId: String?) {
+        val normalizedProfileId = profileId?.trim()?.takeIf { it.isNotEmpty() } ?: return
+        val state = _uiState.value
+        if (
+            state.connectionStatus != ConnectionStatus.CONNECTED ||
+            state.selectedProfileId == normalizedProfileId ||
+            state.profiles.none { it.id == normalizedProfileId }
+        ) return
+        profileSwitchBlockReason()?.let { message ->
+            _uiState.update { it.copy(error = message) }
+            return
+        }
+        activateProfile(normalizedProfileId)
+    }
+
+    fun openNotificationSession(profileId: String?, sessionId: String, fileKey: String? = null) {
+        val normalizedSessionId = sessionId.trim()
+        if (normalizedSessionId.isEmpty()) return
+        val normalizedProfileId = profileId?.trim()?.takeIf { it.isNotEmpty() }
+            ?: _uiState.value.selectedProfileId.ifBlank { "default" }
+        pendingNotificationSession = PendingNotificationSession(
+            normalizedProfileId,
+            normalizedSessionId,
+            fileKey?.trim()?.takeIf { it.isNotEmpty() }
+        )
+        pendingNotificationRefreshAttempted = false
+        routePendingNotificationSessionIfReady()
+    }
+
+    private fun routePendingNotificationSessionIfReady(): Boolean {
+        val target = pendingNotificationSession ?: return false
+        val state = _uiState.value
+        if (state.connectionStatus != ConnectionStatus.CONNECTED || state.profilesLoading) return true
+        if (state.profiles.none { it.id == target.profileId }) {
+            pendingNotificationSession = null
+            pendingNotificationRefreshAttempted = false
+            _uiState.update {
+                it.copy(error = "通知对应的 Hermes 人格已不存在，请刷新人格列表")
+            }
+            return false
+        }
+        if (state.selectedProfileId != target.profileId) {
+            profileSwitchBlockReason()?.let { message ->
+                pendingNotificationSession = null
+                pendingNotificationRefreshAttempted = false
+                _uiState.update { it.copy(error = message) }
+                return true
+            }
+            activateProfile(target.profileId, target.sessionId)
+            return true
+        }
+        if (state.sessions.any { it.id == target.sessionId }) {
+            pendingNotificationSession = null
+            pendingNotificationRefreshAttempted = false
+            selectSession(target.sessionId)
+            target.fileKey?.let(::openDownloadFromNotification)
+            return true
+        }
+        if (!pendingNotificationRefreshAttempted) {
+            pendingNotificationRefreshAttempted = true
+            refreshSessions(reportTransientErrors = false)
+            return true
+        }
+        pendingNotificationSession = null
+        pendingNotificationRefreshAttempted = false
+        _uiState.update { it.copy(error = "通知对应的对话已不存在或不可见") }
+        return false
+    }
+
     fun selectSession(sessionId: String) {
         saveCurrentDraft()
         liveAssistantMessageId = null
-        connectionStore.saveActiveSession(sessionId)
+        connectionStore.saveActiveSession(_uiState.value.selectedProfileId, sessionId)
         _uiState.update { state ->
             applyRuntimeConfig(
                 state.copy(
@@ -567,6 +726,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun renameSession(title: String) {
         val api = client ?: return
+        val requestedProfileId = _uiState.value.selectedProfileId
         val session = _uiState.value.sessionToRename ?: return
         val normalized = title.trim()
         if (normalized.isEmpty()) {
@@ -576,6 +736,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         viewModelScope.launch {
             runCatching { api.renameSession(session.id, normalized) }
                 .onSuccess { renamed ->
+                    if (client !== api || _uiState.value.selectedProfileId != requestedProfileId) return@onSuccess
                     _uiState.update { state ->
                         state.copy(
                             sessions = state.sessions.map { if (it.id == renamed.id) renamed else it },
@@ -583,7 +744,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         )
                     }
                 }
-                .onFailure { showError(it) }
+                .onFailure { error ->
+                    if (client === api && _uiState.value.selectedProfileId == requestedProfileId) showError(error)
+                }
         }
     }
 
@@ -597,10 +760,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun confirmDelete() {
         val api = client ?: return
+        val requestedProfileId = _uiState.value.selectedProfileId
         val session = _uiState.value.sessionToDelete ?: return
         viewModelScope.launch {
             runCatching { api.deleteSession(session.id) }
                 .onSuccess { deleted ->
+                    if (client !== api || _uiState.value.selectedProfileId != requestedProfileId) return@onSuccess
                     if (!deleted) {
                         showError(IllegalStateException("服务器未删除该对话"))
                         return@onSuccess
@@ -609,13 +774,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     val wasActive = state.activeSessionId == session.id
                     val remaining = state.sessions.filterNot { it.id == session.id }
                     val next = if (wasActive) remaining.firstOrNull()?.id else state.activeSessionId
-                    connectionStore.clearMessageCache(session.id)
-                    removeRuntimeConfig(session.id)
-                    drafts = drafts.remove(session.id)
-                    draftImages.remove(session.id)
-                    draftFiles.remove(session.id)
+                    val storageKey = profileScopedStorageKey(_uiState.value.selectedProfileId, session.id)
+                    connectionStore.clearMessageCache(storageKey)
+                    removeRuntimeConfig(storageKey)
+                    drafts = drafts.remove(storageKey)
+                    draftImages.remove(storageKey)
+                    draftFiles.remove(storageKey)
                     persistAllDrafts()
-                    connectionStore.saveActiveSession(next)
+                    connectionStore.saveActiveSession(_uiState.value.selectedProfileId, next)
                     _uiState.update { current ->
                         val updated = current.copy(
                             sessions = remaining,
@@ -637,16 +803,19 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                         }
                     }
                 }
-                .onFailure { showError(it) }
+                .onFailure { error ->
+                    if (client === api && _uiState.value.selectedProfileId == requestedProfileId) showError(error)
+                }
         }
     }
 
     fun loadSession(sessionId: String) {
         val api = client ?: return
+        val requestedProfileId = _uiState.value.selectedProfileId
         streamJob?.cancel()
         sessionLoadJob?.cancel()
         val generation = ++sessionLoadGeneration
-        val cached = connectionStore.loadMessageCache(sessionId)
+        val cached = connectionStore.loadMessageCache(profileScopedStorageKey(requestedProfileId, sessionId))
         _uiState.update { state ->
             applyRuntimeConfig(
                 state.copy(
@@ -668,9 +837,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             runCatching { api.loadMessagePage(sessionId, MESSAGE_PAGE_SIZE, 0) }
                 .onSuccess { page ->
                     _uiState.update { state ->
-                        if (!acceptsSessionLoad(sessionId, state.activeSessionId, generation, sessionLoadGeneration)) state
+                        if (
+                            client !== api ||
+                            state.selectedProfileId != requestedProfileId ||
+                            !acceptsSessionLoad(sessionId, state.activeSessionId, generation, sessionLoadGeneration)
+                        ) state
                         else {
-                            connectionStore.saveMessageCache(sessionId, page.messages)
+                            connectionStore.saveMessageCache(profileScopedStorageKey(requestedProfileId, sessionId), page.messages)
                             state.copy(
                                 messages = page.messages,
                                 loading = false,
@@ -683,7 +856,9 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 }
                 .onFailure { error ->
                     if (error is kotlinx.coroutines.CancellationException) return@onFailure
-                    val accepted = acceptsSessionLoad(sessionId, _uiState.value.activeSessionId, generation, sessionLoadGeneration)
+                    val accepted = client === api &&
+                        _uiState.value.selectedProfileId == requestedProfileId &&
+                        acceptsSessionLoad(sessionId, _uiState.value.activeSessionId, generation, sessionLoadGeneration)
                     if (accepted) {
                         _uiState.update { it.copy(loading = false) }
                         showError(error)
@@ -695,6 +870,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun loadOlderMessages() {
         val api = client ?: return
         val state = _uiState.value
+        val requestedProfileId = state.selectedProfileId
         val sessionId = state.activeSessionId ?: return
         if (state.messages.isEmpty() || state.loading || state.loadingOlder || !state.hasMoreMessages) return
         val generation = sessionLoadGeneration
@@ -703,10 +879,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             runCatching { api.loadMessagePage(sessionId, OLDER_MESSAGE_PAGE_SIZE, state.loadedMessageCount) }
                 .onSuccess { page ->
                     _uiState.update { current ->
-                        if (!acceptsSessionLoad(sessionId, current.activeSessionId, generation, sessionLoadGeneration)) current
+                        if (
+                            client !== api ||
+                            current.selectedProfileId != requestedProfileId ||
+                            !acceptsSessionLoad(sessionId, current.activeSessionId, generation, sessionLoadGeneration)
+                        ) current
                         else {
                             val merged = prependMessagePage(current.messages, page.messages)
-                            connectionStore.saveMessageCache(sessionId, merged)
+                            connectionStore.saveMessageCache(profileScopedStorageKey(requestedProfileId, sessionId), merged)
                             current.copy(
                                 messages = merged,
                                 loadingOlder = false,
@@ -720,7 +900,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 }
                 .onFailure { error ->
                     if (error is kotlinx.coroutines.CancellationException) return@onFailure
-                    if (acceptsSessionLoad(sessionId, _uiState.value.activeSessionId, generation, sessionLoadGeneration)) {
+                    if (
+                        client === api &&
+                        _uiState.value.selectedProfileId == requestedProfileId &&
+                        acceptsSessionLoad(sessionId, _uiState.value.activeSessionId, generation, sessionLoadGeneration)
+                    ) {
                         _uiState.update { it.copy(loadingOlder = false) }
                         showError(error)
                     }
@@ -733,13 +917,24 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         scheduleDraftPersistence()
     }
 
-    private fun runtimeKey(sessionId: String? = _uiState.value.activeSessionId): String = sessionId ?: localDraftKey
+    private fun localDraftKey(profileId: String = _uiState.value.selectedProfileId): String {
+        val normalizedProfileId = profileId.ifBlank { "default" }
+        return localDraftKeys.getOrPut(normalizedProfileId) { "local-draft-${UUID.randomUUID()}" }
+    }
+
+    private fun rotateLocalDraftKey(profileId: String = _uiState.value.selectedProfileId) {
+        localDraftKeys[profileId.ifBlank { "default" }] = "local-draft-${UUID.randomUUID()}"
+    }
+
+    private fun runtimeKey(sessionId: String? = _uiState.value.activeSessionId): String =
+        profileScopedStorageKey(_uiState.value.selectedProfileId, sessionId ?: localDraftKey())
 
     private fun runtimeConfig(sessionId: String? = _uiState.value.activeSessionId): ConversationRuntimeConfig =
         runtimeConfigs[runtimeKey(sessionId)] ?: ConversationRuntimeConfig()
 
     private fun applyRuntimeConfig(state: MainUiState, sessionId: String?): MainUiState {
-        val config = runtimeConfig(sessionId)
+        val key = profileScopedStorageKey(state.selectedProfileId, sessionId ?: localDraftKey(state.selectedProfileId))
+        val config = runtimeConfigs[key] ?: ConversationRuntimeConfig()
         return state.copy(
             selectedInferenceModelId = config.inferenceModelId,
             selectedReasoningEffort = config.reasoningEffort
@@ -769,13 +964,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         connectionStore.saveRuntimeConfigs(
             PersistedRuntimeConfigBundle(
                 schemaVersion = RUNTIME_CONFIG_SCHEMA_VERSION,
-                localDraftKey = localDraftKey,
+                localDraftKey = localDraftKey(),
                 configs = stored
             )
         )
     }
 
-    private fun draftKey(sessionId: String? = _uiState.value.activeSessionId): String = sessionId ?: localDraftKey
+    private fun draftKey(sessionId: String? = _uiState.value.activeSessionId): String =
+        profileScopedStorageKey(_uiState.value.selectedProfileId, sessionId ?: localDraftKey())
 
     private fun captureCurrentDraft() {
         val state = _uiState.value
@@ -866,7 +1062,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         }
         if (savedConnection.activeSessionId != null) {
             restoreDraft(savedConnection.activeSessionId)
-        } else if (persistedDraftBundle.localDraftKey.isNotBlank()) {
+        } else if (
+            persistedDraftBundle.localDraftKeys.containsKey(savedConnection.selectedProfileId) ||
+            persistedDraftBundle.localDraftKey.isNotBlank()
+        ) {
             restoreDraft(null)
         }
     }
@@ -885,15 +1084,38 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 }
             )
         }.filterValues { it.text.isNotBlank() || it.images.isNotEmpty() || it.files.isNotEmpty() }
-        connectionStore.saveDrafts(PersistedDraftBundle(localDraftKey, stored))
+        connectionStore.saveDrafts(
+            PersistedDraftBundle(
+                localDraftKey = localDraftKey(),
+                localDraftKeys = localDraftKeys.toMap(),
+                drafts = stored
+            )
+        )
     }
 
     fun prepareImage(uri: Uri) {
+        val generation = attachmentPreparationGeneration
+        val profileId = _uiState.value.selectedProfileId
+        attachmentPreparationsInFlight += 1
         viewModelScope.launch {
-            setPreparingImage(true)
-            runCatching { ImageProcessor.prepare(getApplication(), uri) }
-                .onSuccess(::addImage)
-                .onFailure { showImageError(it.message ?: "图片处理失败") }
+            try {
+                setPreparingImage(true)
+                runCatching { ImageProcessor.prepare(getApplication(), uri) }
+                    .onSuccess { image ->
+                        if (
+                            generation == attachmentPreparationGeneration &&
+                            _uiState.value.connectionStatus == ConnectionStatus.CONNECTED &&
+                            _uiState.value.selectedProfileId == profileId
+                        ) addImage(image)
+                    }
+                    .onFailure { error ->
+                        if (generation == attachmentPreparationGeneration) {
+                            showImageError(error.message ?: "图片处理失败")
+                        }
+                    }
+            } finally {
+                attachmentPreparationsInFlight = (attachmentPreparationsInFlight - 1).coerceAtLeast(0)
+            }
         }
     }
 
@@ -912,15 +1134,35 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     private fun uploadImage(image: ChatImage) {
         val api = client ?: return
+        val profileId = _uiState.value.selectedProfileId
         val app = getApplication<Application>()
-        NotificationHelper.showTransfer(app, image.id, "图片.jpg", 0, uploading = true)
+        NotificationHelper.showTransfer(
+            app,
+            image.id,
+            "图片.jpg",
+            0,
+            uploading = true,
+            profileId = profileId
+        )
         imageUploadJobs[image.id]?.cancel()
         imageUploadJobs[image.id] = viewModelScope.launch {
             runCatching {
                 val bytes = image.uploadBytes ?: error("图片数据无效")
                 api.uploadFile("图片.jpg", "image/jpeg", bytes)
             }.onSuccess { uploaded ->
-                NotificationHelper.finishTransfer(app, image.id, "图片.jpg", uploading = true, success = true)
+                imageUploadJobs.remove(image.id)
+                if (client !== api || _uiState.value.selectedProfileId != profileId) {
+                    NotificationHelper.cancelTransfer(app, image.id, profileId = profileId)
+                    return@onSuccess
+                }
+                NotificationHelper.finishTransfer(
+                    app,
+                    image.id,
+                    "图片.jpg",
+                    uploading = true,
+                    success = true,
+                    profileId = profileId
+                )
                 val remotePreview = resolveDownloadUrl(_uiState.value.serverUrl, uploaded.downloadUrl)
                 _uiState.update { state ->
                     state.copy(pendingImages = state.pendingImages.map {
@@ -935,8 +1177,20 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 }
                 saveCurrentDraft()
             }.onFailure { error ->
+                imageUploadJobs.remove(image.id)
                 if (error is kotlinx.coroutines.CancellationException) return@onFailure
-                NotificationHelper.finishTransfer(app, image.id, "图片.jpg", uploading = true, success = false)
+                if (client !== api || _uiState.value.selectedProfileId != profileId) {
+                    NotificationHelper.cancelTransfer(app, image.id, profileId = profileId)
+                    return@onFailure
+                }
+                NotificationHelper.finishTransfer(
+                    app,
+                    image.id,
+                    "图片.jpg",
+                    uploading = true,
+                    success = false,
+                    profileId = profileId
+                )
                 _uiState.update { state ->
                     state.copy(pendingImages = state.pendingImages.map {
                         if (it.id == image.id) it.copy(uploadState = AttachmentUploadState.Failed(friendlyNetworkError(error))) else it
@@ -968,29 +1222,47 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         imageUploadJobs.remove(imageId)?.cancel()
         val uploadedId = _uiState.value.pendingImages.firstOrNull { it.id == imageId }?.uploadedId
         _uiState.update { it.copy(pendingImages = it.pendingImages.filterNot { image -> image.id == imageId }) }
-        NotificationHelper.cancelTransfer(getApplication(), imageId)
+        NotificationHelper.cancelTransfer(
+            getApplication(),
+            imageId,
+            profileId = _uiState.value.selectedProfileId
+        )
         if (uploadedId != null) viewModelScope.launch { runCatching { client?.deleteFile(uploadedId) } }
         saveCurrentDraft()
     }
 
     fun prepareFile(uri: Uri, storage: SelectedUriStorage = SelectedUriStorage.PERSISTED_URI) {
+        val generation = attachmentPreparationGeneration
+        val profileId = _uiState.value.selectedProfileId
+        attachmentPreparationsInFlight += 1
         viewModelScope.launch {
-            runCatching { FileProcessor.prepare(getApplication(), uri, storage) }
-                .onSuccess { localFile ->
-                    val queued = localFile.copy(uploadState = AttachmentUploadState.Uploading(0))
-                    _uiState.update { state ->
-                        state.copy(
-                            pendingFiles = state.pendingFiles + queued,
-                            featurePanelOpen = false,
-                            error = null
-                        )
+            try {
+                runCatching { FileProcessor.prepare(getApplication(), uri, storage) }
+                    .onSuccess { localFile ->
+                        if (
+                            generation != attachmentPreparationGeneration ||
+                            _uiState.value.connectionStatus != ConnectionStatus.CONNECTED ||
+                            _uiState.value.selectedProfileId != profileId
+                        ) return@onSuccess
+                        val queued = localFile.copy(uploadState = AttachmentUploadState.Uploading(0))
+                        _uiState.update { state ->
+                            state.copy(
+                                pendingFiles = state.pendingFiles + queued,
+                                featurePanelOpen = false,
+                                error = null
+                            )
+                        }
+                        saveCurrentDraft()
+                        uploadFile(queued)
                     }
-                    saveCurrentDraft()
-                    uploadFile(queued)
-                }
-                .onFailure { error ->
-                    _uiState.update { it.copy(error = error.message ?: "文件处理失败") }
-                }
+                    .onFailure { error ->
+                        if (generation == attachmentPreparationGeneration) {
+                            _uiState.update { it.copy(error = error.message ?: "文件处理失败") }
+                        }
+                    }
+            } finally {
+                attachmentPreparationsInFlight = (attachmentPreparationsInFlight - 1).coerceAtLeast(0)
+            }
         }
     }
 
@@ -1005,13 +1277,22 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             }
             return
         }
+        val profileId = _uiState.value.selectedProfileId
         val app = getApplication<Application>()
         fileUploadJobs.remove(file.id)?.cancel()
         fileUploadJobs[file.id] = viewModelScope.launch {
             runCatching {
                 val source = FileProcessor.uploadSource(getApplication(), file)
                 api.uploadStream(source.name, source.mimeType, source.size, source.openStream) { progress ->
-                    NotificationHelper.showTransfer(app, file.id, file.name, progress, uploading = true)
+                    if (client !== api || _uiState.value.selectedProfileId != profileId) return@uploadStream
+                    NotificationHelper.showTransfer(
+                        app,
+                        file.id,
+                        file.name,
+                        progress,
+                        uploading = true,
+                        profileId = profileId
+                    )
                     _uiState.update { state ->
                         state.copy(
                             pendingFiles = state.pendingFiles.map { pending ->
@@ -1024,7 +1305,18 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 }
             }.onSuccess { uploaded ->
                 fileUploadJobs.remove(file.id)
-                NotificationHelper.finishTransfer(app, file.id, file.name, uploading = true, success = true)
+                if (client !== api || _uiState.value.selectedProfileId != profileId) {
+                    NotificationHelper.cancelTransfer(app, file.id, profileId = profileId)
+                    return@onSuccess
+                }
+                NotificationHelper.finishTransfer(
+                    app,
+                    file.id,
+                    file.name,
+                    uploading = true,
+                    success = true,
+                    profileId = profileId
+                )
                 _uiState.update { state ->
                     state.copy(
                         pendingFiles = state.pendingFiles.map { pending ->
@@ -1043,7 +1335,18 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             }.onFailure { error ->
                 if (error is kotlinx.coroutines.CancellationException) return@onFailure
                 fileUploadJobs.remove(file.id)
-                NotificationHelper.finishTransfer(app, file.id, file.name, uploading = true, success = false)
+                if (client !== api || _uiState.value.selectedProfileId != profileId) {
+                    NotificationHelper.cancelTransfer(app, file.id, profileId = profileId)
+                    return@onFailure
+                }
+                NotificationHelper.finishTransfer(
+                    app,
+                    file.id,
+                    file.name,
+                    uploading = true,
+                    success = false,
+                    profileId = profileId
+                )
                 _uiState.update { state ->
                     state.copy(
                         pendingFiles = state.pendingFiles.map { pending ->
@@ -1078,7 +1381,11 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         _uiState.update { state ->
             state.copy(pendingFiles = removeFileAttachment(state.pendingFiles, fileId))
         }
-        NotificationHelper.cancelTransfer(getApplication(), fileId)
+        NotificationHelper.cancelTransfer(
+            getApplication(),
+            fileId,
+            profileId = _uiState.value.selectedProfileId
+        )
         pending.uploadedId?.let { uploadedId ->
             viewModelScope.launch { runCatching { client?.deleteFile(uploadedId) } }
         }
@@ -1088,6 +1395,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun send() {
         val api = client ?: return
         val state = _uiState.value
+        val originProfileId = state.selectedProfileId
         val originalInput = _input.value
         val originalDraftKey = draftKey()
         val text = originalInput.trim()
@@ -1124,7 +1432,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             originSessionId?.let(observedActiveRuns::add)
             runCatching {
                 val wasDraft = state.activeSessionId == null
-                val sessionId = state.activeSessionId ?: persistDraftSession()
+                val sessionId = state.activeSessionId ?: persistDraftSession(api, originProfileId)
                 originSessionId = sessionId
                 val firstFileName = files.firstOrNull()?.name
                 if (wasDraft) {
@@ -1139,6 +1447,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     getApplication(),
                     state.serverUrl,
                     state.token,
+                    state.selectedProfileId,
                     sessionId,
                     state.activeSession?.displayTitle ?: deriveSessionTitle(text, firstFileName, images.isNotEmpty())
                 )
@@ -1149,7 +1458,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 val assistantId = UUID.randomUUID().toString()
                 val assistantMessage = ChatMessage(assistantId, ChatRole.ASSISTANT, "")
                 liveAssistantMessageId = assistantId
-                stopRequestedSessionId = null
+                stopRequestedRunKey = null
                 optimisticUserId = userMessage.id
                 optimisticAssistantId = assistantId
                 _uiState.update { current ->
@@ -1167,17 +1476,38 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     message = text,
                     attachmentIds = payload.ids,
                     attachmentKinds = payload.kinds,
-                    personaModel = state.selectedPersonaModelId,
                     inferenceModel = state.selectedInferenceModelId,
                     reasoningEffort = state.selectedReasoningEffort.wireValue
-                ) { event -> handleStreamEvent(sessionId, assistantId, event) }
-                connectionStore.saveMessageCache(sessionId, _uiState.value.messages)
+                ) { event -> handleStreamEvent(api, originProfileId, sessionId, assistantId, event) }
+                if (client === api && _uiState.value.selectedProfileId == originProfileId) {
+                    connectionStore.saveMessageCache(
+                        profileScopedStorageKey(originProfileId, sessionId),
+                        _uiState.value.messages
+                    )
+                }
             }.onSuccess {
+                if (
+                    client !== api ||
+                    _uiState.value.selectedProfileId != originProfileId ||
+                    _uiState.value.activeSessionId != originSessionId
+                ) {
+                    return@onSuccess
+                }
                 liveAssistantMessageId = null
-                images.forEach { NotificationHelper.cancelTransfer(getApplication(), it.id) }
+                images.forEach {
+                    NotificationHelper.cancelTransfer(
+                        getApplication(),
+                        it.id,
+                        profileId = state.selectedProfileId
+                    )
+                }
                 files.forEach {
                     fileUploadJobs.remove(it.id)?.cancel()
-                    NotificationHelper.cancelTransfer(getApplication(), it.id)
+                    NotificationHelper.cancelTransfer(
+                        getApplication(),
+                        it.id,
+                        profileId = state.selectedProfileId
+                    )
                 }
                 _uiState.update {
                     if (it.activeSessionId == originSessionId) {
@@ -1193,7 +1523,15 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 }
                 refreshSessions()
             }.onFailure { error ->
-                val stoppedByUser = stopRequestedSessionId != null && stopRequestedSessionId == originSessionId
+                if (
+                    client !== api ||
+                    _uiState.value.selectedProfileId != originProfileId ||
+                    _uiState.value.activeSessionId != originSessionId
+                ) {
+                    return@onFailure
+                }
+                val originRunKey = originSessionId?.let { profileScopedStorageKey(originProfileId, it) }
+                val stoppedByUser = originRunKey != null && stopRequestedRunKey == originRunKey
                 val detached = !stoppedByUser && error is HermesStreamDetachedException
                 val termination = when {
                     stoppedByUser -> SendTermination.STOPPED_BY_USER
@@ -1230,15 +1568,32 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 }
                 when {
                     detached -> {
-                        images.forEach { NotificationHelper.cancelTransfer(getApplication(), it.id) }
+                        images.forEach {
+                            NotificationHelper.cancelTransfer(
+                                getApplication(),
+                                it.id,
+                                profileId = originProfileId
+                            )
+                        }
                         files.forEach {
                             fileUploadJobs.remove(it.id)?.cancel()
-                            NotificationHelper.cancelTransfer(getApplication(), it.id)
+                            NotificationHelper.cancelTransfer(
+                                getApplication(),
+                                it.id,
+                                profileId = originProfileId
+                            )
                         }
                         originSessionId?.let { sessionId ->
                             observedActiveRuns += sessionId
-                            if (_uiState.value.activeSessionId == sessionId) {
-                                connectionStore.saveMessageCache(sessionId, _uiState.value.messages)
+                            if (
+                                client === api &&
+                                _uiState.value.selectedProfileId == originProfileId &&
+                                _uiState.value.activeSessionId == sessionId
+                            ) {
+                                connectionStore.saveMessageCache(
+                                    profileScopedStorageKey(originProfileId, sessionId),
+                                    _uiState.value.messages
+                                )
                                 refreshActiveRunStatus()
                             }
                         }
@@ -1258,14 +1613,21 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         if (!state.streaming || !state.runStoppable) return
         val api = client
         val sessionId = state.activeSessionId
-        stopRequestedSessionId = sessionId
+        val requestedProfileId = state.selectedProfileId
+        stopRequestedRunKey = sessionId?.let { profileScopedStorageKey(requestedProfileId, it) }
         runStatusJob?.cancel()
         streamJob?.cancel()
         if (api != null && sessionId != null) {
             viewModelScope.launch {
                 runCatching { api.stopSessionRun(sessionId) }
                 delay(400)
-                refreshActiveRunStatus()
+                if (
+                    client === api &&
+                    _uiState.value.selectedProfileId == requestedProfileId &&
+                    _uiState.value.activeSessionId == sessionId
+                ) {
+                    refreshActiveRunStatus()
+                }
             }
         }
         observedActiveRuns.remove(sessionId)
@@ -1298,11 +1660,20 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     fun selectDownload(file: ChatFile) {
         val fileId = file.downloadUrl?.let(::gatewayFileId)
         val api = client
+        val requestedProfileId = _uiState.value.selectedProfileId
         if (file.size == 0L && file.mimeType == null && fileId != null && api != null) {
             viewModelScope.launch {
                 runCatching { api.getFileMetadata(fileId) }
-                    .onSuccess { resolved -> _uiState.update { it.copy(selectedDownload = resolved) } }
-                    .onFailure { _uiState.update { it.copy(selectedDownload = file) } }
+                    .onSuccess { resolved ->
+                        if (client === api && _uiState.value.selectedProfileId == requestedProfileId) {
+                            _uiState.update { it.copy(selectedDownload = resolved) }
+                        }
+                    }
+                    .onFailure {
+                        if (client === api && _uiState.value.selectedProfileId == requestedProfileId) {
+                            _uiState.update { it.copy(selectedDownload = file) }
+                        }
+                    }
             }
         } else {
             _uiState.update { it.copy(selectedDownload = file) }
@@ -1318,9 +1689,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             return
         }
         val api = client ?: return
+        val requestedProfileId = _uiState.value.selectedProfileId
         viewModelScope.launch {
             runCatching { api.getFileMetadata(fileKey) }
-                .onSuccess { resolved -> _uiState.update { it.copy(selectedDownload = resolved) } }
+                .onSuccess { resolved ->
+                    if (client === api && _uiState.value.selectedProfileId == requestedProfileId) {
+                        _uiState.update { it.copy(selectedDownload = resolved) }
+                    }
+                }
         }
     }
 
@@ -1338,8 +1714,19 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         downloadGenerations[key] = generation
         val priorProgress = _uiState.value.downloadStates[key]?.progress ?: 0
         val sourceSessionId = _uiState.value.activeSessionId
+        val sourceProfileId = _uiState.value.selectedProfileId
         _uiState.update {
-            it.copy(downloadStates = it.downloadStates + (key to FileDownloadState(key, DownloadStatus.DOWNLOADING, priorProgress, sessionId = sourceSessionId)))
+            it.copy(
+                downloadStates = it.downloadStates + (
+                    key to FileDownloadState(
+                        key,
+                        DownloadStatus.DOWNLOADING,
+                        priorProgress,
+                        sessionId = sourceSessionId,
+                        profileId = sourceProfileId
+                    )
+                )
+            )
         }
         downloadJobs[key] = viewModelScope.launch {
             runCatching {
@@ -1352,23 +1739,80 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     file.name
                 ) { progress ->
                     if (downloadGenerations[key] != generation) return@download
-                    if (progress < 100) NotificationHelper.showTransfer(app, key, file.name, progress, uploading = false, sessionId = sourceSessionId)
+                    if (progress < 100) {
+                        NotificationHelper.showTransfer(
+                            app,
+                            key,
+                            file.name,
+                            progress,
+                            uploading = false,
+                            sessionId = sourceSessionId,
+                            profileId = sourceProfileId
+                        )
+                    }
                     _uiState.update { state ->
                         if (downloadGenerations[key] != generation) state
-                        else state.copy(downloadStates = state.downloadStates + (key to FileDownloadState(key, DownloadStatus.DOWNLOADING, progress, sessionId = sourceSessionId)))
+                        else state.copy(
+                            downloadStates = state.downloadStates + (
+                                key to FileDownloadState(
+                                    key,
+                                    DownloadStatus.DOWNLOADING,
+                                    progress,
+                                    sessionId = sourceSessionId,
+                                    profileId = sourceProfileId
+                                )
+                            )
+                        )
                     }
                 }
             }.onSuccess { local ->
                 if (downloadGenerations[key] != generation) return@onSuccess
-                NotificationHelper.finishTransfer(app, key, file.name, uploading = false, success = true, sessionId = sourceSessionId)
+                NotificationHelper.finishTransfer(
+                    app,
+                    key,
+                    file.name,
+                    uploading = false,
+                    success = true,
+                    sessionId = sourceSessionId,
+                    profileId = sourceProfileId
+                )
                 _uiState.update { state ->
-                    state.copy(downloadStates = state.downloadStates + (key to FileDownloadState(key, DownloadStatus.COMPLETED, 100, local.absolutePath, sessionId = sourceSessionId)))
+                    state.copy(
+                        downloadStates = state.downloadStates + (
+                            key to FileDownloadState(
+                                key,
+                                DownloadStatus.COMPLETED,
+                                100,
+                                local.absolutePath,
+                                sessionId = sourceSessionId,
+                                profileId = sourceProfileId
+                            )
+                        )
+                    )
                 }
             }.onFailure { error ->
                 if (downloadGenerations[key] != generation || error is kotlinx.coroutines.CancellationException) return@onFailure
-                NotificationHelper.finishTransfer(app, key, file.name, uploading = false, success = false, sessionId = sourceSessionId)
+                NotificationHelper.finishTransfer(
+                    app,
+                    key,
+                    file.name,
+                    uploading = false,
+                    success = false,
+                    sessionId = sourceSessionId,
+                    profileId = sourceProfileId
+                )
                 _uiState.update { state ->
-                    state.copy(downloadStates = state.downloadStates + (key to FileDownloadState(key, DownloadStatus.FAILED, error = friendlyNetworkError(error), sessionId = sourceSessionId)))
+                    state.copy(
+                        downloadStates = state.downloadStates + (
+                            key to FileDownloadState(
+                                key,
+                                DownloadStatus.FAILED,
+                                error = friendlyNetworkError(error),
+                                sessionId = sourceSessionId,
+                                profileId = sourceProfileId
+                            )
+                        )
+                    )
                 }
             }
         }
@@ -1380,7 +1824,14 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         downloadGenerations[file.id] = (downloadGenerations[file.id] ?: 0L) + 1L
         downloadJobs.remove(file.id)?.cancel()
         DownloadHelper.pause(file.id)
-        NotificationHelper.showPausedTransfer(getApplication(), file.id, file.name, current.progress, current.sessionId)
+        NotificationHelper.showPausedTransfer(
+            getApplication(),
+            file.id,
+            file.name,
+            current.progress,
+            current.sessionId,
+            current.profileId
+        )
         _uiState.update {
             it.copy(downloadStates = it.downloadStates + (file.id to current.copy(status = DownloadStatus.PAUSED)))
         }
@@ -1392,8 +1843,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         downloadGenerations[file.id] = (downloadGenerations[file.id] ?: 0L) + 1L
         downloadJobs.remove(file.id)?.cancel()
         val target = state?.let(::downloadTransferNotificationTarget)
-            ?: TransferNotificationTarget(file.id, null)
-        NotificationHelper.cancelTransfer(getApplication(), target.key, target.sessionId)
+            ?: TransferNotificationTarget(file.id, null, _uiState.value.selectedProfileId)
+        NotificationHelper.cancelTransfer(
+            getApplication(),
+            target.key,
+            target.sessionId,
+            target.profileId
+        )
         DownloadHelper.cancel(getApplication(), file.id)
         _uiState.update { it.copy(downloadStates = it.downloadStates - file.id) }
     }
@@ -1452,8 +1908,8 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         _uiState.update { it.copy(featurePanelOpen = false, error = "${feature}将在后续版本开放") }
     }
 
-    fun openPersonaModelPicker() {
-        openModelPicker(ModelPickerKind.PERSONA)
+    fun openProfilePicker() {
+        openModelPicker(ModelPickerKind.PROFILE)
     }
 
     fun openInferenceModelPicker() {
@@ -1467,12 +1923,10 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
     private fun openModelPicker(kind: ModelPickerKind) {
         _uiState.update { it.copy(modelPicker = kind, error = null) }
         val state = _uiState.value
-        if (kind != ModelPickerKind.REASONING &&
-            state.personaModels.isEmpty() &&
-            state.inferenceModels.isEmpty() &&
-            !state.modelsLoading
-        ) {
-            refreshModels()
+        when (kind) {
+            ModelPickerKind.PROFILE -> if (!state.profilesLoading) refreshProfiles()
+            ModelPickerKind.INFERENCE -> if (state.inferenceModels.isEmpty() && !state.modelsLoading) refreshModels()
+            ModelPickerKind.REASONING -> Unit
         }
     }
 
@@ -1480,27 +1934,58 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         _uiState.update { it.copy(modelPicker = null) }
     }
 
+    fun refreshProfiles(showErrors: Boolean = true) {
+        val api = client ?: return
+        if (_uiState.value.profilesLoading) return
+        _uiState.update { it.copy(profilesLoading = true) }
+        viewModelScope.launch {
+            runCatching { api.listProfiles() }
+                .onSuccess { profiles ->
+                    if (client !== api || _uiState.value.connectionStatus != ConnectionStatus.CONNECTED) {
+                        return@onSuccess
+                    }
+                    val current = _uiState.value.selectedProfileId
+                    val selected = resolveSelectedProfileId(profiles, current)
+                    _uiState.update { it.copy(profiles = profiles, profilesLoading = false) }
+                    if (selected != current) {
+                        profileSwitchBlockReason()?.let { message ->
+                            _uiState.update { it.copy(error = message) }
+                        } ?: activateProfile(selected)
+                    }
+                }
+                .onFailure { error ->
+                    if (client !== api || _uiState.value.connectionStatus != ConnectionStatus.CONNECTED) {
+                        return@onFailure
+                    }
+                    _uiState.update { it.copy(profilesLoading = false) }
+                    if (showErrors) showError(error)
+                }
+        }
+    }
+
     fun refreshModels(showErrors: Boolean = true) {
         val api = client ?: return
         if (_uiState.value.modelsLoading) return
+        val requestedProfileId = _uiState.value.selectedProfileId
         val requestedRuntimeKey = runtimeKey()
+        val generation = ++modelLoadGeneration
         _uiState.update { it.copy(modelsLoading = true) }
         viewModelScope.launch {
             runCatching { api.listModels() }
                 .onSuccess { models ->
-                    val personas = personaModels(models)
+                    if (
+                        generation != modelLoadGeneration ||
+                        client !== api ||
+                        _uiState.value.selectedProfileId != requestedProfileId
+                    ) {
+                        return@onSuccess
+                    }
                     val inference = inferenceModels(models)
-                    val currentState = _uiState.value
-                    val selectedPersona = resolveSelectedPersonaModelId(
-                        personas,
-                        currentState.selectedPersonaModelId
-                    )
                     val requestedConfig = runtimeConfigs[requestedRuntimeKey] ?: ConversationRuntimeConfig()
                     val selectedInference = resolveSelectedInferenceModelId(
                         inference,
                         requestedConfig.inferenceModelId
                     )
-                    connectionStore.saveSelectedPersonaModel(selectedPersona)
                     saveRuntimeConfig(
                         requestedRuntimeKey,
                         requestedConfig.copy(inferenceModelId = selectedInference)
@@ -1508,8 +1993,6 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     _uiState.update { state ->
                         val stateRuntimeKey = runtimeKey(state.activeSessionId)
                         state.copy(
-                            personaModels = personas,
-                            selectedPersonaModelId = selectedPersona,
                             inferenceModels = inference,
                             selectedInferenceModelId = if (stateRuntimeKey == requestedRuntimeKey) {
                                 selectedInference
@@ -1522,16 +2005,152 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     }
                 }
                 .onFailure { error ->
+                    if (
+                        generation != modelLoadGeneration ||
+                        client !== api ||
+                        _uiState.value.selectedProfileId != requestedProfileId
+                    ) {
+                        return@onFailure
+                    }
                     _uiState.update { it.copy(modelsLoading = false) }
                     if (showErrors) showError(error)
                 }
         }
     }
 
-    fun selectPersonaModel(modelId: String?) {
-        if (modelId != null && _uiState.value.personaModels.none { it.id == modelId }) return
-        connectionStore.saveSelectedPersonaModel(modelId)
-        _uiState.update { it.copy(selectedPersonaModelId = modelId, error = null) }
+    private fun profileSwitchBlockReason(): String? = when {
+        _uiState.value.streaming || streamJob?.isActive == true -> "请等待当前回答完成后再切换人格"
+        attachmentPreparationsInFlight > 0 ||
+            _uiState.value.preparingImage ||
+            imageUploadJobs.values.any(Job::isActive) ||
+            fileUploadJobs.values.any(Job::isActive) -> "请等待附件处理或上传完成后再切换人格"
+        _uiState.value.cronBusyJobId != null -> "请等待定时任务操作完成后再切换人格"
+        else -> null
+    }
+
+    fun selectProfile(profileId: String) {
+        if (_uiState.value.profiles.none { it.id == profileId }) return
+        profileSwitchBlockReason()?.let { message ->
+            _uiState.update { it.copy(error = message) }
+            return
+        }
+        activateProfile(profileId)
+    }
+
+    private fun activateProfile(profileId: String, preferredSessionId: String? = null) {
+        client ?: return
+        if (_uiState.value.selectedProfileId == profileId) {
+            _uiState.update { it.copy(modelPicker = null, error = null) }
+            return
+        }
+        persistAllDrafts()
+        sessionLoadJob?.cancel()
+        runStatusJob?.cancel()
+        sessionLoadGeneration += 1
+        observedActiveRuns.clear()
+        answerStatusJob?.cancel()
+        answerStatusJob = null
+        stopRequestedRunKey = null
+        liveAssistantMessageId = null
+        val generation = ++profileLoadGeneration
+        modelLoadGeneration += 1
+        val current = _uiState.value
+        val api = HermesApiClient(current.serverUrl, current.token).also { it.selectProfile(profileId) }
+        client = api
+        connectionStore.saveSelectedProfile(profileId)
+        _uiState.update {
+            applyRuntimeConfig(
+                it.copy(
+                    selectedProfileId = profileId,
+                    sessions = emptyList(),
+                    activeSessionId = null,
+                    messages = emptyList(),
+                    pendingImages = emptyList(),
+                    pendingFiles = emptyList(),
+                    inferenceModels = emptyList(),
+                    profilesLoading = false,
+                    modelsLoading = false,
+                    cronJobs = emptyList(),
+                    cronJobsLoading = false,
+                    cronBusyJobId = null,
+                    cronManagerOpen = false,
+                    cronEditor = null,
+                    cronJobToDelete = null,
+                    cronNotice = null,
+                    sessionToRename = null,
+                    sessionToDelete = null,
+                    selectedDownload = null,
+                    modelPicker = null,
+                    streaming = false,
+                    runStoppable = false,
+                    thinking = false,
+                    toolStatus = null,
+                    answerStatus = AnswerStatus.IDLE,
+                    loading = true,
+                    error = null
+                ),
+                null
+            )
+        }
+        restoreDraft(null)
+        viewModelScope.launch {
+            runCatching { visibleSessions(api.listSessions()) }
+                .onSuccess { sessions ->
+                    if (generation != profileLoadGeneration || _uiState.value.selectedProfileId != profileId) {
+                        return@onSuccess
+                    }
+                    val requestedSessionId = preferredSessionId?.takeIf { requested ->
+                        sessions.any { it.id == requested }
+                    }
+                    val storedSessionId = connectionStore.loadActiveSession(profileId)?.takeIf { stored ->
+                        sessions.any { it.id == stored }
+                    }
+                    val selected = resolveVisibleActiveSessionId(
+                        sessions,
+                        requestedSessionId ?: storedSessionId,
+                        chooseFirstWhenMissing = true
+                    )
+                    val requestedSessionMissing = preferredSessionId != null && requestedSessionId == null
+                    val pendingFileKey = pendingNotificationSession
+                        ?.takeIf { it.profileId == profileId && it.sessionId == preferredSessionId }
+                        ?.fileKey
+                    if (pendingNotificationSession?.profileId == profileId) {
+                        pendingNotificationSession = null
+                        pendingNotificationRefreshAttempted = false
+                    }
+                    connectionStore.saveActiveSession(profileId, selected)
+                    _uiState.update { state ->
+                        applyRuntimeConfig(
+                            state.copy(
+                                sessions = sessions,
+                                activeSessionId = selected,
+                                loading = false,
+                                error = if (requestedSessionMissing) {
+                                    "通知对应的对话已不存在或不可见"
+                                } else null
+                            ),
+                            selected
+                        )
+                    }
+                    refreshModels(showErrors = false)
+                    if (selected != null) {
+                        restoreDraft(selected)
+                        loadSession(selected)
+                        refreshActiveRunStatus()
+                    } else {
+                        createSession()
+                    }
+                    pendingFileKey?.let(::openDownloadFromNotification)
+                    routePendingNotificationSessionIfReady()
+                }
+                .onFailure { error ->
+                    if (generation != profileLoadGeneration || _uiState.value.selectedProfileId != profileId) {
+                        return@onFailure
+                    }
+                    _uiState.update { it.copy(loading = false) }
+                    showError(error)
+                }
+        }
     }
 
     fun selectInferenceModel(modelId: String?) {
@@ -1574,12 +2193,17 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun refreshCronJobs() {
         val api = client ?: return
+        val requestedProfileId = _uiState.value.selectedProfileId
         if (_uiState.value.cronJobsLoading) return
         _uiState.update { it.copy(cronJobsLoading = true, cronNotice = null) }
         viewModelScope.launch {
             runCatching { api.listCronJobs() }
-                .onSuccess { jobs -> _uiState.update { it.copy(cronJobs = jobs, cronJobsLoading = false) } }
+                .onSuccess { jobs ->
+                    if (client !== api || _uiState.value.selectedProfileId != requestedProfileId) return@onSuccess
+                    _uiState.update { it.copy(cronJobs = jobs, cronJobsLoading = false) }
+                }
                 .onFailure { error ->
+                    if (client !== api || _uiState.value.selectedProfileId != requestedProfileId) return@onFailure
                     _uiState.update { it.copy(cronJobsLoading = false) }
                     showError(error)
                 }
@@ -1618,6 +2242,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun saveCronJob() {
         val api = client ?: return
+        val requestedProfileId = _uiState.value.selectedProfileId
         val editor = _uiState.value.cronEditor ?: return
         val name = editor.name.trim()
         val schedule = editor.schedule.trim()
@@ -1663,6 +2288,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 }
                 saved
             }.onSuccess { job ->
+                if (client !== api || _uiState.value.selectedProfileId != requestedProfileId) return@onSuccess
                 _uiState.update { state ->
                     state.copy(
                         cronJobs = upsertCronJob(state.cronJobs, job),
@@ -1672,6 +2298,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     )
                 }
             }.onFailure { error ->
+                if (client !== api || _uiState.value.selectedProfileId != requestedProfileId) return@onFailure
                 _uiState.update { it.copy(cronBusyJobId = null) }
                 showError(error)
             }
@@ -1680,11 +2307,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun toggleCronJob(job: HermesCronJob) {
         val api = client ?: return
+        val requestedProfileId = _uiState.value.selectedProfileId
         if (_uiState.value.cronBusyJobId != null) return
         _uiState.update { it.copy(cronBusyJobId = job.id, cronNotice = null, error = null) }
         viewModelScope.launch {
             runCatching { if (job.isPaused) api.resumeCronJob(job.id) else api.pauseCronJob(job.id) }
                 .onSuccess { updated ->
+                    if (client !== api || _uiState.value.selectedProfileId != requestedProfileId) return@onSuccess
                     _uiState.update { state ->
                         state.copy(
                             cronJobs = upsertCronJob(state.cronJobs, updated),
@@ -1694,6 +2323,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     }
                 }
                 .onFailure { error ->
+                    if (client !== api || _uiState.value.selectedProfileId != requestedProfileId) return@onFailure
                     _uiState.update { it.copy(cronBusyJobId = null) }
                     showError(error)
                 }
@@ -1702,11 +2332,13 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun runCronJobNow(job: HermesCronJob) {
         val api = client ?: return
+        val requestedProfileId = _uiState.value.selectedProfileId
         if (_uiState.value.cronBusyJobId != null) return
         _uiState.update { it.copy(cronBusyJobId = job.id, cronNotice = null, error = null) }
         viewModelScope.launch {
             runCatching { api.runCronJob(job.id) }
                 .onSuccess { updated ->
+                    if (client !== api || _uiState.value.selectedProfileId != requestedProfileId) return@onSuccess
                     _uiState.update { state ->
                         state.copy(
                             cronJobs = upsertCronJob(state.cronJobs, updated),
@@ -1716,6 +2348,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     }
                 }
                 .onFailure { error ->
+                    if (client !== api || _uiState.value.selectedProfileId != requestedProfileId) return@onFailure
                     _uiState.update { it.copy(cronBusyJobId = null) }
                     showError(error)
                 }
@@ -1734,6 +2367,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
 
     fun confirmDeleteCronJob() {
         val api = client ?: return
+        val requestedProfileId = _uiState.value.selectedProfileId
         val job = _uiState.value.cronJobToDelete ?: return
         if (_uiState.value.cronBusyJobId != null) return
         _uiState.update { it.copy(cronBusyJobId = job.id, error = null) }
@@ -1742,6 +2376,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 check(api.deleteCronJob(job.id)) { "服务器未删除该定时任务" }
             }
                 .onSuccess {
+                    if (client !== api || _uiState.value.selectedProfileId != requestedProfileId) return@onSuccess
                     _uiState.update { state ->
                         state.copy(
                             cronJobs = state.cronJobs.filterNot { it.id == job.id },
@@ -1752,6 +2387,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     }
                 }
                 .onFailure { error ->
+                    if (client !== api || _uiState.value.selectedProfileId != requestedProfileId) return@onFailure
                     _uiState.update { it.copy(cronBusyJobId = null) }
                     showError(error)
                 }
@@ -1806,18 +2442,29 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
             cancelDownloads = {
                 downloadJobs.values.forEach(Job::cancel)
                 downloadJobs.clear()
+                downloadGenerations.clear()
                 DownloadHelper.cancelAll()
             },
             cancelMonitors = { RunMonitorService.cancelAll(getApplication()) },
             cancelNotifications = { NotificationHelper.cancelAll(getApplication()) }
         )
         connectionStore.clear()
+        connectionGeneration += 1
+        profileLoadGeneration += 1
+        modelLoadGeneration += 1
+        pendingNotificationSession = null
+        pendingNotificationRefreshAttempted = false
+        stopRequestedRunKey = null
+        liveAssistantMessageId = null
+        observedActiveRuns.clear()
+        attachmentPreparationGeneration += 1
+        attachmentPreparationsInFlight = 0
         client = null
         drafts = ConversationDrafts()
         runtimeConfigs.clear()
         draftImages.clear()
         draftFiles.clear()
-        localDraftKey = "local-draft-${UUID.randomUUID()}"
+        localDraftKeys = mutableMapOf("default" to "local-draft-${UUID.randomUUID()}")
         _input.value = ""
         _uiState.value = MainUiState()
     }
@@ -1830,9 +2477,19 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         _uiState.update { it.copy(error = null) }
     }
 
-    private fun handleStreamEvent(sessionId: String, assistantId: String, event: HermesStreamEvent) {
+    private fun handleStreamEvent(
+        sourceClient: HermesApiClient,
+        profileId: String,
+        sessionId: String,
+        assistantId: String,
+        event: HermesStreamEvent
+    ) {
         _uiState.update { state ->
-            if (state.activeSessionId != sessionId) return@update state
+            if (
+                client !== sourceClient ||
+                state.selectedProfileId != profileId ||
+                state.activeSessionId != sessionId
+            ) return@update state
             when (event) {
                 is HermesStreamEvent.TextDelta -> state.copy(
                     thinking = false,
@@ -1852,7 +2509,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     state.copy(thinking = false, answerStatus = AnswerStatus.FAILED, error = event.message)
                 }
                 HermesStreamEvent.Completed -> {
-                    if (stopRequestedSessionId == sessionId) return@update state
+                    if (stopRequestedRunKey == profileScopedStorageKey(profileId, sessionId)) return@update state
                     observedActiveRuns.remove(sessionId)
                     clearAnswerStatusLater(AnswerStatus.COMPLETED)
                     state.copy(streaming = false, thinking = false, toolStatus = null, answerStatus = AnswerStatus.COMPLETED)
@@ -1868,6 +2525,12 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         val message = friendlyNetworkError(error, serverUrl)
         if (requiresPasswordReauthentication(error)) {
             stopPolling()
+            connectionGeneration += 1
+            profileLoadGeneration += 1
+            modelLoadGeneration += 1
+            stopRequestedRunKey = null
+            liveAssistantMessageId = null
+            observedActiveRuns.clear()
             connectionStore.clearToken()
             client = null
             RunMonitorService.cancelAll(getApplication())

@@ -148,6 +148,17 @@ tbody tr:last-child td { border-bottom: 0; }
 .system-form { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 0 16px; padding: 20px; }
 .system-form .form-actions { display: flex; align-items: center; gap: 14px; }
 .system-form .form-message { margin: 0; }
+.profile-config { display: grid; gap: 12px; margin: 4px 0 18px; padding: 15px; border: 1px solid var(--line); border-radius: 16px; background: #fafbff; }
+.profile-config-head { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
+.profile-config-head > div { display: grid; gap: 3px; }
+.profile-config-head span { color: var(--muted); font-size: 12px; }
+.profile-rows { display: grid; gap: 10px; }
+.profile-row { display: grid; grid-template-columns: minmax(110px, .65fr) minmax(130px, .75fr) minmax(220px, 1.35fr) minmax(160px, .9fr) auto; gap: 10px; align-items: end; padding: 12px; border: 1px solid #e3e7f0; border-radius: 14px; background: var(--surface); }
+.profile-row .field { margin: 0; }
+.profile-row .button { margin-bottom: 1px; }
+.profile-empty { padding: 14px; border: 1px dashed #cfd6e4; border-radius: 12px; color: var(--muted); text-align: center; font-size: 13px; }
+.profile-help { margin: 0; line-height: 1.6; }
+.profile-help code { padding: 2px 5px; border-radius: 6px; background: #eef1f7; color: #374151; }
 .hermes-key-state { display: grid; gap: 4px; margin: 0 0 18px; padding: 13px 14px; border: 1px solid #dce2ec; border-radius: 14px; color: #59657a; background: var(--surface-soft); font-size: 12px; }
 .hermes-key-state strong { color: #3e4a60; font-size: 13px; }
 .proxy-content { padding: 21px; }
@@ -178,6 +189,8 @@ tbody tr:last-child td { border-bottom: 0; }
   .toolbar { flex-wrap: wrap; }
   .search-box { flex-basis: 100%; max-width: none; }
   .account-form, .system-form { grid-template-columns: 1fr; }
+  .profile-row { grid-template-columns: 1fr; }
+  .profile-config-head { align-items: flex-start; }
   .account-form .form-actions, .system-form .form-actions { grid-column: auto; align-items: flex-start; flex-direction: column; }
   .system-form .span-two { grid-column: auto; }
 }

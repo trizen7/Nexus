@@ -159,11 +159,11 @@ powershell -NoProfile -ExecutionPolicy Bypass -File ".\成品\本地测试环境
 
 Debug APK 不内嵌本地 CA。App 可连接 HTTP 或由 Android 系统信任链验证的 HTTPS；公网 HTTP 不再由客户端拦截，但仅建议用于明确可接受明文传输风险的环境。
 
-Android 聊天输入使用原生焦点流程，连续输入只维持一个尾随草稿保存任务；登录页和聊天页直接采用系统预先给出的输入法最终高度，不再跟随键盘动画逐帧重新测量页面，消息列表也不再等待 300ms 后才定位。Android 聊天请求会携带手机端能力声明，Gateway 仅通过原版 Hermes HTTP API 注入本轮移动端提示；Hermes 不应把主机本地路径、桌面拖拽或电脑快捷键当作手机附件交付方式。人物列表只接受 Hermes 明确标记为 persona 的条目，主模型名称不会再被误显示为人物；未选择人物时使用 `Hermes 默认（default）`。QQ、微信等其他渠道正在处理消息时，App 会以只读方式显示“思考中”，但不会提供停止按钮。 Android 发送成功建立 SSE 后若因锁屏或切网失去实时连接，会保留已提交消息、清空其持久化草稿且禁止自动重试聊天 POST，再通过 Gateway 运行状态续接；唤醒时的被动刷新不会把短暂网络恢复延迟误报为服务器不可达。
+Android 聊天输入使用原生焦点流程，连续输入只维持一个尾随草稿保存任务；登录页和聊天页直接采用系统预先给出的输入法最终高度，不再跟随键盘动画逐帧重新测量页面，消息列表也不再等待 300ms 后才定位。Android 聊天请求会携带手机端能力声明，Gateway 仅通过原版 Hermes HTTP API 注入本轮移动端提示；Hermes 不应把主机本地路径、桌面拖拽或电脑快捷键当作手机附件交付方式。人格列表由 Gateway 的 `/api/hermes/profiles` 提供，默认项使用主 Hermes API 连接，其他项需在 Gateway 管理页配置完整的原版 Hermes Profile API 地址和 Key。`/v1/models` 只用于当前 Profile 的调用模型，不再当作人格列表。QQ、微信等其他渠道正在处理消息时，App 会以只读方式显示“思考中”，但不会提供停止按钮。 Android 发送成功建立 SSE 后若因锁屏或切网失去实时连接，会保留已提交消息、清空其持久化草稿且禁止自动重试聊天 POST，再通过 Gateway 运行状态续接；唤醒时的被动刷新不会把短暂网络恢复延迟误报为服务器不可达。
 
 ## 推理深度
 
-Android 中的人物模型作为全局设定；实际调用模型和推理深度按对话单独保存。推理深度选项为默认、`none`、`minimal`、`low`、`medium`、`high`、`xhigh`、`max`、`ultra`。
+Android 中的 Hermes 人格是全局 Profile 上下文；切换后会话、草稿、调用模型、推理深度、定时任务和后台通知路由都按 Profile 隔离。实际调用模型和推理深度仍按对话单独保存。推理深度选项为默认、`none`、`minimal`、`low`、`medium`、`high`、`xhigh`、`max`、`ultra`。
 
 Nexus 只负责 UI、持久化、白名单校验和 `reasoning_effort` 字段透传。Hermes 和所选调用模型是否支持、是否实际采用该值，由它们自身实现决定。
 

@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Any, Callable
 from urllib.parse import quote, urlsplit
 
-from aiohttp import ClientSession, ClientTimeout, web
+from aiohttp import ClientSession, ClientTimeout, FormData, web
 
 from . import __version__
 
@@ -44,8 +44,10 @@ MEDIA_STORE_KEY = web.AppKey("media_store", object)
 HTTP_SESSION_KEY = web.AppKey("http_session", ClientSession)
 RUN_TRACKER_KEY = web.AppKey("run_tracker", object)
 EXTERNAL_RUN_OBSERVER_KEY = web.AppKey("external_run_observer", object)
+EXTERNAL_RUN_OBSERVERS_KEY = web.AppKey("external_run_observers", dict)
 TRANSCRIBE_AUDIO_KEY = web.AppKey("transcribe_audio", object)
 REQUEST_ATTACHMENT_IDS_KEY = web.RequestKey("nexus_attachment_ids", list)
+HERMES_PROFILE_HEADER = "X-Nexus-Hermes-Profile"
 LOGIN_RATE_LIMITER_KEY = web.AppKey("login_rate_limiter", object)
 SETUP_LOCK_KEY = web.AppKey("setup_lock", asyncio.Lock)
 TOKEN_TTL_SECONDS = 30 * 24 * 60 * 60
@@ -109,6 +111,15 @@ class AuthState:
     revision: int = 1
 
 
+@dataclass(frozen=True)
+class HermesProfileConfig:
+    id: str
+    name: str
+    upstream_url: str
+    upstream_token: str
+    is_default: bool = False
+
+
 @dataclass
 class GatewayConfig:
     initialized: bool
@@ -116,6 +127,22 @@ class GatewayConfig:
     session_secret: str
     upstream_url: str
     upstream_token: str
+    profiles: dict[str, HermesProfileConfig]
+
+    def profile(self, profile_id: str | None) -> HermesProfileConfig | None:
+        normalized = (profile_id or "default").strip() or "default"
+        if normalized == "default":
+            return HermesProfileConfig(
+                id="default",
+                name="Hermes 默认（default）",
+                upstream_url=self.upstream_url,
+                upstream_token=self.upstream_token,
+                is_default=True,
+            )
+        return self.profiles.get(normalized)
+
+    def all_profiles(self) -> list[HermesProfileConfig]:
+        return [self.profile("default"), *self.profiles.values()]  # type: ignore[list-item]
 
 
 @dataclass(frozen=True)
@@ -210,6 +237,8 @@ class RunTracker:
             stoppable=False,
             updated_at=time.time(),
         )
+        self.buffers.pop(session_id, None)
+        self.last_persisted.pop(session_id, None)
         self._save()
 
     def consume_sse(self, session_id: str, chunk: bytes) -> None:
@@ -305,8 +334,21 @@ class ExternalRunObserver:
         self._active_status: dict[str, Any] | None = None
         self._completed: dict[str, dict[str, Any]] = {}
 
-    async def status(self, app: web.Application, session_id: str) -> dict[str, Any] | None:
-        await self._refresh(app)
+    async def reset(self) -> None:
+        async with self._lock:
+            self._last_probe_at = 0.0
+            self._previous_sessions.clear()
+            self._active_session_id = None
+            self._active_status = None
+            self._completed.clear()
+
+    async def status(
+        self,
+        app: web.Application,
+        session_id: str,
+        profile: HermesProfileConfig | None = None,
+    ) -> dict[str, Any] | None:
+        await self._refresh(app, profile)
         now = self.clock()
         self._prune_completed(now)
         if session_id == self._active_session_id and self._active_status is not None:
@@ -314,7 +356,11 @@ class ExternalRunObserver:
         completed = self._completed.get(session_id)
         return dict(completed) if completed is not None else None
 
-    async def _refresh(self, app: web.Application) -> None:
+    async def _refresh(
+        self,
+        app: web.Application,
+        profile: HermesProfileConfig | None = None,
+    ) -> None:
         now = self.clock()
         if self._last_probe_at and now - self._last_probe_at < self.cache_seconds:
             return
@@ -323,12 +369,17 @@ class ExternalRunObserver:
             if self._last_probe_at and now - self._last_probe_at < self.cache_seconds:
                 return
             self._last_probe_at = now
-            await self._probe(app, now)
+            await self._probe(app, now, profile)
 
-    async def _probe(self, app: web.Application, now: float) -> None:
+    async def _probe(
+        self,
+        app: web.Application,
+        now: float,
+        profile: HermesProfileConfig | None = None,
+    ) -> None:
         health_result, sessions_result = await asyncio.gather(
-            self._fetch_json(app, "/health/detailed"),
-            self._fetch_json(app, "/api/sessions"),
+            self._fetch_json(app, "/health/detailed", profile),
+            self._fetch_json(app, "/api/sessions", profile),
             return_exceptions=True,
         )
         health = health_result if isinstance(health_result, dict) else None
@@ -371,12 +422,19 @@ class ExternalRunObserver:
             self._activate(candidate, now)
         self._prune_completed(now)
 
-    async def _fetch_json(self, app: web.Application, path: str) -> dict[str, Any] | None:
-        config = app[GATEWAY_CONFIG_KEY]
+    async def _fetch_json(
+        self,
+        app: web.Application,
+        path: str,
+        profile: HermesProfileConfig | None = None,
+    ) -> dict[str, Any] | None:
+        selected = profile or app[GATEWAY_CONFIG_KEY].profile("default")
+        if selected is None:
+            return None
         session = app[HTTP_SESSION_KEY]
-        headers = {"Authorization": f"Bearer {config.upstream_token}"}
+        headers = {"Authorization": f"Bearer {selected.upstream_token}"}
         try:
-            async with session.get(f"{config.upstream_url}{path}", headers=headers) as response:
+            async with session.get(f"{selected.upstream_url}{path}", headers=headers) as response:
                 if response.status != 200:
                     return None
                 payload = await response.json(content_type=None)
@@ -971,8 +1029,13 @@ async def _close_client_session(app: web.Application) -> None:
         await session.close()
 
 
-def _upstream_headers(app: web.Application, request: web.Request) -> dict[str, str]:
-    headers = {"Authorization": f"Bearer {app[GATEWAY_CONFIG_KEY].upstream_token}"}
+def _upstream_headers(
+    app: web.Application,
+    request: web.Request,
+    profile: HermesProfileConfig | None = None,
+) -> dict[str, str]:
+    selected = profile or _request_profile(request)
+    headers = {"Authorization": f"Bearer {selected.upstream_token}"}
     for key in ("Accept", "Content-Type", "Idempotency-Key", "X-Hermes-Session-Id", "X-Hermes-Session-Key"):
         value = request.headers.get(key)
         if value:
@@ -1005,6 +1068,97 @@ def _safe_upstream_label(value: Any) -> str | None:
     if not isinstance(value, str) or not 1 <= len(value) <= 64:
         return None
     return value if re.fullmatch(r"[A-Za-z0-9][A-Za-z0-9._+ -]*", value) else None
+
+
+PROFILE_ID_PATTERN = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
+MAX_HERMES_PROFILES = 16
+
+
+def _normalize_profile_id(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    candidate = value.strip()
+    if not candidate or candidate == "default" or not PROFILE_ID_PATTERN.fullmatch(candidate):
+        return None
+    return candidate
+
+
+def _normalize_profile_name(value: Any, profile_id: str) -> str | None:
+    if value is not None and not isinstance(value, str):
+        return None
+    candidate = (value or "").strip()
+    if not candidate:
+        candidate = profile_id
+    if len(candidate) > 64 or any(ord(char) < 32 for char in candidate):
+        return None
+    return candidate
+
+
+def _load_saved_profiles(value: Any) -> dict[str, HermesProfileConfig]:
+    if value is None:
+        return {}
+    if not isinstance(value, list):
+        return {}
+    profiles: dict[str, HermesProfileConfig] = {}
+    for item in value[:MAX_HERMES_PROFILES]:
+        if not isinstance(item, dict):
+            continue
+        profile_id = _normalize_profile_id(item.get("id"))
+        if profile_id is None or profile_id in profiles:
+            continue
+        profile_name = _normalize_profile_name(item.get("name"), profile_id)
+        upstream_url = _normalize_hermes_api_url(str(item.get("hermes_api_url", "")))
+        upstream_token = str(item.get("hermes_api_token", "")).strip()
+        if profile_name is None or upstream_url is None or not upstream_token:
+            continue
+        profiles[profile_id] = HermesProfileConfig(
+            id=profile_id,
+            name=profile_name,
+            upstream_url=upstream_url,
+            upstream_token=upstream_token,
+        )
+    return profiles
+
+
+def _profile_public_payload(profile: HermesProfileConfig, *, admin: bool = False) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "id": profile.id,
+        "name": profile.name,
+        "is_default": profile.is_default,
+    }
+    if admin:
+        payload.update({
+            "hermes_api_url": profile.upstream_url,
+            "key_configured": bool(profile.upstream_token),
+        })
+    return payload
+
+
+def _request_profile(request: web.Request) -> HermesProfileConfig:
+    requested = request.headers.get(HERMES_PROFILE_HEADER, "default").strip() or "default"
+    profile = request.app[GATEWAY_CONFIG_KEY].profile(requested)
+    if profile is None:
+        raise web.HTTPBadRequest(
+            text=json.dumps({
+                "error": {
+                    "code": "unknown_hermes_profile",
+                    "message": "所选 Hermes 人格不存在，请刷新人格列表或在 Gateway 中重新配置",
+                }
+            }, ensure_ascii=False),
+            content_type="application/json",
+        )
+    return profile
+
+
+def _scoped_session_id(profile: HermesProfileConfig, session_id: str) -> str:
+    return session_id if profile.is_default else f"profile:{profile.id}:{session_id}"
+
+
+def _external_run_observer(app: web.Application, profile: HermesProfileConfig) -> ExternalRunObserver:
+    if profile.is_default:
+        return app[EXTERNAL_RUN_OBSERVER_KEY]
+    observers: dict[str, ExternalRunObserver] = app[EXTERNAL_RUN_OBSERVERS_KEY]
+    return observers.setdefault(profile.id, ExternalRunObserver())
 
 
 def _upstream_summary(payload: Any, *, status: str, http_status: int | None = None) -> dict[str, Any]:
@@ -1150,12 +1304,30 @@ def _write_credentials(path: Path, username: str, password_salt: str, password_h
     }, ensure_ascii=False, indent=2))
 
 
-def _write_config(path: Path, hermes_api_url: str, hermes_api_token: str, session_secret: str) -> None:
-    _secure_atomic_write(path, json.dumps({
+def _write_config(
+    path: Path,
+    hermes_api_url: str,
+    hermes_api_token: str,
+    session_secret: str,
+    profiles: dict[str, HermesProfileConfig] | None = None,
+) -> None:
+    payload: dict[str, Any] = {
         "hermes_api_url": hermes_api_url.rstrip("/"),
         "hermes_api_token": hermes_api_token,
         "session_secret": session_secret,
-    }, ensure_ascii=False, indent=2))
+    }
+    configured_profiles = profiles or {}
+    if configured_profiles:
+        payload["hermes_profiles"] = [
+            {
+                "id": profile.id,
+                "name": profile.name,
+                "hermes_api_url": profile.upstream_url,
+                "hermes_api_token": profile.upstream_token,
+            }
+            for profile in configured_profiles.values()
+        ]
+    _secure_atomic_write(path, json.dumps(payload, ensure_ascii=False, indent=2))
 
 
 async def setup(request: web.Request) -> web.Response:
@@ -1185,7 +1357,7 @@ async def setup(request: web.Request) -> web.Response:
     if len(password) < 8:
         return web.json_response({"error": {"code": "weak_password", "message": "密码至少需要 8 个字符"}}, status=400)
     if hermes_api_url is None:
-        return web.json_response({"error": {"code": "invalid_hermes_url", "message": "Hermes 地址必须使用 http:// 或 https://"}}, status=400)
+        return web.json_response({"error": {"code": "invalid_hermes_url", "message": "Hermes 地址必须是有效的 http:// 或 https:// 地址"}}, status=400)
     if not hermes_api_token:
         return web.json_response({"error": {"code": "missing_hermes_token", "message": "请填写 Hermes API Server Key"}}, status=400)
     async with request.app[SETUP_LOCK_KEY]:
@@ -1282,6 +1454,21 @@ async def admin_hermes_config(request: web.Request) -> web.Response:
     return web.json_response({
         "hermes_api_url": config.upstream_url,
         "key_configured": bool(config.upstream_token),
+        "profiles": [
+            _profile_public_payload(profile, admin=True)
+            for profile in config.profiles.values()
+        ],
+    })
+
+
+async def list_hermes_profiles(request: web.Request) -> web.Response:
+    config = request.app[GATEWAY_CONFIG_KEY]
+    return web.json_response({
+        "object": "list",
+        "data": [
+            _profile_public_payload(profile)
+            for profile in config.all_profiles()
+        ],
     })
 
 
@@ -1301,41 +1488,145 @@ async def update_hermes_config(request: web.Request) -> web.Response:
 
     async with request.app[SETUP_LOCK_KEY]:
         config = request.app[GATEWAY_CONFIG_KEY]
+        if not supplied_token and hermes_api_url != config.upstream_url:
+            return web.json_response({
+                "error": {
+                    "code": "missing_hermes_token",
+                    "message": "修改 Hermes API 地址时必须重新填写 API Server Key",
+                }
+            }, status=400)
         hermes_api_token = supplied_token or config.upstream_token
         if not hermes_api_token:
             return web.json_response({"error": {"code": "missing_hermes_token", "message": "请填写 Hermes API Server Key"}}, status=400)
 
-        probe = await _probe_hermes(
+        candidate_profiles = dict(config.profiles)
+        if "profiles" in body:
+            raw_profiles = body.get("profiles")
+            if not isinstance(raw_profiles, list):
+                return web.json_response({
+                    "error": {"code": "invalid_hermes_profiles", "message": "Hermes 人格配置必须是数组"}
+                }, status=400)
+            if len(raw_profiles) > MAX_HERMES_PROFILES:
+                return web.json_response({
+                    "error": {"code": "too_many_hermes_profiles", "message": f"最多配置 {MAX_HERMES_PROFILES} 个额外人格"}
+                }, status=400)
+            candidate_profiles = {}
+            for item in raw_profiles:
+                if not isinstance(item, dict):
+                    return web.json_response({
+                        "error": {"code": "invalid_hermes_profile", "message": "Hermes 人格配置项无效"}
+                    }, status=400)
+                profile_id = _normalize_profile_id(item.get("id"))
+                if profile_id is None:
+                    return web.json_response({
+                        "error": {
+                            "code": "invalid_hermes_profile_id",
+                            "message": "人格 ID 只能包含字母、数字、点、下划线和短横线，且不能使用 default",
+                        }
+                    }, status=400)
+                if profile_id in candidate_profiles:
+                    return web.json_response({
+                        "error": {"code": "duplicate_hermes_profile", "message": f"人格 ID 重复：{profile_id}"}
+                    }, status=400)
+                profile_name = _normalize_profile_name(item.get("name"), profile_id)
+                profile_url = _normalize_hermes_api_url(str(item.get("hermes_api_url", "")))
+                if profile_name is None:
+                    return web.json_response({
+                        "error": {"code": "invalid_hermes_profile_name", "message": f"人格名称无效：{profile_id}"}
+                    }, status=400)
+                if profile_url is None:
+                    return web.json_response({
+                        "error": {"code": "invalid_hermes_profile_url", "message": f"人格 {profile_name} 的 API 地址无效"}
+                    }, status=400)
+                existing = config.profiles.get(profile_id)
+                profile_token = str(item.get("hermes_api_token", "")).strip()
+                if (
+                    not profile_token
+                    and existing is not None
+                    and existing.upstream_url == profile_url
+                ):
+                    profile_token = existing.upstream_token
+                if not profile_token:
+                    message = (
+                        f"修改人格 {profile_name} 的 API 地址时必须重新填写 API Server Key"
+                        if existing is not None and existing.upstream_url != profile_url
+                        else f"请填写人格 {profile_name} 的 API Server Key"
+                    )
+                    return web.json_response({
+                        "error": {"code": "missing_hermes_profile_token", "message": message}
+                    }, status=400)
+                candidate_profiles[profile_id] = HermesProfileConfig(
+                    id=profile_id,
+                    name=profile_name,
+                    upstream_url=profile_url,
+                    upstream_token=profile_token,
+                )
+
+        default_probe = await _probe_hermes(
             request.app,
             upstream_url=hermes_api_url,
             upstream_token=hermes_api_token,
         )
-        if probe["state"] == "auth_failed":
+        if default_probe["state"] == "auth_failed":
             return web.json_response({
                 "status": "degraded",
-                "upstream": probe["upstream"],
+                "upstream": default_probe["upstream"],
                 **_hermes_auth_failed_error(),
             }, status=422)
-        if probe["state"] != "ok":
+        if default_probe["state"] != "ok":
             return web.json_response({
                 "status": "degraded",
-                "upstream": probe["upstream"],
+                "upstream": default_probe["upstream"],
                 "error": {"code": "hermes_unavailable", "message": HERMES_UNAVAILABLE_MESSAGE},
             }, status=502)
+
+        for profile in candidate_profiles.values():
+            profile_probe = await _probe_hermes(
+                request.app,
+                upstream_url=profile.upstream_url,
+                upstream_token=profile.upstream_token,
+            )
+            if profile_probe["state"] == "auth_failed":
+                return web.json_response({
+                    "status": "degraded",
+                    "error": {
+                        "code": "hermes_profile_auth_failed",
+                        "message": f"人格 {profile.name} 的 Hermes API Server Key 无效或无权访问",
+                    },
+                }, status=422)
+            if profile_probe["state"] != "ok":
+                return web.json_response({
+                    "status": "degraded",
+                    "error": {
+                        "code": "hermes_profile_unavailable",
+                        "message": f"无法连接人格 {profile.name} 的 Hermes API 地址",
+                    },
+                }, status=502)
 
         _write_config(
             request.app[CONFIG_PATH_KEY],
             hermes_api_url,
             hermes_api_token,
             config.session_secret,
+            candidate_profiles,
         )
         config.upstream_url = hermes_api_url
         config.upstream_token = hermes_api_token
+        config.profiles = candidate_profiles
+        await request.app[EXTERNAL_RUN_OBSERVER_KEY].reset()
+        extra_observers: dict[str, ExternalRunObserver] = request.app[EXTERNAL_RUN_OBSERVERS_KEY]
+        for observer in tuple(extra_observers.values()):
+            await observer.reset()
+        extra_observers.clear()
 
     return web.json_response({
         "status": "ok",
         "hermes_api_url": hermes_api_url,
         "key_configured": True,
+        "profiles": [
+            _profile_public_payload(profile, admin=True)
+            for profile in candidate_profiles.values()
+        ],
     })
 
 
@@ -1417,6 +1708,110 @@ async def upload(request: web.Request) -> web.Response:
     return web.json_response({"error": {"code": "file_required", "message": "缺少 file 字段"}}, status=400)
 
 
+async def _transcribe_via_hermes_api(
+    app: web.Application,
+    profile: HermesProfileConfig,
+    item: StoredFile,
+) -> dict[str, Any]:
+    session = app[HTTP_SESSION_KEY]
+    headers = {"Authorization": f"Bearer {profile.upstream_token}"}
+    try:
+        async with session.get(
+            f"{profile.upstream_url}/v1/capabilities",
+            headers=headers,
+            timeout=HERMES_PROBE_TIMEOUT,
+        ) as capabilities_response:
+            if capabilities_response.status in {401, 403}:
+                raise HermesUpstreamAuthError()
+            if capabilities_response.status != 200:
+                return {
+                    "success": False,
+                    "code": "transcription_unavailable",
+                    "message": "当前 Hermes API 未提供语音转写能力",
+                    "status": 501,
+                }
+            capabilities = await capabilities_response.json(content_type=None)
+    except HermesUpstreamAuthError:
+        raise
+    except Exception:
+        return {
+            "success": False,
+            "code": "transcription_unavailable",
+            "message": "无法读取 Hermes API 语音能力",
+            "status": 503,
+        }
+
+    if not isinstance(capabilities, dict):
+        return {
+            "success": False,
+            "code": "transcription_unavailable",
+            "message": "当前 Hermes API 未提供语音转写能力",
+            "status": 501,
+        }
+    features = capabilities.get("features")
+    endpoints = capabilities.get("endpoints")
+    if not isinstance(features, dict) or not features.get("audio_api"):
+        return {
+            "success": False,
+            "code": "transcription_unavailable",
+            "message": "当前 Hermes API 未提供语音转写能力",
+            "status": 501,
+        }
+    endpoint = endpoints.get("audio_transcriptions") if isinstance(endpoints, dict) else None
+    endpoint_path = endpoint.get("path") if isinstance(endpoint, dict) else None
+    if not isinstance(endpoint_path, str) or not endpoint_path.startswith("/") or ".." in endpoint_path:
+        endpoint_path = "/v1/audio/transcriptions"
+
+    form = FormData()
+    try:
+        with Path(item.server_path).open("rb") as handle:
+            form.add_field(
+                "file",
+                handle,
+                filename=item.name,
+                content_type=item.mime_type or "application/octet-stream",
+            )
+            async with session.post(
+                f"{profile.upstream_url}{endpoint_path}",
+                headers=headers,
+                data=form,
+            ) as response:
+                if response.status in {401, 403}:
+                    raise HermesUpstreamAuthError()
+                if response.status < 200 or response.status >= 300:
+                    return {
+                        "success": False,
+                        "code": "transcription_failed",
+                        "message": "Hermes API 语音转写失败",
+                        "status": 503,
+                    }
+                payload = await response.json(content_type=None)
+    except HermesUpstreamAuthError:
+        raise
+    except Exception:
+        return {
+            "success": False,
+            "code": "transcription_failed",
+            "message": "Hermes API 语音转写失败",
+            "status": 503,
+        }
+    if not isinstance(payload, dict):
+        payload = {}
+    transcript = str(payload.get("transcript") or payload.get("text") or "").strip()
+    if not transcript:
+        return {
+            "success": False,
+            "code": "transcription_failed",
+            "message": "Hermes API 没有返回转写文本",
+            "status": 503,
+        }
+    return {
+        "success": True,
+        "transcript": transcript,
+        "provider": str(payload.get("provider") or "hermes-api"),
+    }
+
+
 async def transcribe_upload(request: web.Request) -> web.Response:
     try:
         reader = await request.multipart()
@@ -1430,12 +1825,24 @@ async def transcribe_upload(request: web.Request) -> web.Response:
             request.app[MEDIA_STORE_KEY].delete(item.id)
             return web.json_response({"error": {"code": "audio_required", "message": "上传内容不是音频"}}, status=400)
         transcriber = request.app[TRANSCRIBE_AUDIO_KEY]
-        result = await asyncio.to_thread(transcriber, item.server_path)
+        try:
+            if transcriber is None:
+                result = await _transcribe_via_hermes_api(request.app, _request_profile(request), item)
+            else:
+                result = await asyncio.to_thread(transcriber, item.server_path)
+        except HermesUpstreamAuthError:
+            return web.json_response({
+                **_hermes_auth_failed_error(),
+                "file": item.public_dict(),
+            }, status=502)
         if not result.get("success"):
             return web.json_response({
-                "error": {"code": "transcription_failed", "message": "语音转写失败"},
+                "error": {
+                    "code": str(result.get("code") or "transcription_failed"),
+                    "message": str(result.get("message") or "语音转写失败"),
+                },
                 "file": item.public_dict(),
-            }, status=503)
+            }, status=int(result.get("status") or 503))
         return web.json_response({
             "object": "nexus.audio.transcription",
             "transcript": str(result.get("transcript", "")).strip(),
@@ -1519,6 +1926,7 @@ async def _prepare_chat_body(
     request: web.Request,
     body: dict[str, Any],
     mobile_client: bool = False,
+    session_storage_id: str | None = None,
 ) -> dict[str, Any]:
     attachment_ids = body.pop("attachment_ids", [])
     attachment_kinds = body.pop("attachment_kinds", {})
@@ -1550,7 +1958,7 @@ async def _prepare_chat_body(
     session_match = re.fullmatch(r"/api/sessions/([^/]+)/chat(?:/stream)?", request.path)
     if session_match:
         request.app[MEDIA_STORE_KEY].record_session_media(
-            session_match.group(1),
+            session_storage_id or session_match.group(1),
             normalized_ids,
             marker,
             {str(key): str(value) for key, value in attachment_kinds.items()},
@@ -1624,18 +2032,23 @@ def _paginate_session_history(payload: dict[str, Any], query: Any) -> dict[str, 
 
 
 async def proxy(request: web.Request) -> web.StreamResponse:
+    profile = _request_profile(request)
     is_message_history = request.method == "GET" and re.fullmatch(r"/api/sessions/[^/]+/messages", request.path)
     if request.method == "GET" and re.fullmatch(r"/api/sessions/[^/]+/run", request.path):
         session_id = request.path.split("/")[3]
-        local_status = request.app[RUN_TRACKER_KEY].status(session_id)
+        tracking_id = _scoped_session_id(profile, session_id)
+        local_status = request.app[RUN_TRACKER_KEY].status(tracking_id)
+        local_status["session_id"] = session_id
         if local_status.get("active") or local_status.get("status") in {"queued", "running", "stopping"}:
             return web.json_response(local_status)
-        external_status = await request.app[EXTERNAL_RUN_OBSERVER_KEY].status(request.app, session_id)
+        observer = _external_run_observer(request.app, profile)
+        external_status = await observer.status(request.app, session_id, profile)
         return web.json_response(external_status or local_status)
     if request.method == "POST" and re.fullmatch(r"/api/sessions/[^/]+/run/stop", request.path):
         session_id = request.path.split("/")[3]
+        tracking_id = _scoped_session_id(profile, session_id)
         tracker: RunTracker = request.app[RUN_TRACKER_KEY]
-        task = tracker.tasks.get(session_id)
+        task = tracker.tasks.get(tracking_id)
         if task is not None and not task.done():
             task.cancel()
             return web.json_response({"session_id": session_id, "stopped": True})
@@ -1651,7 +2064,14 @@ async def proxy(request: web.Request) -> web.StreamResponse:
             except (json.JSONDecodeError, ValueError):
                 return web.json_response({"error": {"code": "invalid_json", "message": "请求 JSON 无效"}}, status=400)
             mobile_client = _apply_client_context(body)
-            body = await _prepare_chat_body(request, body, mobile_client=mobile_client)
+            session_id = request.path.split("/")[3] if "/api/sessions/" in request.path else ""
+            body = await _prepare_chat_body(
+                request,
+                body,
+                mobile_client=mobile_client,
+                session_storage_id=_scoped_session_id(profile, session_id) if session_id else None,
+            )
+            body.pop("persona_model", None)
             body_bytes = json.dumps(body, ensure_ascii=False).encode("utf-8")
         else:
             body_bytes = await request.read()
@@ -1659,8 +2079,8 @@ async def proxy(request: web.Request) -> web.StreamResponse:
     session = request.app[HTTP_SESSION_KEY]
     upstream = await session.request(
         request.method,
-        f"{request.app[GATEWAY_CONFIG_KEY].upstream_url}{relative}",
-        headers=_upstream_headers(request.app, request),
+        f"{profile.upstream_url}{relative}",
+        headers=_upstream_headers(request.app, request, profile),
         data=body_bytes,
         allow_redirects=False,
     )
@@ -1676,7 +2096,10 @@ async def proxy(request: web.Request) -> web.StreamResponse:
             upstream.release()
         session_id = request.path.split("/")[3]
         payload = _public_session_history(payload)
-        payload = request.app[MEDIA_STORE_KEY].enrich_session_messages(session_id, payload)
+        payload = request.app[MEDIA_STORE_KEY].enrich_session_messages(
+            _scoped_session_id(profile, session_id),
+            payload,
+        )
         payload = _paginate_session_history(payload, request.query)
         headers.pop("Content-Type", None)
         return web.json_response(payload, status=upstream.status, headers=headers)
@@ -1796,9 +2219,11 @@ class _OpenAISessionStreamAdapter:
 
 
 async def _tracked_session_stream(request: web.Request) -> web.StreamResponse:
+    profile = _request_profile(request)
     session_id = request.path.split("/")[3]
+    tracking_id = _scoped_session_id(profile, session_id)
     tracker: RunTracker = request.app[RUN_TRACKER_KEY]
-    current = tracker.tasks.get(session_id)
+    current = tracker.tasks.get(tracking_id)
     if current is not None and not current.done():
         return web.json_response({"error": {"code": "run_active", "message": "该会话仍在处理中"}}, status=409)
     try:
@@ -1806,9 +2231,18 @@ async def _tracked_session_stream(request: web.Request) -> web.StreamResponse:
     except (json.JSONDecodeError, ValueError):
         return web.json_response({"error": {"code": "invalid_json", "message": "请求 JSON 无效"}}, status=400)
     mobile_client = _apply_client_context(body)
-    body = await _prepare_chat_body(request, body, mobile_client=mobile_client)
+    body = await _prepare_chat_body(
+        request,
+        body,
+        mobile_client=mobile_client,
+        session_storage_id=tracking_id,
+    )
     legacy_model = str(body.pop("model", "") or "").strip()
-    persona_model = str(body.pop("persona_model", "") or "").strip()
+    # persona_model was a Nexus-only legacy field that incorrectly treated a
+    # Hermes profile as an inference model. Profiles are now selected through
+    # X-Nexus-Hermes-Profile and mapped to an independently configured original
+    # Hermes HTTP API endpoint.
+    body.pop("persona_model", None)
     inference_model = str(body.pop("inference_model", "") or "").strip() or legacy_model
     raw_reasoning_effort = body.pop("reasoning_effort", None)
     if raw_reasoning_effort is None or raw_reasoning_effort == "":
@@ -1836,21 +2270,19 @@ async def _tracked_session_stream(request: web.Request) -> web.StreamResponse:
             upstream_body["reasoning_effort"] = reasoning_effort
         upstream_path = "/v1/chat/completions"
     else:
-        if persona_model:
-            body["model"] = persona_model
         if reasoning_effort is not None:
             body["reasoning_effort"] = reasoning_effort
         upstream_body = body
         upstream_path = request.path_qs
     body_bytes = json.dumps(upstream_body, ensure_ascii=False).encode("utf-8")
-    queue = tracker.subscribe(session_id)
+    queue = tracker.subscribe(tracking_id)
     run_id = f"run_{uuid.uuid4().hex}"
-    tracker.start(session_id, run_id)
+    tracker.start(tracking_id, run_id)
 
     async def consume_upstream() -> None:
         upstream = None
         try:
-            upstream_headers = _upstream_headers(request.app, request)
+            upstream_headers = _upstream_headers(request.app, request, profile)
             if use_model_route:
                 upstream_headers.update({
                     "Accept": "text/event-stream",
@@ -1858,7 +2290,7 @@ async def _tracked_session_stream(request: web.Request) -> web.StreamResponse:
                     "X-Hermes-Session-Id": session_id,
                 })
             upstream = await request.app[HTTP_SESSION_KEY].post(
-                f"{request.app[GATEWAY_CONFIG_KEY].upstream_url}{upstream_path}",
+                f"{profile.upstream_url}{upstream_path}",
                 headers=upstream_headers,
                 data=body_bytes,
             )
@@ -1869,48 +2301,54 @@ async def _tracked_session_stream(request: web.Request) -> web.StreamResponse:
             if use_model_route:
                 adapter = _OpenAISessionStreamAdapter()
                 started = _session_sse_event("run.started", {"run_id": run_id})
-                tracker.consume_sse(session_id, started)
-                tracker.publish(session_id, started)
+                tracker.consume_sse(tracking_id, started)
+                tracker.publish(tracking_id, started)
                 async for chunk in upstream.content.iter_chunked(CHUNK_SIZE):
                     for event in adapter.feed(chunk):
-                        tracker.consume_sse(session_id, event)
-                        tracker.publish(session_id, event)
+                        tracker.consume_sse(tracking_id, event)
+                        tracker.publish(tracking_id, event)
                 for event in adapter.finish():
-                    tracker.consume_sse(session_id, event)
-                    tracker.publish(session_id, event)
-                tracker.finish(session_id, adapter.outcome or "failed")
+                    tracker.consume_sse(tracking_id, event)
+                    tracker.publish(tracking_id, event)
+                tracker.finish(tracking_id, adapter.outcome or "failed")
             else:
                 async for chunk in upstream.content.iter_chunked(CHUNK_SIZE):
-                    tracker.consume_sse(session_id, chunk)
-                    tracker.publish(session_id, chunk)
-                tracker.finish(session_id, "completed")
+                    tracker.consume_sse(tracking_id, chunk)
+                    tracker.publish(tracking_id, chunk)
+                tracker.finish(tracking_id, "completed")
         except asyncio.CancelledError:
-            tracker.finish(session_id, "stopped")
+            tracker.finish(tracking_id, "stopped")
             raise
         except HermesUpstreamAuthError:
             attachment_ids = request.get(REQUEST_ATTACHMENT_IDS_KEY, [])
             if attachment_ids:
-                request.app[MEDIA_STORE_KEY].discard_last_session_media(session_id, attachment_ids)
-            tracker.finish(session_id, "failed", HERMES_AUTH_FAILED_MESSAGE)
+                request.app[MEDIA_STORE_KEY].discard_last_session_media(tracking_id, attachment_ids)
+            tracker.finish(tracking_id, "failed", HERMES_AUTH_FAILED_MESSAGE)
             payload = json.dumps({
                 "code": "hermes_auth_failed",
                 "message": HERMES_AUTH_FAILED_MESSAGE,
             }, ensure_ascii=False)
-            tracker.publish(session_id, f"event: error\ndata: {payload}\n\n".encode("utf-8"))
+            tracker.publish(tracking_id, f"event: error\ndata: {payload}\n\n".encode("utf-8"))
         except Exception:
             attachment_ids = request.get(REQUEST_ATTACHMENT_IDS_KEY, [])
             if attachment_ids:
-                request.app[MEDIA_STORE_KEY].discard_last_session_media(session_id, attachment_ids)
-            tracker.finish(session_id, "failed", "上游服务暂时不可用")
+                request.app[MEDIA_STORE_KEY].discard_last_session_media(tracking_id, attachment_ids)
+            tracker.finish(tracking_id, "failed", "上游服务暂时不可用")
             payload = json.dumps({"message": "上游服务暂时不可用"}, ensure_ascii=False)
-            tracker.publish(session_id, f"event: error\ndata: {payload}\n\n".encode("utf-8"))
+            tracker.publish(tracking_id, f"event: error\ndata: {payload}\n\n".encode("utf-8"))
         finally:
             if upstream is not None:
                 upstream.release()
-            tracker.publish(session_id, b"event: done\ndata: {}\n\n")
+            tracker.publish(tracking_id, b"event: done\ndata: {}\n\n")
 
     task = asyncio.create_task(consume_upstream())
-    tracker.tasks[session_id] = task
+    tracker.tasks[tracking_id] = task
+
+    def discard_completed_task(completed: asyncio.Task) -> None:
+        if tracker.tasks.get(tracking_id) is completed:
+            tracker.tasks.pop(tracking_id, None)
+
+    task.add_done_callback(discard_completed_task)
     response = web.StreamResponse(headers={
         "Content-Type": "text/event-stream",
         "Cache-Control": "no-cache",
@@ -1927,7 +2365,7 @@ async def _tracked_session_stream(request: web.Request) -> web.StreamResponse:
         # Detach the phone only; the gateway keeps reading Hermes to completion.
         pass
     finally:
-        tracker.unsubscribe(session_id, queue)
+        tracker.unsubscribe(tracking_id, queue)
     return response
 
 
@@ -2196,6 +2634,7 @@ def create_app(
     session_secret = str(saved_config.get("session_secret") or session_secret or "")
     upstream_url = str(saved_config.get("hermes_api_url") or upstream_url or "")
     upstream_token = str(saved_config.get("hermes_api_token") or upstream_token or "")
+    profiles = _load_saved_profiles(saved_config.get("hermes_profiles"))
     app = web.Application(
         middlewares=[security_headers, device_auth],
         client_max_size=max_upload_bytes + 1024 * 1024,
@@ -2257,6 +2696,7 @@ def create_app(
         session_secret=session_secret,
         upstream_url=upstream_url.rstrip("/"),
         upstream_token=upstream_token,
+        profiles=profiles,
     )
     app[AUTH_STATE_KEY] = AuthState(username, password_salt, password_hash, legacy_password, revision)
     app[LOGIN_RATE_LIMITER_KEY] = LoginRateLimiter(login_rate_limit, login_rate_window_seconds)
@@ -2269,13 +2709,10 @@ def create_app(
     )
     app[RUN_TRACKER_KEY] = RunTracker(Path(storage_dir).resolve().parent / "run_status.json")
     app[EXTERNAL_RUN_OBSERVER_KEY] = ExternalRunObserver()
-    if transcribe_audio is None:
-        try:
-            from tools.transcription_tools import transcribe_audio as hermes_transcribe_audio
-            transcribe_audio = hermes_transcribe_audio
-        except ModuleNotFoundError:
-            def transcribe_audio(_path: str) -> dict[str, Any]:
-                return {"success": False, "transcript": "", "error": "Hermes 语音转写组件不可用"}
+    app[EXTERNAL_RUN_OBSERVERS_KEY] = {}
+    # Tests and custom deployments may inject a standalone transcriber. The
+    # packaged Gateway never imports Hermes internals; without an injected
+    # callback it uses only a capability-advertised original Hermes HTTP API.
     app[TRANSCRIBE_AUDIO_KEY] = transcribe_audio
     app.on_startup.append(_create_client_session)
     app.on_cleanup.append(_close_client_session)
@@ -2291,6 +2728,7 @@ def create_app(
     app.router.add_get("/api/admin/overview", admin_overview)
     app.router.add_get("/api/admin/hermes-config", admin_hermes_config)
     app.router.add_put("/api/admin/hermes-config", update_hermes_config)
+    app.router.add_get("/api/hermes/profiles", list_hermes_profiles)
     app.router.add_get("/api/admin/files", admin_files)
     app.router.add_get("/api/admin/audio", admin_audio)
     app.router.add_post("/api/audio/transcriptions", transcribe_upload)

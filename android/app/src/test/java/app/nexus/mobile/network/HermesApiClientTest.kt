@@ -648,6 +648,37 @@ class HermesApiClientTest {
     }
 
     @Test
+    fun `listProfiles parses Gateway profile directory`() = runTest {
+        server.enqueue(
+            MockResponse()
+                .setResponseCode(200)
+                .setHeader("Content-Type", "application/json")
+                .setBody("""{"object":"list","data":[{"id":"default","name":"Hermes 默认","is_default":true},{"id":"bad:profile","name":"无效"},{"id":"work","name":"工作","is_default":false}]}""")
+        )
+        val client = HermesApiClient(server.url("/").toString(), "test-token")
+
+        val profiles = client.listProfiles()
+
+        assertEquals(listOf("default", "work"), profiles.map { it.id })
+        assertEquals("工作", profiles.last().displayName)
+        assertEquals(true, profiles.first().isDefault)
+        val request = server.takeRequest()
+        assertEquals("/api/hermes/profiles", request.path)
+        assertEquals("default", request.getHeader("X-Nexus-Hermes-Profile"))
+    }
+
+    @Test
+    fun `listProfiles falls back to default for an older Gateway`() = runTest {
+        server.enqueue(MockResponse().setResponseCode(404).setBody("{}"))
+        val client = HermesApiClient(server.url("/").toString(), "test-token")
+
+        val profiles = client.listProfiles()
+
+        assertEquals(listOf("default"), profiles.map { it.id })
+        assertEquals(true, profiles.single().isDefault)
+    }
+
+    @Test
     fun `listModels parses selectable model ids`() = runTest {
         server.enqueue(
             MockResponse()
@@ -746,7 +777,7 @@ class HermesApiClientTest {
     }
 
     @Test
-    fun `streamChat sends persona and inference models independently`() = runTest {
+    fun `streamChat sends selected profile header and inference model independently`() = runTest {
         server.enqueue(
             MockResponse()
                 .setResponseCode(200)
@@ -754,17 +785,19 @@ class HermesApiClientTest {
                 .setBody("event: run.completed\ndata: {\"completed\":true}\n\n")
         )
         val client = HermesApiClient(server.url("/").toString(), "test-token")
+        client.selectProfile("profile-a")
 
         client.streamChat(
             "mobile-session",
             "hello",
-            personaModel = "profile-a",
             inferenceModel = "gpt-5.6-sol",
             reasoningEffort = "high"
         )
 
-        val body = com.google.gson.JsonParser.parseString(server.takeRequest().body.readUtf8()).asJsonObject
-        assertEquals("profile-a", body.get("persona_model").asString)
+        val request = server.takeRequest()
+        val body = com.google.gson.JsonParser.parseString(request.body.readUtf8()).asJsonObject
+        assertEquals("profile-a", request.getHeader("X-Nexus-Hermes-Profile"))
+        assertFalse(body.has("persona_model"))
         assertEquals("gpt-5.6-sol", body.get("inference_model").asString)
         assertEquals("high", body.get("reasoning_effort").asString)
         assertEquals(false, body.has("model"))

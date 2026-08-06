@@ -38,6 +38,8 @@ class HermesApiClient(
     private val baseUrl = baseUrl.trimEnd('/') + "/"
     private val jsonType = "application/json; charset=utf-8".toMediaType()
     private val gson = Gson()
+    @Volatile
+    private var profileId: String = "default"
     private val streamHttpClient = httpClient.newBuilder()
         .retryOnConnectionFailure(false)
         .build()
@@ -58,6 +60,10 @@ class HermesApiClient(
         }
     }
 
+    fun selectProfile(profileId: String?) {
+        this.profileId = profileId?.trim()?.takeIf { it.isNotEmpty() } ?: "default"
+    }
+
     suspend fun health(): HermesHealth = withContext(Dispatchers.IO) {
         val root = getJson("health")
         HermesHealth(
@@ -65,6 +71,18 @@ class HermesApiClient(
             gatewayVersion = root.string("version"),
             hermesVersion = root.objectValue("upstream").string("version").takeIf { it.isNotBlank() }
         )
+    }
+
+    suspend fun listProfiles(): List<HermesProfile> = withContext(Dispatchers.IO) {
+        try {
+            val root = getJson("api/hermes/profiles")
+            root.array("data").mapNotNull { element ->
+                element.asJsonObjectOrNull()?.toProfile()
+            }.ifEmpty { listOf(HermesProfile("default", "Hermes 默认（default）", true)) }
+        } catch (error: HermesHttpException) {
+            if (error.statusCode != 404) throw error
+            listOf(HermesProfile("default", "Hermes 默认（default）", true))
+        }
     }
 
     suspend fun listSessions(): List<HermesSession> = withContext(Dispatchers.IO) {
@@ -398,7 +416,6 @@ class HermesApiClient(
         images: List<ChatImage> = emptyList(),
         attachmentIds: List<String> = emptyList(),
         attachmentKinds: Map<String, String> = emptyMap(),
-        personaModel: String? = null,
         inferenceModel: String? = null,
         reasoningEffort: String? = null,
         onEvent: (HermesStreamEvent) -> Unit = {}
@@ -429,7 +446,6 @@ class HermesApiClient(
         )
         if (attachmentIds.isNotEmpty()) body["attachment_ids"] = attachmentIds
         if (attachmentKinds.isNotEmpty()) body["attachment_kinds"] = attachmentKinds
-        personaModel?.trim()?.takeIf { it.isNotEmpty() }?.let { body["persona_model"] = it }
         inferenceModel?.trim()?.takeIf { it.isNotEmpty() }?.let { body["inference_model"] = it }
         reasoningEffort?.trim()?.takeIf { it.isNotEmpty() }?.let { body["reasoning_effort"] = it }
         val payload = gson.toJson(body)
@@ -521,6 +537,7 @@ class HermesApiClient(
     private fun authorized(builder: Request.Builder): Request.Builder =
         builder
             .header("Authorization", "Bearer $token")
+            .header("X-Nexus-Hermes-Profile", profileId)
             .header("Accept", "application/json, text/event-stream")
 
     private fun resolveUrl(url: String): String =
@@ -654,6 +671,18 @@ private fun JsonObject.toSession(): HermesSession? {
         source = string("source"),
         messageCount = intValue("message_count"),
         lastActive = doubleValue("last_active")
+    )
+}
+
+private val hermesProfileIdPattern = Regex("[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
+
+private fun JsonObject.toProfile(): HermesProfile? {
+    val id = string("id").trim()
+    if (!hermesProfileIdPattern.matches(id)) return null
+    return HermesProfile(
+        id = id,
+        name = string("name").ifBlank { id },
+        isDefault = booleanValue("is_default") || id == "default"
     )
 }
 

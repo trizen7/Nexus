@@ -147,11 +147,19 @@
           <div class="panel-head"><div><span class="eyebrow">Hermes API</span><h2>原版 Hermes 连接</h2></div></div>
           <form id="hermesConfigForm" class="system-form">
             <label class="field span-two"><span>Hermes API 地址</span><input id="hermesApiUrl" type="url" placeholder="http://Hermes主机:8642" autocomplete="url" required></label>
-            <label class="field"><span>Hermes API Server Key</span><input id="hermesApiToken" type="password" autocomplete="off" placeholder="留空保留当前 Key"></label>
+            <label class="field"><span>Hermes API Server Key</span><input id="hermesApiToken" type="password" autocomplete="off" placeholder="地址不变时可留空；修改地址需重填"></label>
             <label class="field"><span>当前 Nexus 密码</span><input id="hermesCurrentPassword" type="password" autocomplete="current-password" required></label>
+            <div class="profile-config span-two">
+              <div class="profile-config-head">
+                <div><strong>其他人格（Hermes Profile）</strong><span>每个人格使用独立的原版 Hermes HTTP API 地址与 Key。</span></div>
+                <button class="button compact secondary" id="addHermesProfileButton" type="button">添加人格</button>
+              </div>
+              <div id="hermesProfileRows" class="profile-rows"></div>
+              <p class="muted profile-help">Hermes API Server 不提供机器级 Profile 列表。若使用 multiplex，请填写形如 <code>http://Hermes主机:8642/p/profile-name</code> 的完整地址；Nexus 只验证和调用这些 API，不会读取或修改 Hermes 文件。</p>
+            </div>
             <div class="hermes-key-state span-two">
               <strong id="hermesKeyConfigured">正在读取 Key 状态</strong>
-              <span>API Server Key 永远不会回显；留空将保留当前 Key。保存前会通过原版 Hermes HTTP API 验证，不会修改 Hermes 文件。</span>
+              <span>API Server Key 永远不会回显；API 地址不变时留空可保留当前 Key，修改地址时必须重填。保存前会通过原版 Hermes HTTP API 验证，不会修改 Hermes 文件。</span>
             </div>
             <div class="form-actions span-two">
               <button class="button primary" id="saveHermesConfigButton" type="submit">验证并保存</button>

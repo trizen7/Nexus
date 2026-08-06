@@ -105,6 +105,16 @@ data class SessionRunStatus(
     val source: String = "nexus_gateway",
     val stoppable: Boolean = true
 )
+data class HermesProfile(
+    val id: String,
+    val name: String,
+    val isDefault: Boolean = false
+) {
+    val displayName: String
+        get() = name.ifBlank { id }
+}
+
+
 data class HermesModel(
     val id: String,
     val root: String? = null,
@@ -117,9 +127,9 @@ data class HermesModel(
         get() = id.ifBlank { root.orEmpty() }
 
     /**
-     * Hermes' OpenAI-compatible /v1/models endpoint uses parent to describe model
-     * routes. A null parent is the primary inference model, not a persona. Only an
-     * explicit persona marker may be exposed in the persona picker.
+     * Hermes' OpenAI-compatible /v1/models endpoint describes the currently
+     * selected Profile's primary model plus inference aliases. It is not a
+     * machine-wide Profile directory.
      */
     val isPersona: Boolean
         get() = kind.equals("persona", ignoreCase = true) ||

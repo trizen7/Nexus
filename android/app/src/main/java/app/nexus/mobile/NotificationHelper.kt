@@ -46,14 +46,15 @@ object NotificationHelper {
         title: String,
         progress: Int,
         uploading: Boolean,
-        sessionId: String? = null
+        sessionId: String? = null,
+        profileId: String? = null
     ) {
         if (!canNotify(context)) return
         ensureChannels(context)
         val text = if (uploading) "正在上传 $progress%" else "正在下载 $progress%"
         notify(
             context,
-            transferId(sessionId, key),
+            transferId(profileId, sessionId, key),
             NotificationCompat.Builder(context, TRANSFER_CHANNEL)
                 .setSmallIcon(if (uploading) android.R.drawable.stat_sys_upload else android.R.drawable.stat_sys_download)
                 .setContentTitle(compactNotificationFileName(title))
@@ -62,7 +63,15 @@ object NotificationHelper {
                 .setOngoing(progress < 100)
                 .setProgress(100, progress.coerceIn(0, 100), false)
                 .setVisibility(NotificationCompat.VISIBILITY_PRIVATE)
-                .setContentIntent(openAppIntent(context, type = PendingIntentType.TRANSFER, sessionId = sessionId, fileKey = key))
+                .setContentIntent(
+                    openAppIntent(
+                        context,
+                        type = PendingIntentType.TRANSFER,
+                        sessionId = sessionId,
+                        fileKey = key,
+                        profileId = profileId
+                    )
+                )
                 .build()
         )
     }
@@ -73,7 +82,8 @@ object NotificationHelper {
         title: String,
         uploading: Boolean,
         success: Boolean,
-        sessionId: String? = null
+        sessionId: String? = null,
+        profileId: String? = null
     ) {
         if (!canNotify(context)) return
         ensureChannels(context)
@@ -81,7 +91,7 @@ object NotificationHelper {
         val text = if (success) "${action}完成" else "${action}失败"
         notify(
             context,
-            transferId(sessionId, key),
+            transferId(profileId, sessionId, key),
             NotificationCompat.Builder(context, TRANSFER_CHANNEL)
                 .setSmallIcon(if (success) android.R.drawable.stat_sys_download_done else android.R.drawable.stat_notify_error)
                 .setContentTitle(compactNotificationFileName(title))
@@ -91,7 +101,15 @@ object NotificationHelper {
                 .setOnlyAlertOnce(false)
                 .setAutoCancel(true)
                 .setVisibility(NotificationCompat.VISIBILITY_PRIVATE)
-                .setContentIntent(openAppIntent(context, type = PendingIntentType.TRANSFER, sessionId = sessionId, fileKey = key))
+                .setContentIntent(
+                    openAppIntent(
+                        context,
+                        type = PendingIntentType.TRANSFER,
+                        sessionId = sessionId,
+                        fileKey = key,
+                        profileId = profileId
+                    )
+                )
                 .build()
         )
     }
@@ -101,13 +119,14 @@ object NotificationHelper {
         key: String,
         title: String,
         progress: Int,
-        sessionId: String? = null
+        sessionId: String? = null,
+        profileId: String? = null
     ) {
         if (!canNotify(context)) return
         ensureChannels(context)
         notify(
             context,
-            transferId(sessionId, key),
+            transferId(profileId, sessionId, key),
             NotificationCompat.Builder(context, TRANSFER_CHANNEL)
                 .setSmallIcon(android.R.drawable.stat_sys_download)
                 .setContentTitle(compactNotificationFileName(title))
@@ -115,26 +134,53 @@ object NotificationHelper {
                 .setProgress(100, progress.coerceIn(0, 100), false)
                 .setOngoing(false)
                 .setVisibility(NotificationCompat.VISIBILITY_PRIVATE)
-                .setContentIntent(openAppIntent(context, type = PendingIntentType.TRANSFER, sessionId = sessionId, fileKey = key))
+                .setContentIntent(
+                    openAppIntent(
+                        context,
+                        type = PendingIntentType.TRANSFER,
+                        sessionId = sessionId,
+                        fileKey = key,
+                        profileId = profileId
+                    )
+                )
                 .build()
         )
     }
 
-    fun cancelTransfer(context: Context, key: String, sessionId: String? = null) {
-        NotificationManagerCompat.from(context).cancel(transferId(sessionId, key))
+    fun cancelTransfer(
+        context: Context,
+        key: String,
+        sessionId: String? = null,
+        profileId: String? = null
+    ) {
+        NotificationManagerCompat.from(context).cancel(transferId(profileId, sessionId, key))
     }
 
-    fun showRun(context: Context, sessionId: String, title: String, kind: RunNotificationKind) {
+    fun showRun(
+        context: Context,
+        notificationKey: String,
+        title: String,
+        kind: RunNotificationKind,
+        sessionId: String = notificationKey,
+        profileId: String? = null
+    ) {
         if (!canNotify(context) || kind == RunNotificationKind.NONE) return
         ensureChannels(context)
         notify(
             context,
-            answerNotificationId(sessionId),
-            runNotification(context, sessionId, title, kind)
+            answerNotificationId(notificationKey),
+            runNotification(context, notificationKey, title, kind, sessionId, profileId)
         )
     }
 
-    fun runNotification(context: Context, sessionId: String, title: String, kind: RunNotificationKind): android.app.Notification {
+    fun runNotification(
+        context: Context,
+        notificationKey: String,
+        title: String,
+        kind: RunNotificationKind,
+        sessionId: String = notificationKey,
+        profileId: String? = null
+    ): android.app.Notification {
         val (text, ongoing) = when (kind) {
             RunNotificationKind.RUNNING -> "Nexus正在处理…" to true
             RunNotificationKind.COMPLETED -> "回答已完成" to false
@@ -150,7 +196,7 @@ object NotificationHelper {
             .setOnlyAlertOnce(ongoing)
             .setAutoCancel(!ongoing)
             .setVisibility(NotificationCompat.VISIBILITY_PRIVATE)
-            .setContentIntent(openAppIntent(context, type = PendingIntentType.ANSWER, sessionId = sessionId))
+            .setContentIntent(openAppIntent(context, type = PendingIntentType.ANSWER, sessionId = sessionId, profileId = profileId))
             .build()
     }
 
@@ -158,10 +204,18 @@ object NotificationHelper {
 
     fun answerForegroundNotificationId(): Int = FOREGROUND_NOTIFICATION_ID
 
-    fun transferNotificationId(sessionId: String?, key: String): Int =
-        TRANSFER_NOTIFICATION_TYPE or typedHash("${sessionId.orEmpty()}|$key")
+    fun transferNotificationId(sessionId: String?, key: String, profileId: String? = null): Int {
+        val normalizedProfileId = profileId?.takeUnless { it.isBlank() || it == "default" }
+        val seed = if (normalizedProfileId == null) {
+            "${sessionId.orEmpty()}|$key"
+        } else {
+            "$normalizedProfileId|${sessionId.orEmpty()}|$key"
+        }
+        return TRANSFER_NOTIFICATION_TYPE or typedHash(seed)
+    }
 
-    private fun transferId(sessionId: String?, key: String): Int = transferNotificationId(sessionId, key)
+    private fun transferId(profileId: String?, sessionId: String?, key: String): Int =
+        transferNotificationId(sessionId, key, profileId)
 
     enum class PendingIntentType(val prefix: Int) {
         ANSWER(1),
@@ -172,15 +226,25 @@ object NotificationHelper {
         }
     }
 
-    fun pendingIntentRequestCode(type: PendingIntentType, sessionId: String?, fileKey: String?): Int {
-        val seed = type.prefix.toString() + "|" + (sessionId ?: "") + "|" + (fileKey ?: "")
+    fun pendingIntentRequestCode(
+        type: PendingIntentType,
+        sessionId: String?,
+        fileKey: String?,
+        profileId: String? = null
+    ): Int {
+        val seed = type.prefix.toString() + "|" + (profileId ?: "") + "|" + (sessionId ?: "") + "|" + (fileKey ?: "")
         return fnv32(seed)
     }
 
-    fun pendingIntentData(type: PendingIntentType, sessionId: String?, fileKey: String?): String {
+    fun pendingIntentData(
+        type: PendingIntentType,
+        sessionId: String?,
+        fileKey: String?,
+        profileId: String? = null
+    ): String {
         fun encode(value: String?): String = Base64.getUrlEncoder().withoutPadding()
             .encodeToString(value.orEmpty().toByteArray(StandardCharsets.UTF_8))
-        return "nexus://notification/${type.name.lowercase()}/${encode(sessionId)}/${encode(fileKey)}"
+        return "nexus://notification/${type.name.lowercase()}/${encode(profileId)}/${encode(sessionId)}/${encode(fileKey)}"
     }
 
     fun cancelAll(context: Context) {
@@ -203,17 +267,19 @@ object NotificationHelper {
         context: Context,
         type: PendingIntentType,
         sessionId: String? = null,
-        fileKey: String? = null
+        fileKey: String? = null,
+        profileId: String? = null
     ): PendingIntent {
         val intent = Intent(context, MainActivity::class.java).apply {
             flags = Intent.FLAG_ACTIVITY_CLEAR_TOP or Intent.FLAG_ACTIVITY_SINGLE_TOP
-            data = Uri.parse(pendingIntentData(type, sessionId, fileKey))
+            data = Uri.parse(pendingIntentData(type, sessionId, fileKey, profileId))
             sessionId?.let { putExtra(EXTRA_SESSION_ID, it) }
+            profileId?.let { putExtra(EXTRA_PROFILE_ID, it) }
             fileKey?.let { putExtra(EXTRA_FILE_KEY, it) }
         }
         return PendingIntent.getActivity(
             context,
-            pendingIntentRequestCode(type, sessionId, fileKey),
+            pendingIntentRequestCode(type, sessionId, fileKey, profileId),
             intent,
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
@@ -231,5 +297,6 @@ object NotificationHelper {
     private fun typedHash(value: String): Int = fnv32(value) and HASH_MASK
 
     const val EXTRA_SESSION_ID = "nexus_notification_session_id"
+    const val EXTRA_PROFILE_ID = "nexus_notification_profile_id"
     const val EXTRA_FILE_KEY = "nexus_notification_file_key"
 }

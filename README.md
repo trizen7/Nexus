@@ -19,9 +19,9 @@ Nexus 是一个面向 Hermes Agent 的社区移动客户端与轻量移动网关
 ## 当前能力
 
 - 多会话创建、切换、重命名和删除，定时任务执行会话不进入普通对话列表；
-- 人物模型、实际调用模型与推理深度独立：人物仅接受 Hermes 明确标记的 persona，未选择时使用 `Hermes 默认（default）`；调用模型和 `reasoning_effort` 按对话单独保存；
+- Hermes 人格、实际调用模型与推理深度独立：人格来自 Gateway 中配置的原版 Hermes Profile API 连接，会话、记忆、工具和定时任务按 Profile 隔离；调用模型和 `reasoning_effort` 仍按对话单独保存；
 - 可在手机端新建、编辑、删除、暂停、恢复和立即运行定时任务；
-- 文字、图片、多文件批量选择与语音转文字，每个文件可独立重试或移除；
+- 文字、图片、多文件批量选择与语音转文字，每个文件可独立重试或移除；Gateway 不导入 Hermes 内部 Python 模块，语音转写只会调用 Hermes 明确声明的公开 HTTP 能力；
 - Android 每次聊天都会声明手机端能力；Gateway 仅通过原版 Hermes HTTP API 注入本轮移动端上下文，避免把主机本地路径、桌面拖拽或电脑快捷键当作手机可用的文件交付方式；
 - 浅色、深色、跟随系统；
 - 未发送的草稿和附件可跨重启恢复；已提交消息会立即从草稿中移除，锁屏导致实时流断开时不回填输入框；
@@ -120,6 +120,15 @@ python start_gateway.py
 ```bash
 curl http://127.0.0.1:8787/health
 ```
+
+如需在 App 中切换其他人格，登录 Gateway 管理页后，在“原版 Hermes 连接”中添加额外 Hermes Profile API 连接：
+
+- 每项配置包含 Nexus 人格 ID、显示名称、完整 API 地址和该 Profile 的 API Server Key；
+- Hermes multiplex 可填写形如 `http://Hermes主机:8642/p/work` 的完整地址；
+- 原版 Hermes API Server 没有机器级 Profile 发现端点，`/v1/models` 表示当前 Profile 的模型，不是人格列表；
+- Nexus 只验证并调用这些 HTTP API，不会读取或修改 Hermes 文件。
+
+App 在每次打开人格选择器时都会重新读取 Gateway 的人格目录。修改任何 Hermes API 地址时，必须重新填写对应 Key，避免把旧 Key 发送到新主机。
 
 Nexus Gateway 不再内置 TLS 或证书管理。局域网直连只适合受信任网络；**不要把 HTTP 源站端口直接暴露到公网**。外网访问应使用反向代理提供受系统信任的 HTTPS 域名，并关闭代理缓冲以支持 SSE/流式回答。Nginx 和 Caddy 示例见 [`docs/docker-deployment.md`](docs/docker-deployment.md#6-https-反向代理)。
 

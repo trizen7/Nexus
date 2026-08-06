@@ -65,14 +65,14 @@ fun SettingsScreen(state: MainUiState, viewModel: MainViewModel) {
         ) {
             item {
                 SettingsSection(
-                    title = "AI 与人物",
-                    description = "选择 Hermes 人物设定"
+                    title = "Hermes 人格",
+                    description = "选择 Gateway 中配置的 Hermes Profile"
                 ) {
                     SettingsActionRow(
                         icon = Icons.Filled.AutoAwesome,
-                        title = "人物模型",
-                        value = state.selectedPersonaModelLabel,
-                        onClick = viewModel::openPersonaModelPicker
+                        title = "当前人格",
+                        value = state.selectedProfileLabel,
+                        onClick = viewModel::openProfilePicker
                     )
                     SettingsDivider()
                     Text(

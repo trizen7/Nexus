@@ -3,6 +3,7 @@ package app.nexus.mobile
 import app.nexus.mobile.network.HermesCronJob
 import app.nexus.mobile.network.HermesCronSchedule
 import app.nexus.mobile.network.HermesModel
+import app.nexus.mobile.network.HermesProfile
 import app.nexus.mobile.network.HermesSession
 import app.nexus.mobile.network.SessionChannel
 import org.junit.Assert.assertEquals
@@ -485,6 +486,10 @@ class SessionStateTest {
         )
         val bundle = PersistedDraftBundle(
             localDraftKey = "local-1",
+            localDraftKeys = mapOf(
+                "default" to "local-1",
+                "work" to "local-work"
+            ),
             drafts = mapOf(
                 "session-1" to PersistedComposerDraft(
                     text = "pending",
@@ -498,6 +503,7 @@ class SessionStateTest {
         val restoredDraft = restored.drafts.getValue("session-1")
 
         assertEquals(bundle, restored)
+        assertEquals("local-work", restored.localDraftKeys["work"])
         assertEquals(true, restoredDraft.images.single().toImage().uploadState.readyToSend)
         assertEquals(listOf("file-1", "file-2"), restoredDraft.resolvedFiles().map { it.id })
         assertTrue(restoredDraft.resolvedFiles().all { it.toFile().uploadState.readyToSend })
@@ -601,37 +607,38 @@ class SessionStateTest {
     }
 
     @Test
-    fun `Hermes primary model is not mistaken for a persona`() {
+    fun `Hermes primary model is not offered as an inference alias`() {
         val models = listOf(
             HermesModel("primary-model"),
             HermesModel("gpt-5.6-sol", root = "gpt-5.6-sol", parent = "primary-model")
         )
 
-        assertEquals(emptyList<String>(), personaModels(models).map { it.id })
         assertEquals(listOf("gpt-5.6-sol"), inferenceModels(models).map { it.id })
     }
 
     @Test
-    fun `persona picker accepts only explicit persona metadata`() {
-        val models = listOf(
-            HermesModel("primary-model"),
-            HermesModel("assistant-profile", kind = "persona"),
-            HermesModel("model-fast", parent = "primary-model")
+    fun `profile selection keeps configured profile and falls back to default`() {
+        val profiles = listOf(
+            HermesProfile("default", "Hermes 默认", isDefault = true),
+            HermesProfile("profile-a", "工作")
         )
 
-        assertEquals(listOf("assistant-profile"), personaModels(models).map { it.id })
-        assertEquals(listOf("model-fast"), inferenceModels(models).map { it.id })
+        assertEquals("profile-a", resolveSelectedProfileId(profiles, "profile-a"))
+        assertEquals("default", resolveSelectedProfileId(profiles, "missing"))
+        assertEquals("default", resolveSelectedProfileId(profiles, null))
+        assertEquals("default", resolveSelectedProfileId(emptyList(), "missing"))
     }
 
     @Test
-    fun `persona and inference fall back to Hermes defaults when selection is missing`() {
-        val personas = listOf(HermesModel("profile-a"), HermesModel("profile-b"))
+    fun `non-default profile scopes local conversation storage`() {
+        assertEquals("session-1", profileScopedStorageKey("default", "session-1"))
+        assertEquals("profile:work:session-1", profileScopedStorageKey("work", "session-1"))
+    }
+
+    @Test
+    fun `inference selection falls back to Hermes default when missing`() {
         val inference = listOf(HermesModel("model-fast", parent = "profile-a"))
 
-        assertEquals("profile-b", resolveSelectedPersonaModelId(personas, "profile-b"))
-        assertEquals(null, resolveSelectedPersonaModelId(personas, "missing"))
-        assertEquals(null, resolveSelectedPersonaModelId(personas, null))
-        assertEquals(null, resolveSelectedPersonaModelId(emptyList(), "missing"))
         assertEquals("model-fast", resolveSelectedInferenceModelId(inference, "model-fast"))
         assertEquals(null, resolveSelectedInferenceModelId(inference, "missing"))
         assertEquals(null, resolveSelectedInferenceModelId(inference, null))
@@ -769,6 +776,13 @@ class SessionStateTest {
         assertEquals(ComposerDraft(), drafts.load("one"))
         assertEquals("two", drafts.load("two").text)
         assertEquals(listOf("file-two"), drafts.load("two").fileIds)
+    }
+
+    @Test
+    fun `active session preference is isolated per Hermes profile`() {
+        assertEquals("active_session_id", activeSessionPreferenceKey("default"))
+        assertEquals("profile:work:active_session_id", activeSessionPreferenceKey("work"))
+        assertTrue(activeSessionPreferenceKey("work") != activeSessionPreferenceKey("personal"))
     }
 
 }

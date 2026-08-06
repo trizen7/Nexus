@@ -38,6 +38,14 @@ class NotificationHelperTest {
     }
 
     @Test
+    fun `transfer notification ids include Hermes profile identity`() {
+        assertNotEquals(
+            NotificationHelper.transferNotificationId("shared-session", "file", "default"),
+            NotificationHelper.transferNotificationId("shared-session", "file", "work")
+        )
+    }
+
+    @Test
     fun `notification ids use explicit stable positive type ranges`() {
         val answer = NotificationHelper.answerNotificationId("session-x")
         val foreground = NotificationHelper.answerForegroundNotificationId()
@@ -54,18 +62,20 @@ class NotificationHelperTest {
         val state = FileDownloadState(
             key = "file-y",
             status = DownloadStatus.DOWNLOADING,
-            sessionId = "session-x"
+            sessionId = "session-x",
+            profileId = "work"
         )
         val target = downloadTransferNotificationTarget(state)
 
         assertEquals("file-y", target.key)
         assertEquals("session-x", target.sessionId)
+        assertEquals("work", target.profileId)
         assertEquals(
-            NotificationHelper.transferNotificationId("session-x", "file-y"),
+            NotificationHelper.transferNotificationId("session-x", "file-y", "work"),
             downloadTransferNotificationId(state)
         )
         assertNotEquals(
-            NotificationHelper.transferNotificationId(null, "file-y"),
+            NotificationHelper.transferNotificationId("session-x", "file-y", "default"),
             downloadTransferNotificationId(state)
         )
     }
@@ -127,4 +137,56 @@ class NotificationHelperTest {
         assertNotEquals(first, answer)
         assertEquals(first, NotificationHelper.pendingIntentData(NotificationHelper.PendingIntentType.TRANSFER, "FB", "file"))
     }
+
+    @Test
+    fun `pending intent identity includes Hermes profile`() {
+        val defaultCode = NotificationHelper.pendingIntentRequestCode(
+            type = NotificationHelper.PendingIntentType.ANSWER,
+            sessionId = "shared-session",
+            fileKey = null,
+            profileId = "default"
+        )
+        val workCode = NotificationHelper.pendingIntentRequestCode(
+            type = NotificationHelper.PendingIntentType.ANSWER,
+            sessionId = "shared-session",
+            fileKey = null,
+            profileId = "work"
+        )
+        val defaultData = NotificationHelper.pendingIntentData(
+            NotificationHelper.PendingIntentType.ANSWER,
+            "shared-session",
+            null,
+            "default"
+        )
+        val workData = NotificationHelper.pendingIntentData(
+            NotificationHelper.PendingIntentType.ANSWER,
+            "shared-session",
+            null,
+            "work"
+        )
+
+        assertNotEquals(defaultCode, workCode)
+        assertNotEquals(defaultData, workData)
+        assertEquals(
+            workCode,
+            NotificationHelper.pendingIntentRequestCode(
+                NotificationHelper.PendingIntentType.ANSWER,
+                "shared-session",
+                null,
+                "work"
+            )
+        )
+    }
+
+    @Test
+    fun `answer notification ids can be scoped by Hermes profile`() {
+        val defaultKey = profileScopedStorageKey("default", "shared-session")
+        val workKey = profileScopedStorageKey("work", "shared-session")
+
+        assertNotEquals(
+            NotificationHelper.answerNotificationId(defaultKey),
+            NotificationHelper.answerNotificationId(workKey)
+        )
+    }
+
 }

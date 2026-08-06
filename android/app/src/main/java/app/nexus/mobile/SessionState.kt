@@ -6,6 +6,7 @@ import app.nexus.mobile.network.ChatMessage
 import app.nexus.mobile.network.ChatRole
 import app.nexus.mobile.network.HermesCronJob
 import app.nexus.mobile.network.HermesModel
+import app.nexus.mobile.network.HermesProfile
 import app.nexus.mobile.network.HermesSession
 import app.nexus.mobile.network.SessionChannel
 
@@ -29,14 +30,17 @@ fun resolveVisibleActiveSessionId(
         ?: visible.firstOrNull()?.id?.takeIf { chooseFirstWhenMissing }
 }
 
-fun personaModels(models: List<HermesModel>): List<HermesModel> =
-    models.filter(HermesModel::isPersona)
-
 fun inferenceModels(models: List<HermesModel>): List<HermesModel> =
     models.filter(HermesModel::isInferenceModel)
 
-fun resolveSelectedPersonaModelId(models: List<HermesModel>, preferredModelId: String?): String? =
-    preferredModelId?.takeIf { id -> models.any { it.id == id } }
+fun resolveSelectedProfileId(profiles: List<HermesProfile>, preferredProfileId: String?): String =
+    preferredProfileId?.takeIf { id -> profiles.any { it.id == id } }
+        ?: profiles.firstOrNull(HermesProfile::isDefault)?.id
+        ?: profiles.firstOrNull()?.id
+        ?: "default"
+
+fun profileScopedStorageKey(profileId: String?, value: String): String =
+    if (profileId.isNullOrBlank() || profileId == "default") value else "profile:$profileId:$value"
 
 fun resolveSelectedInferenceModelId(models: List<HermesModel>, preferredModelId: String?): String? =
     preferredModelId?.takeIf { id -> models.any { it.id == id } }
@@ -74,7 +78,7 @@ data class ConversationRuntimeConfig(
         get() = inferenceModelId.isNullOrBlank() && reasoningEffort == ReasoningEffort.DEFAULT
 }
 
-enum class ModelPickerKind { PERSONA, INFERENCE, REASONING }
+enum class ModelPickerKind { PROFILE, INFERENCE, REASONING }
 
 enum class ReasoningEffort(val wireValue: String?, val label: String) {
     DEFAULT(null, "Hermes 默认"),
@@ -102,7 +106,7 @@ data class SavedConnection(
     val activeSessionId: String?,
     val autoRefresh: Boolean = true,
     val themeMode: ThemeMode = ThemeMode.SYSTEM,
-    val selectedPersonaModelId: String? = null,
+    val selectedProfileId: String = "default",
     val selectedInferenceModelId: String? = null,
     val selectedReasoningEffort: ReasoningEffort = ReasoningEffort.DEFAULT
 ) {
@@ -418,17 +422,22 @@ data class FileDownloadState(
     val progress: Int = 0,
     val localPath: String? = null,
     val error: String? = null,
-    val sessionId: String? = null
+    val sessionId: String? = null,
+    val profileId: String? = null
 )
 
-data class TransferNotificationTarget(val key: String, val sessionId: String?)
+data class TransferNotificationTarget(
+    val key: String,
+    val sessionId: String?,
+    val profileId: String?
+)
 
 fun downloadTransferNotificationTarget(state: FileDownloadState): TransferNotificationTarget =
-    TransferNotificationTarget(state.key, state.sessionId)
+    TransferNotificationTarget(state.key, state.sessionId, state.profileId)
 
 fun downloadTransferNotificationId(state: FileDownloadState): Int {
     val target = downloadTransferNotificationTarget(state)
-    return NotificationHelper.transferNotificationId(target.sessionId, target.key)
+    return NotificationHelper.transferNotificationId(target.sessionId, target.key, target.profileId)
 }
 
 data class ComposerDraft(

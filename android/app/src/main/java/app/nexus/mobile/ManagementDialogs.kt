@@ -73,12 +73,12 @@ internal fun ManagementDialogs(state: MainUiState, viewModel: MainViewModel) {
 @Composable
 private fun ModelPickerDialog(kind: ModelPickerKind, state: MainUiState, viewModel: MainViewModel) {
     val title = when (kind) {
-        ModelPickerKind.PERSONA -> "人物模型"
+        ModelPickerKind.PROFILE -> "人格（Hermes Profile）"
         ModelPickerKind.INFERENCE -> "调用模型"
         ModelPickerKind.REASONING -> "推理深度"
     }
     val description = when (kind) {
-        ModelPickerKind.PERSONA -> "人物模型仅负责角色设定、记忆和工具，不决定实际调用的推理模型。"
+        ModelPickerKind.PROFILE -> "人格对应 Gateway 中配置的原版 Hermes Profile API，其会话、记忆、工具和定时任务相互独立。"
         ModelPickerKind.INFERENCE -> "仅为当前对话选择实际调用的模型，新对话使用 Hermes 默认值。"
         ModelPickerKind.REASONING -> "仅为当前对话设置推理量；是否生效由 Hermes 和当前调用模型决定。"
     }
@@ -98,13 +98,18 @@ private fun ModelPickerDialog(kind: ModelPickerKind, state: MainUiState, viewMod
                     color = MaterialTheme.colorScheme.onSurfaceVariant,
                     fontSize = 13.sp
                 )
-                if (kind != ModelPickerKind.REASONING && state.modelsLoading) {
+                val loading = when (kind) {
+                    ModelPickerKind.PROFILE -> state.profilesLoading
+                    ModelPickerKind.INFERENCE -> state.modelsLoading
+                    ModelPickerKind.REASONING -> false
+                }
+                if (loading) {
                     Box(Modifier.fillMaxWidth().height(120.dp), contentAlignment = Alignment.Center) {
                         CircularProgressIndicator(modifier = Modifier.size(28.dp), strokeWidth = 2.dp)
                     }
                 } else {
                     when (kind) {
-                        ModelPickerKind.PERSONA -> PersonaModelOptions(state, viewModel)
+                        ModelPickerKind.PROFILE -> ProfileOptions(state, viewModel)
                         ModelPickerKind.INFERENCE -> InferenceModelOptions(state, viewModel)
                         ModelPickerKind.REASONING -> ReasoningOptions(state, viewModel)
                     }
@@ -117,37 +122,48 @@ private fun ModelPickerDialog(kind: ModelPickerKind, state: MainUiState, viewMod
         confirmButton = {
             TextButton(onClick = viewModel::closeModelPicker) { Text("完成") }
         },
-        dismissButton = if (kind == ModelPickerKind.REASONING) null else {
-            {
-                TextButton(onClick = { viewModel.refreshModels() }, enabled = !state.modelsLoading) {
-                    Text("刷新模型")
+        dismissButton = when (kind) {
+            ModelPickerKind.PROFILE -> {
+                {
+                    TextButton(onClick = { viewModel.refreshProfiles() }, enabled = !state.profilesLoading) {
+                        Text("刷新人格")
+                    }
                 }
             }
+            ModelPickerKind.INFERENCE -> {
+                {
+                    TextButton(onClick = { viewModel.refreshModels() }, enabled = !state.modelsLoading) {
+                        Text("刷新模型")
+                    }
+                }
+            }
+            ModelPickerKind.REASONING -> null
         }
     )
 }
 
 @Composable
-private fun PersonaModelOptions(state: MainUiState, viewModel: MainViewModel) {
-    ModelOptionRow(
-        selected = state.selectedPersonaModelId == null,
-        title = "Hermes 默认（default）",
-        subtitle = "不发送 persona_model，使用 Hermes 当前默认人物",
-        onClick = { viewModel.selectPersonaModel(null) }
-    )
-    if (state.personaModels.isEmpty()) {
+private fun ProfileOptions(state: MainUiState, viewModel: MainViewModel) {
+    if (state.profiles.isEmpty()) {
         Text(
-            "服务器没有返回其他可用的人物模型。",
+            "Gateway 尚未提供可用的人格。请先在网页管理端配置原版 Hermes Profile API 连接。",
             color = MaterialTheme.colorScheme.onSurfaceVariant,
             fontSize = 12.sp
         )
     } else {
-        state.personaModels.forEach { model ->
+        state.profiles.forEach { profile ->
             ModelOptionRow(
-                selected = state.selectedPersonaModelId == model.id,
-                title = model.displayName,
-                subtitle = null,
-                onClick = { viewModel.selectPersonaModel(model.id) }
+                selected = state.selectedProfileId == profile.id,
+                title = profile.displayName,
+                subtitle = if (profile.isDefault) "默认 Hermes API 连接" else "独立 Hermes Profile API 连接",
+                onClick = { viewModel.selectProfile(profile.id) }
+            )
+        }
+        if (state.profiles.size == 1) {
+            Text(
+                "当前 Gateway 只配置了默认人格；其他人格需要在 Gateway 网页的原版 Hermes 连接中添加。",
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                fontSize = 12.sp
             )
         }
     }
