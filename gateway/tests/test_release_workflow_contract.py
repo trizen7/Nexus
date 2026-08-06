@@ -51,17 +51,21 @@ def test_release_builds_native_fnos_packages_and_uploads_only_supported_assets()
         assert forbidden not in workflow
 
 
-def test_all_workflows_are_valid_yaml_and_ci_keeps_jobs_separate() -> None:
+def test_all_workflows_are_valid_yaml_and_ci_keeps_platform_jobs_separate() -> None:
     parsed = {
         path.name: yaml.safe_load(path.read_text(encoding="utf-8"))
         for path in (CI_WORKFLOW, CONTAINER_WORKFLOW, RELEASE_WORKFLOW)
     }
     assert set(parsed[CI_WORKFLOW.name]["jobs"]) == {
-        "repository-security",
         "gateway",
         "fnos-native-package",
         "android",
     }
+    gateway_steps = parsed[CI_WORKFLOW.name]["jobs"]["gateway"]["steps"]
+    gateway_commands = "\n".join(str(step.get("run", "")) for step in gateway_steps)
+    assert "scripts/scan_repository_secrets.py" in gateway_commands
+    assert "scripts/build_release.py --validate-only" in gateway_commands
+    assert "python -m pip_audit -r requirements.txt" in gateway_commands
     assert "fnos-package" in parsed[CONTAINER_WORKFLOW.name]["jobs"]
     assert "release" in parsed[RELEASE_WORKFLOW.name]["jobs"]
 
