@@ -179,7 +179,7 @@ jobs:
             --require-fnos \
             --verify-signatures
 
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: Nexus-${{ github.ref_name }}
           path: |
