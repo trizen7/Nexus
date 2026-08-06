@@ -138,7 +138,7 @@ Nexus Gateway 不再内置 TLS 或证书管理。局域网直连只适合受信�
 
 Hermes 与 Nexus 安装在同一台 NAS 时，Hermes API 地址默认填写 `http://127.0.0.1:8642`；fnOS 原生进程可直接访问原版 Hermes 的回环 API，不修改 Hermes 任何文件或进程。
 
-当前 `0.1.8-fnos5` FPK 都内置对应架构的 Gateway 原生可执行运行时。fnOS 设备不需要安装 Docker，也不需要授予 Nexus Docker 权限；安装、升级和启动不会访问 GitHub、GHCR、Docker Hub 或其他容器仓库。GHCR/Docker 仅保留为普通 Gateway 部署的可选方式，与 FPK 运行无关。fnOS 默认端口为 `8787`，本地成品测试环境使用的 `18787` 与 fnOS 无关。
+当前 `0.1.8-fnos6` FPK 都内置对应架构的 Gateway 原生可执行运行时。fnOS 设备不需要安装 Docker，也不需要授予 Nexus Docker 权限；安装、升级和启动不会访问 GitHub、GHCR、Docker Hub 或其他容器仓库。GHCR/Docker 仅保留为普通 Gateway 部署的可选方式，与 FPK 运行无关。fnOS 默认端口为 `8787`，本地成品测试环境使用的 `18787` 与 fnOS 无关。
 
 本地打包脚本不运行 Docker，但需要传入预先构建好的对应架构原生运行时目录：
 

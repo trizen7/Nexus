@@ -294,7 +294,7 @@ def test_fnos_manifest_desktop_and_icons_are_consistent() -> None:
 
     assert gateway_version == "0.1.8"
     assert manifest["appname"] == "nexus-gateway"
-    assert manifest["version"] == "0.1.8-fnos5"
+    assert manifest["version"] == "0.1.8-fnos6"
     assert manifest["version"].startswith(f"{gateway_version}-fnos")
     assert manifest["source"] == "thirdparty"
     assert manifest["platform"] == "all"

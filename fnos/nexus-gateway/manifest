@@ -1,5 +1,5 @@
 appname=nexus-gateway
-version=0.1.8-fnos5
+version=0.1.8-fnos6
 display_name=Nexus
 desc=Nexus 移动网关，为 Android 客户端提供登录、会话、附件、运行状态与断线续接能力，仅通过原版 Hermes HTTP API 集成
 source=thirdparty

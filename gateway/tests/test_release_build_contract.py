@@ -6,7 +6,7 @@ from pathlib import Path
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 BUILD_RELEASE_PATH = REPOSITORY_ROOT / "scripts" / "build_release.py"
 VERSION = "0.1.8"
-FNOS_VERSION = "0.1.8-fnos5"
+FNOS_VERSION = "0.1.8-fnos6"
 
 
 def load_build_release():
