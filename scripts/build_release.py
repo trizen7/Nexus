@@ -101,8 +101,8 @@ def fnos_package_version(gateway_version: str) -> str:
     manifest = FNOS_MANIFEST.read_text(encoding="utf-8")
     version = match_one(r"^version\s*=\s*(\S+)\s*$", manifest, "fnOS package version")
     platform = match_one(r"^platform\s*=\s*(\S+)\s*$", manifest, "fnOS source platform")
-    if not re.fullmatch(rf"{re.escape(gateway_version)}-fnos[1-9][0-9]*", version):
-        raise RuntimeError(f"fnOS package version {version} does not match Gateway version {gateway_version}")
+    if version != gateway_version:
+        raise RuntimeError(f"fnOS package version {version} must equal Gateway version {gateway_version}")
     if platform != "all":
         raise RuntimeError("fnOS source manifest must remain an architecture-neutral build template")
     return version

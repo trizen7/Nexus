@@ -66,8 +66,8 @@ jobs:
           if not fnos_match:
               raise SystemExit("could not read fnOS package version")
           fnos_version = fnos_match.group(1)
-          if not re.fullmatch(rf"{re.escape(version)}-fnos[1-9][0-9]*", fnos_version):
-              raise SystemExit("fnOS package version does not match Gateway version")
+          if fnos_version != version:
+              raise SystemExit("fnOS package version must equal Gateway version")
 
           with Path(os.environ["GITHUB_OUTPUT"]).open("a", encoding="utf-8") as stream:
               stream.write(f"version={version}\n")

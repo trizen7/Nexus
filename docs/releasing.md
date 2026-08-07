@@ -59,8 +59,8 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\build-android-rele
 
 1. `Nexus-Android-<version>-release.apk`
 2. `Nexus-Gateway-<version>.zip`
-3. `Nexus-fnOS-<version>-fnos<revision>-amd64.fpk`
-4. `Nexus-fnOS-<version>-fnos<revision>-arm64.fpk`
+3. `Nexus-fnOS-<version>-amd64.fpk`
+4. `Nexus-fnOS-<version>-arm64.fpk`
 5. `SHA256SUMS.txt`
 
 `SHA256SUMS.txt` 只包含前四个二进制附件的 SHA-256。发布目录和 GitHub Release 不生成或上传 AAB、独立 `.fpk.sha256`、`release-manifest.json`、误拼的 `renease-manifest.json`、独立第三方声明、更新记录、开发计划或 TODO。第三方许可声明只保留在源码仓库与 Gateway ZIP 内。Release 正文保持为空。

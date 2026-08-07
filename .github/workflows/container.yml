@@ -67,8 +67,8 @@ jobs:
           if not fnos_match:
               raise SystemExit("fnOS manifest version is missing")
           fnos_version = fnos_match.group(1)
-          if not re.fullmatch(rf"{re.escape(version)}-fnos[1-9][0-9]*", fnos_version):
-              raise SystemExit("fnOS package version does not match Gateway version")
+          if fnos_version != version:
+              raise SystemExit("fnOS package version must equal Gateway version")
 
           if Path("fnos/nexus-gateway/app/docker").exists():
               raise SystemExit("fnOS package source must not contain a Docker project")

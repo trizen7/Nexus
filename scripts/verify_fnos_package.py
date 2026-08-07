@@ -303,8 +303,8 @@ def verify_package(fpk_path: Path, sha256_path: Path | None = None) -> str:
     gateway_version = gateway_match.group(1)
     source_manifest = _read_manifest((PACKAGE_SOURCE / "manifest").read_bytes())
     package_version = source_manifest.get("version", "")
-    if not re.fullmatch(rf"{re.escape(gateway_version)}-fnos[1-9][0-9]*", package_version):
-        _fail("fnOS package version does not match the Gateway version")
+    if package_version != gateway_version:
+        _fail("fnOS package version must equal the Gateway version")
     if source_manifest.get("platform") != "all":
         _fail("fnOS source manifest must be an architecture-neutral build template")
     manifest_urls = " ".join(

@@ -304,8 +304,8 @@ if (-not $GatewayMatch.Success) {
 $GatewayVersion = $GatewayMatch.Groups[1].Value
 $Manifest = [System.IO.File]::ReadAllText((Join-Path $PackageSource "manifest"))
 $PackageVersion = Read-ManifestValue $Manifest "version"
-if ($PackageVersion -notmatch ("^" + [regex]::Escape($GatewayVersion) + "-fnos[1-9][0-9]*$")) {
-    throw "fnOS package version $PackageVersion must be based on Gateway $GatewayVersion"
+if ($PackageVersion -ne $GatewayVersion) {
+    throw "fnOS package version $PackageVersion must equal Gateway $GatewayVersion"
 }
 if ((Read-ManifestValue $Manifest "platform") -ne "all") {
     throw "the fnOS source manifest must remain an architecture-neutral build template"
