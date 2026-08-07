@@ -3,7 +3,7 @@ services:
     build:
       context: ./gateway
       dockerfile: Dockerfile
-    image: nexus-mobile-gateway:0.1.8
+    image: nexus-mobile-gateway:0.1.9
     container_name: nexus-gateway
     restart: unless-stopped
     environment:

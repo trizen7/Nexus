@@ -292,9 +292,9 @@ def test_fnos_manifest_desktop_and_icons_are_consistent() -> None:
         (ROOT / "gateway" / "nexus_gateway" / "__init__.py").read_text(encoding="utf-8"),
     ).group(1)
 
-    assert gateway_version == "0.1.8"
+    assert gateway_version == "0.1.9"
     assert manifest["appname"] == "nexus-gateway"
-    assert manifest["version"] == "0.1.8"
+    assert manifest["version"] == "0.1.9"
     assert manifest["version"] == gateway_version
     assert manifest["source"] == "thirdparty"
     assert manifest["platform"] == "all"
@@ -786,7 +786,7 @@ def test_fnos_verifier_accepts_self_contained_native_packages(tmp_path: Path, ar
     digest = hashlib.sha256(fpk.read_bytes()).hexdigest()
     checksum = tmp_path / "SHA256SUMS.txt"
     checksum.write_text(
-        "0" * 64 + "  Nexus-Android-0.1.8-release.apk\n" + f"{digest}  {fpk.name}\n",
+        "0" * 64 + "  Nexus-Android-0.1.9-release.apk\n" + f"{digest}  {fpk.name}\n",
         encoding="utf-8",
     )
 
@@ -875,6 +875,6 @@ def test_fnos_verifier_requires_unified_checksum_entry(tmp_path: Path) -> None:
     verifier = _load_verifier()
     fpk = _build_synthetic_fpk(tmp_path, "amd64")
     checksum = tmp_path / "SHA256SUMS.txt"
-    checksum.write_text("0" * 64 + "  Nexus-Android-0.1.8-release.apk\n", encoding="utf-8")
+    checksum.write_text("0" * 64 + "  Nexus-Android-0.1.9-release.apk\n", encoding="utf-8")
     with pytest.raises(verifier.VerificationError, match="does not contain"):
         verifier.verify_package(fpk, checksum)
