@@ -145,21 +145,13 @@ powershell -NoProfile -ExecutionPolicy Bypass -File ".\成品\本地测试环境
 
 ## 当前正式版成品
 
-正式成品由发布脚本生成到被 Git 忽略的 `成品/v0.1.9/`，包含官方签名 Release APK、Gateway ZIP、amd64 与 arm64 两个原生自包含 fnOS FPK，以及唯一的 `SHA256SUMS.txt`。两个 FPK 均内置对应架构的 Gateway 原生运行时，fnOS 设备无需 Docker，安装、升级和启动时不访问 GitHub、GHCR 或 Docker Hub。第三方许可声明保留在 Gateway ZIP 中。独立验收环境仍只部署 Gateway ZIP，不读取源码、不运行 Docker，也不接触签名私钥；其 `18787` 端口与 fnOS 默认 `8787` 无关。
+正式成品由发布脚本生成到被 Git 忽略的 `成品/v0.1.10/`，包含官方签名 Release APK、Gateway ZIP、amd64 与 arm64 两个原生自包含 fnOS FPK，以及唯一的 `SHA256SUMS.txt`。两个 FPK 均内置对应架构的 Gateway 原生运行时，fnOS 设备无需 Docker，安装、升级和启动时不访问 GitHub、GHCR 或 Docker Hub。第三方许可声明保留在 Gateway ZIP 中。独立验收环境仍只部署 Gateway ZIP，不读取源码、不运行 Docker，也不接触签名私钥；其 `18787` 端口与 fnOS 默认 `8787` 无关。
 
-手机验收应安装 `Nexus-Android-0.1.9-release.apk`；升级已有官方版本前应确认 APK 签名来自同一官方发布密钥。
-
-## 0.0.15 成品
-
-当前成品文件：
-
-- `成品/Nexus-Android-0.0.15-debug.apk`；
-- `成品/Nexus-Gateway-0.0.15.zip`；
-- `成品/SHA256SUMS.txt`。
+手机验收应安装 `Nexus-Android-0.1.10-release.apk`；升级已有官方版本前应确认 APK 签名来自同一官方发布密钥。
 
 Debug APK 不内嵌本地 CA。App 可连接 HTTP 或由 Android 系统信任链验证的 HTTPS；公网 HTTP 不再由客户端拦截，但仅建议用于明确可接受明文传输风险的环境。
 
-Android 聊天输入使用原生焦点流程，连续输入只维持一个尾随草稿保存任务；登录页和聊天页直接采用系统预先给出的输入法最终高度，不再跟随键盘动画逐帧重新测量页面，消息列表也不再等待 300ms 后才定位。Android 聊天请求会携带手机端能力声明，Gateway 仅通过原版 Hermes HTTP API 注入本轮移动端提示；Hermes 不应把主机本地路径、桌面拖拽或电脑快捷键当作手机附件交付方式。人格列表由 Gateway 的 `/api/hermes/profiles` 提供，默认项使用主 Hermes API 连接，其他项需在 Gateway 管理页配置完整的原版 Hermes Profile API 地址和 Key。`/v1/models` 只用于当前 Profile 的调用模型，不再当作人格列表。QQ、微信等其他渠道正在处理消息时，App 会以只读方式显示“思考中”，但不会提供停止按钮。 Android 发送成功建立 SSE 后若因锁屏或切网失去实时连接，会保留已提交消息、清空其持久化草稿且禁止自动重试聊天 POST，再通过 Gateway 运行状态续接；唤醒时的被动刷新不会把短暂网络恢复延迟误报为服务器不可达。
+Android 聊天输入使用原生焦点流程，连续输入只维持一个尾随草稿保存任务；登录页和聊天页直接采用系统预先给出的输入法最终高度，不再跟随键盘动画逐帧重新测量页面，消息列表也不再等待 300ms 后才定位。Android 聊天请求会携带手机端能力声明，Gateway 仅通过原版 Hermes HTTP API 注入本轮移动端提示；Hermes 不应把主机本地路径、桌面拖拽或电脑快捷键当作手机附件交付方式。人格目录由 Gateway 的 `/api/hermes/personas` 提供；Gateway 会只读查询每个已配置原版 Hermes Profile API 的 `/v1/models`，用主项显示真实人格名，并继续把带 `parent` 的子项作为调用模型。原版 Hermes API Server 不提供机器级 Profile 目录，因此其他人格仍需各自可访问的 Profile API 地址和 Key；旧 `/api/hermes/profiles` 仅作为兼容别名。QQ、微信等其他渠道正在处理消息时，App 会以只读方式显示“思考中”，但不会提供停止按钮。 Android 发送成功建立 SSE 后若因锁屏或切网失去实时连接，会保留已提交消息、清空其持久化草稿且禁止自动重试聊天 POST，再通过 Gateway 运行状态续接；唤醒时的被动刷新不会把短暂网络恢复延迟误报为服务器不可达。
 
 ## 推理深度
 

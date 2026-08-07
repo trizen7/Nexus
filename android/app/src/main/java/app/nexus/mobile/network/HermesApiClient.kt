@@ -73,17 +73,25 @@ class HermesApiClient(
         )
     }
 
-    suspend fun listProfiles(): List<HermesProfile> = withContext(Dispatchers.IO) {
-        try {
-            val root = getJson("api/hermes/profiles")
-            root.array("data").mapNotNull { element ->
-                element.asJsonObjectOrNull()?.toProfile()
-            }.ifEmpty { listOf(HermesProfile("default", "Hermes 默认（default）", true)) }
+    suspend fun listProfileDirectory(): HermesProfileDirectory = withContext(Dispatchers.IO) {
+        val root = try {
+            getJson("api/hermes/personas?refresh=true")
         } catch (error: HermesHttpException) {
             if (error.statusCode != 404) throw error
-            listOf(HermesProfile("default", "Hermes 默认（default）", true))
+            getJson("api/hermes/profiles?refresh=true")
         }
+        val profiles = root.array("data").mapNotNull { element ->
+            element.asJsonObjectOrNull()?.toProfile()
+        }
+        if (profiles.isEmpty()) error("Gateway 没有返回可用的 Hermes 人格")
+        HermesProfileDirectory(
+            profiles = profiles,
+            notice = root.string("notice").ifBlank { null },
+            complete = root.objectValue("discovery").booleanValue("directory_complete")
+        )
     }
+
+    suspend fun listProfiles(): List<HermesProfile> = listProfileDirectory().profiles
 
     suspend fun listSessions(): List<HermesSession> = withContext(Dispatchers.IO) {
         val root = getJson("api/sessions")
@@ -537,6 +545,7 @@ class HermesApiClient(
     private fun authorized(builder: Request.Builder): Request.Builder =
         builder
             .header("Authorization", "Bearer $token")
+            .header("X-Nexus-Hermes-Connection", profileId)
             .header("X-Nexus-Hermes-Profile", profileId)
             .header("Accept", "application/json, text/event-stream")
 
@@ -679,10 +688,21 @@ private val hermesProfileIdPattern = Regex("[A-Za-z0-9][A-Za-z0-9._-]{0,63}")
 private fun JsonObject.toProfile(): HermesProfile? {
     val id = string("id").trim()
     if (!hermesProfileIdPattern.matches(id)) return null
+    val connectionId = string("connection_id").trim().ifBlank { id }
+    if (!hermesProfileIdPattern.matches(connectionId)) return null
+    val available = get("available")
+        ?.takeUnless { it.isJsonNull }
+        ?.let { runCatching { it.asBoolean }.getOrNull() }
+        ?: true
     return HermesProfile(
         id = id,
         name = string("name").ifBlank { id },
-        isDefault = booleanValue("is_default") || id == "default"
+        isDefault = booleanValue("is_default") || id == "default",
+        profileName = string("profile_name").ifBlank { null },
+        connectionId = connectionId,
+        connectionName = string("connection_name").ifBlank { null },
+        available = available,
+        state = string("state").ifBlank { if (available) "ok" else "unavailable" }
     )
 }
 

@@ -33,7 +33,7 @@ Android 连接
 1. 双击 01-打开初始化页面.cmd。
 2. 浏览器打开 http://127.0.0.1:18787。
 3. 按页面提示输入 data\bootstrap.token 中的一次性初始化令牌，并设置管理员账号、密码、Hermes API 地址和 Hermes API Server Key；如需其他人格，初始化后在“原版 Hermes 连接”中添加 Profile API 地址和各自 Key。
-4. 在手机安装父目录中的 v0.1.9\Nexus-Android-0.1.9-release.apk。
+4. 在手机安装父目录中的 v0.1.10\Nexus-Android-0.1.10-release.apk。
 5. App 在局域网填写 http://电脑局域网IP:18787，再输入 Nexus 管理员账号和密码。
 
 控制文件

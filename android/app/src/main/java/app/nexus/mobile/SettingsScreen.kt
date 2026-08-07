@@ -66,7 +66,7 @@ fun SettingsScreen(state: MainUiState, viewModel: MainViewModel) {
             item {
                 SettingsSection(
                     title = "Hermes 人格",
-                    description = "选择 Gateway 中配置的 Hermes Profile"
+                    description = "选择原版 Hermes Profile API 返回的人格"
                 ) {
                     SettingsActionRow(
                         icon = Icons.Filled.AutoAwesome,

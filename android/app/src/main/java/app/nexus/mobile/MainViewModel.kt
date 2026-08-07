@@ -44,6 +44,7 @@ data class MainUiState(
     val selectedInferenceModelId: String? = null,
     val selectedReasoningEffort: ReasoningEffort = ReasoningEffort.DEFAULT,
     val profilesLoading: Boolean = false,
+    val profileNotice: String? = null,
     val modelsLoading: Boolean = false,
     val modelPicker: ModelPickerKind? = null,
     val cronManagerOpen: Boolean = false,
@@ -94,7 +95,7 @@ data class MainUiState(
         get() = inferenceModels.firstOrNull { it.id == selectedInferenceModelId }
 
     val selectedProfileLabel: String
-        get() = selectedProfile?.displayName ?: "Hermes 默认（default）"
+        get() = selectedProfile?.displayName ?: "未获取人格"
 
     val selectedInferenceModelLabel: String
         get() = selectedInferenceModel?.displayName ?: selectedInferenceModelId ?: "Hermes 默认"
@@ -111,6 +112,7 @@ private data class ConnectionBootstrap(
     val accessToken: String,
     val health: app.nexus.mobile.network.HermesHealth,
     val profiles: List<HermesProfile>,
+    val profileNotice: String?,
     val selectedProfileId: String,
     val sessions: List<HermesSession>
 )
@@ -247,6 +249,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                     connectionStatus = ConnectionStatus.CONNECTING,
                     loading = true,
                     profilesLoading = false,
+                    profileNotice = null,
                     modelsLoading = false,
                     error = null
                 )
@@ -255,11 +258,19 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                 val api = HermesApiClient(normalizedUrl, snapshot.token)
                 val accessToken = snapshot.token.ifBlank { api.login(snapshot.username, snapshot.password) }
                 val health = api.health()
-                val profiles = api.listProfiles()
-                val selectedProfileId = resolveSelectedProfileId(profiles, snapshot.selectedProfileId)
+                val directory = api.listProfileDirectory()
+                val selectedProfileId = resolveSelectedProfileId(directory.profiles, snapshot.selectedProfileId)
                 api.selectProfile(selectedProfileId)
                 val sessions = visibleSessions(api.listSessions())
-                ConnectionBootstrap(api, accessToken, health, profiles, selectedProfileId, sessions)
+                ConnectionBootstrap(
+                    api,
+                    accessToken,
+                    health,
+                    directory.profiles,
+                    directory.notice,
+                    selectedProfileId,
+                    sessions
+                )
             }.onSuccess { bootstrap ->
                 if (generation != connectionGeneration) return@onSuccess
                 client = bootstrap.client
@@ -288,6 +299,7 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
                             gatewayVersion = bootstrap.health.gatewayVersion,
                             hermesVersion = bootstrap.health.hermesVersion,
                             profiles = bootstrap.profiles,
+                            profileNotice = bootstrap.profileNotice,
                             selectedProfileId = bootstrap.selectedProfileId,
                             sessions = bootstrap.sessions,
                             activeSessionId = selected,
@@ -1939,14 +1951,20 @@ class MainViewModel(application: Application) : AndroidViewModel(application) {
         if (_uiState.value.profilesLoading) return
         _uiState.update { it.copy(profilesLoading = true) }
         viewModelScope.launch {
-            runCatching { api.listProfiles() }
-                .onSuccess { profiles ->
+            runCatching { api.listProfileDirectory() }
+                .onSuccess { directory ->
                     if (client !== api || _uiState.value.connectionStatus != ConnectionStatus.CONNECTED) {
                         return@onSuccess
                     }
                     val current = _uiState.value.selectedProfileId
-                    val selected = resolveSelectedProfileId(profiles, current)
-                    _uiState.update { it.copy(profiles = profiles, profilesLoading = false) }
+                    val selected = resolveSelectedProfileId(directory.profiles, current)
+                    _uiState.update {
+                        it.copy(
+                            profiles = directory.profiles,
+                            profileNotice = directory.notice,
+                            profilesLoading = false
+                        )
+                    }
                     if (selected != current) {
                         profileSwitchBlockReason()?.let { message ->
                             _uiState.update { it.copy(error = message) }

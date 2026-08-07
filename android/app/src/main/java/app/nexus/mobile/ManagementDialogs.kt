@@ -78,7 +78,7 @@ private fun ModelPickerDialog(kind: ModelPickerKind, state: MainUiState, viewMod
         ModelPickerKind.REASONING -> "推理深度"
     }
     val description = when (kind) {
-        ModelPickerKind.PROFILE -> "人格对应 Gateway 中配置的原版 Hermes Profile API，其会话、记忆、工具和定时任务相互独立。"
+        ModelPickerKind.PROFILE -> "人格名称从原版 Hermes Profile API 动态读取；不同人格的会话、记忆、工具和定时任务相互独立。"
         ModelPickerKind.INFERENCE -> "仅为当前对话选择实际调用的模型，新对话使用 Hermes 默认值。"
         ModelPickerKind.REASONING -> "仅为当前对话设置推理量；是否生效由 Hermes 和当前调用模型决定。"
     }
@@ -146,26 +146,33 @@ private fun ModelPickerDialog(kind: ModelPickerKind, state: MainUiState, viewMod
 private fun ProfileOptions(state: MainUiState, viewModel: MainViewModel) {
     if (state.profiles.isEmpty()) {
         Text(
-            "Gateway 尚未提供可用的人格。请先在网页管理端配置原版 Hermes Profile API 连接。",
+            "未获取到 Hermes 人格。请检查 Gateway 与原版 Hermes Profile API 的连接后重试。",
             color = MaterialTheme.colorScheme.onSurfaceVariant,
             fontSize = 12.sp
         )
     } else {
         state.profiles.forEach { profile ->
+            val connection = profile.connectionLabel
+            val subtitle = when {
+                !profile.available -> "$connection · 人格名称未验证"
+                profile.isDefault -> "默认连接：$connection"
+                else -> "连接：$connection"
+            }
             ModelOptionRow(
                 selected = state.selectedProfileId == profile.id,
                 title = profile.displayName,
-                subtitle = if (profile.isDefault) "默认 Hermes API 连接" else "独立 Hermes Profile API 连接",
+                subtitle = subtitle,
                 onClick = { viewModel.selectProfile(profile.id) }
             )
         }
-        if (state.profiles.size == 1) {
-            Text(
-                "当前 Gateway 只配置了默认人格；其他人格需要在 Gateway 网页的原版 Hermes 连接中添加。",
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-                fontSize = 12.sp
-            )
-        }
+    }
+    state.profileNotice?.let { notice ->
+        Text(
+            notice,
+            color = MaterialTheme.colorScheme.onSurfaceVariant,
+            fontSize = 12.sp,
+            lineHeight = 17.sp
+        )
     }
 }
 

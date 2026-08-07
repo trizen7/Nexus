@@ -1,5 +1,6 @@
 package app.nexus.mobile.network
 
+import app.nexus.mobile.prependMessagePage
 import kotlinx.coroutines.test.runTest
 import okhttp3.OkHttpClient
 import okhttp3.mockwebserver.MockResponse
@@ -135,7 +136,7 @@ class HermesApiClientTest {
 
         val latest = client.loadMessagePage("session-1", 2, 0)
         val older = client.loadMessagePage("session-1", 2, 2)
-        val merged = app.nexus.mobile.prependMessagePage(latest.messages, older.messages)
+        val merged = prependMessagePage(latest.messages, older.messages)
 
         assertEquals(4, merged.size)
         assertEquals(listOf("之前提问", "之前回答", "最近提问", "最近回答"), merged.map { it.content })
@@ -648,34 +649,58 @@ class HermesApiClientTest {
     }
 
     @Test
-    fun `listProfiles parses Gateway profile directory`() = runTest {
+    fun `listProfileDirectory parses Gateway persona identity and discovery notice`() = runTest {
         server.enqueue(
             MockResponse()
                 .setResponseCode(200)
                 .setHeader("Content-Type", "application/json")
-                .setBody("""{"object":"list","data":[{"id":"default","name":"Hermes 默认","is_default":true},{"id":"bad:profile","name":"无效"},{"id":"work","name":"工作","is_default":false}]}""")
+                .setBody("""{"object":"list","data":[{"id":"default","name":"主人格","profile_name":"主人格","connection_id":"default","connection_name":"Hermes 默认（default）","is_default":true,"available":true,"state":"ok"},{"id":"bad:profile","name":"无效"},{"id":"work","name":"工作","profile_name":"work-profile","connection_id":"work","connection_name":"工作连接","is_default":false,"available":false,"state":"unavailable"}],"notice":"原版 Hermes API 只公开当前 Profile","discovery":{"directory_complete":false}}""")
         )
         val client = HermesApiClient(server.url("/").toString(), "test-token")
 
-        val profiles = client.listProfiles()
+        val directory = client.listProfileDirectory()
 
-        assertEquals(listOf("default", "work"), profiles.map { it.id })
-        assertEquals("工作", profiles.last().displayName)
-        assertEquals(true, profiles.first().isDefault)
+        assertEquals(listOf("default", "work"), directory.profiles.map { it.id })
+        assertEquals("主人格", directory.profiles.first().displayName)
+        assertEquals("work-profile", directory.profiles.last().displayName)
+        assertEquals("工作连接", directory.profiles.last().connectionLabel)
+        assertEquals(false, directory.profiles.last().available)
+        assertEquals("原版 Hermes API 只公开当前 Profile", directory.notice)
+        assertEquals(false, directory.complete)
         val request = server.takeRequest()
-        assertEquals("/api/hermes/profiles", request.path)
+        assertEquals("/api/hermes/personas?refresh=true", request.path)
+        assertEquals("default", request.getHeader("X-Nexus-Hermes-Connection"))
         assertEquals("default", request.getHeader("X-Nexus-Hermes-Profile"))
     }
 
     @Test
-    fun `listProfiles falls back to default for an older Gateway`() = runTest {
+    fun `listProfileDirectory falls back to the legacy Gateway endpoint without inventing default`() = runTest {
+        server.enqueue(MockResponse().setResponseCode(404).setBody("{}"))
+        server.enqueue(
+            MockResponse()
+                .setResponseCode(200)
+                .setHeader("Content-Type", "application/json")
+                .setBody("""{"object":"list","data":[{"id":"default","name":"Legacy Profile","is_default":true}]}""")
+        )
+        val client = HermesApiClient(server.url("/").toString(), "test-token")
+
+        val directory = client.listProfileDirectory()
+
+        assertEquals(listOf("default"), directory.profiles.map { it.id })
+        assertEquals("Legacy Profile", directory.profiles.single().displayName)
+        assertEquals("/api/hermes/personas?refresh=true", server.takeRequest().path)
+        assertEquals("/api/hermes/profiles?refresh=true", server.takeRequest().path)
+    }
+
+    @Test
+    fun `listProfileDirectory reports failure when neither directory endpoint exists`() = runTest {
+        server.enqueue(MockResponse().setResponseCode(404).setBody("{}"))
         server.enqueue(MockResponse().setResponseCode(404).setBody("{}"))
         val client = HermesApiClient(server.url("/").toString(), "test-token")
 
-        val profiles = client.listProfiles()
+        val error = runCatching { client.listProfileDirectory() }.exceptionOrNull()
 
-        assertEquals(listOf("default"), profiles.map { it.id })
-        assertEquals(true, profiles.single().isDefault)
+        assertTrue(error is HermesHttpException)
     }
 
     @Test

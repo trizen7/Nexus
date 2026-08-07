@@ -203,12 +203,12 @@ async function loadHermesConfig() {
 function renderHermesProfiles() {
   const container = $('hermesProfileRows');
   if (!hermesProfiles.length) {
-    container.innerHTML = '<div class="profile-empty">尚未配置其他人格，App 将仅显示默认 Hermes Profile。</div>';
+    container.innerHTML = '<div class="profile-empty">尚未配置其他 Profile API 连接，App 将显示主连接返回的当前人格。</div>';
     return;
   }
   container.innerHTML = hermesProfiles.map((profile, index) => `
     <div class="profile-row" data-profile-index="${index}">
-      <label class="field"><span>人格 ID</span><input data-profile-field="id" value="${escAttr(profile.id || '')}" maxlength="64" placeholder="work" required></label>
+      <label class="field"><span>连接 ID</span><input data-profile-field="id" value="${escAttr(profile.id || '')}" maxlength="64" placeholder="work" required></label>
       <label class="field"><span>显示名称</span><input data-profile-field="name" value="${escAttr(profile.name || '')}" maxlength="64" placeholder="工作助手" required></label>
       <label class="field"><span>Hermes Profile API 地址</span><input data-profile-field="hermes_api_url" type="url" value="${escAttr(profile.hermes_api_url || '')}" placeholder="http://Hermes主机:8642/p/work" required></label>
       <label class="field"><span>API Server Key</span><input data-profile-field="hermes_api_token" type="password" autocomplete="off" value="${escAttr(profile.hermes_api_token || '')}" placeholder="${profile.key_configured ? '地址不变时可留空；修改地址需重填' : '请填写 Key'}"></label>

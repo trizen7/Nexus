@@ -1,6 +1,6 @@
 # Nexus 发布流程
 
-本流程用于维护者发布版本。所有写入都必须位于 Nexus 仓库、Nexus 成品目录或 GitHub 仓库；禁止修改、安装、更新、停止、启动、重启或管理 Hermes。发布验证不需要在本机运行 Docker，仓库当前保持 Private。
+本流程用于维护者发布版本。所有写入都必须位于 Nexus 仓库、Nexus 成品目录或 GitHub 仓库；禁止修改、安装、更新、停止、启动、重启或管理 Hermes。发布验证不需要在本机运行 Docker，仓库为公开开源仓库。
 
 ## 1. 版本一致性
 
@@ -90,13 +90,13 @@ Base64 只是一种传输编码，不是加密。私钥原件应保留离线备�
 
 fnOS FPK 内置完整 Gateway 原生运行时，设备无需 Docker；安装、升级和启动时不会访问 GitHub、GHCR 或 Docker Hub。工作流仍可额外发布 GHCR 多架构镜像，供普通 Docker 部署选择，但 FPK 不引用它。
 
-## 7. 私有仓库安全设置
+## 7. 公开仓库安全设置
 
 当前仓库保持 Private。发布前确认：
 
-- 仓库 Visibility 仍为 Private，访问成员最小化。
+- 仓库 Visibility 保持 Public，写入权限与管理员成员最小化。
 - `main` 分支保护要求 CI，通过受控方式合并并禁止强制推送或删除。
-- Private vulnerability reporting、Dependabot alerts、security updates 和 secret scanning 按仓库能力启用。
+- Private vulnerability reporting、Dependabot alerts、security updates、push protection 和 secret scanning 按仓库能力启用。
 - Actions 只能获得发布所需最小权限，签名秘密不下发给不受信任的工作流。
 - Release 附件不得包含源码外的日志、截图、运行数据、密钥、Token、证书私钥或 Hermes 配置。
 

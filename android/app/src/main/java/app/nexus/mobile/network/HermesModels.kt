@@ -108,12 +108,25 @@ data class SessionRunStatus(
 data class HermesProfile(
     val id: String,
     val name: String,
-    val isDefault: Boolean = false
+    val isDefault: Boolean = false,
+    val profileName: String? = null,
+    val connectionId: String = id,
+    val connectionName: String? = null,
+    val available: Boolean = true,
+    val state: String = if (available) "ok" else "unavailable"
 ) {
     val displayName: String
-        get() = name.ifBlank { id }
+        get() = profileName?.takeIf { it.isNotBlank() } ?: name.ifBlank { id }
+
+    val connectionLabel: String
+        get() = connectionName?.takeIf { it.isNotBlank() } ?: connectionId
 }
 
+data class HermesProfileDirectory(
+    val profiles: List<HermesProfile>,
+    val notice: String? = null,
+    val complete: Boolean = false
+)
 
 data class HermesModel(
     val id: String,

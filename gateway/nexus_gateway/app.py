@@ -40,6 +40,7 @@ CONFIG_PATH_KEY = web.AppKey("config_path", Path)
 BOOTSTRAP_TOKEN_PATH_KEY = web.AppKey("bootstrap_token_path", Path)
 GATEWAY_CONFIG_KEY = web.AppKey("gateway_config", object)
 AUTH_STATE_KEY = web.AppKey("auth_state", object)
+HERMES_PROFILE_IDENTITY_CACHE_KEY = web.AppKey("hermes_profile_identity_cache", dict)
 MEDIA_STORE_KEY = web.AppKey("media_store", object)
 HTTP_SESSION_KEY = web.AppKey("http_session", ClientSession)
 RUN_TRACKER_KEY = web.AppKey("run_tracker", object)
@@ -47,7 +48,8 @@ EXTERNAL_RUN_OBSERVER_KEY = web.AppKey("external_run_observer", object)
 EXTERNAL_RUN_OBSERVERS_KEY = web.AppKey("external_run_observers", dict)
 TRANSCRIBE_AUDIO_KEY = web.AppKey("transcribe_audio", object)
 REQUEST_ATTACHMENT_IDS_KEY = web.RequestKey("nexus_attachment_ids", list)
-HERMES_PROFILE_HEADER = "X-Nexus-Hermes-Profile"
+HERMES_CONNECTION_HEADER = "X-Nexus-Hermes-Connection"
+HERMES_PROFILE_HEADER = "X-Nexus-Hermes-Profile"  # Legacy Nexus clients.
 LOGIN_RATE_LIMITER_KEY = web.AppKey("login_rate_limiter", object)
 SETUP_LOCK_KEY = web.AppKey("setup_lock", asyncio.Lock)
 TOKEN_TTL_SECONDS = 30 * 24 * 60 * 60
@@ -87,6 +89,8 @@ HERMES_AUTH_FAILED_MESSAGE = (
 HERMES_AUTH_PROBE_PATHS = ("/health/detailed", "/v1/models", "/api/sessions")
 HERMES_AUTH_PROBE_FALLBACK_STATUSES = {404, 405, 501}
 HERMES_PROBE_TIMEOUT = ClientTimeout(total=10, connect=5)
+HERMES_PROFILE_IDENTITY_CACHE_SECONDS = 30.0
+HERMES_PROFILE_IDENTITY_FAILURE_CACHE_SECONDS = 5.0
 
 
 def _hermes_auth_failed_error() -> dict[str, dict[str, str]]:
@@ -1134,15 +1138,105 @@ def _profile_public_payload(profile: HermesProfileConfig, *, admin: bool = False
     return payload
 
 
+def _safe_hermes_profile_name(value: Any) -> str | None:
+    if not isinstance(value, str):
+        return None
+    candidate = value.strip()
+    if not candidate or len(candidate) > 128 or any(ord(char) < 32 for char in candidate):
+        return None
+    return candidate
+
+
+def _profile_name_from_models(payload: Any) -> str | None:
+    if not isinstance(payload, dict) or not isinstance(payload.get("data"), list):
+        return None
+    models = [item for item in payload["data"] if isinstance(item, dict)]
+    primary = next((item for item in models if item.get("parent") is None), None)
+    if primary is None and models:
+        primary = models[0]
+    return _safe_hermes_profile_name(primary.get("id")) if primary else None
+
+
+async def _resolve_profile_identity(
+    app: web.Application,
+    profile: HermesProfileConfig,
+    *,
+    force: bool = False,
+) -> dict[str, Any]:
+    now = time.monotonic()
+    cache: dict[str, dict[str, Any]] = app[HERMES_PROFILE_IDENTITY_CACHE_KEY]
+    cached = cache.get(profile.id)
+    if (
+        not force
+        and cached is not None
+        and cached.get("upstream_url") == profile.upstream_url
+        and now - float(cached.get("cached_at", 0.0))
+        < (
+            HERMES_PROFILE_IDENTITY_CACHE_SECONDS
+            if cached.get("available")
+            else HERMES_PROFILE_IDENTITY_FAILURE_CACHE_SECONDS
+        )
+    ):
+        return dict(cached)
+
+    identity: dict[str, Any] = {
+        "profile_name": None,
+        "available": False,
+        "state": "unavailable",
+        "upstream_url": profile.upstream_url,
+        "cached_at": now,
+    }
+    try:
+        session = app[HTTP_SESSION_KEY]
+        async with session.get(
+            f"{profile.upstream_url}/v1/models",
+            headers={"Authorization": f"Bearer {profile.upstream_token}", "Accept": "application/json"},
+            timeout=HERMES_PROBE_TIMEOUT,
+        ) as response:
+            if response.status in {401, 403}:
+                identity["state"] = "auth_failed"
+            elif response.status == 200:
+                try:
+                    payload = await response.json(content_type=None)
+                except (json.JSONDecodeError, ValueError):
+                    payload = None
+                profile_name = _profile_name_from_models(payload)
+                if profile_name is not None:
+                    identity.update(profile_name=profile_name, available=True, state="ok")
+    except Exception:
+        pass
+    cache[profile.id] = identity
+    return dict(identity)
+
+
+def _persona_public_payload(profile: HermesProfileConfig, identity: dict[str, Any]) -> dict[str, Any]:
+    profile_name = _safe_hermes_profile_name(identity.get("profile_name"))
+    return {
+        "id": profile.id,
+        "name": profile_name or profile.name,
+        "profile_name": profile_name,
+        "connection_id": profile.id,
+        "connection_name": profile.name,
+        "is_default": profile.is_default,
+        "available": bool(identity.get("available")),
+        "state": str(identity.get("state") or "unavailable"),
+        "source": "hermes_profile_api",
+    }
+
+
 def _request_profile(request: web.Request) -> HermesProfileConfig:
-    requested = request.headers.get(HERMES_PROFILE_HEADER, "default").strip() or "default"
+    requested = (
+        request.headers.get(HERMES_CONNECTION_HEADER)
+        or request.headers.get(HERMES_PROFILE_HEADER)
+        or "default"
+    ).strip() or "default"
     profile = request.app[GATEWAY_CONFIG_KEY].profile(requested)
     if profile is None:
         raise web.HTTPBadRequest(
             text=json.dumps({
                 "error": {
                     "code": "unknown_hermes_profile",
-                    "message": "所选 Hermes 人格不存在，请刷新人格列表或在 Gateway 中重新配置",
+                    "message": "所选 Hermes 人格连接不存在，请刷新人格列表或在 Gateway 中重新配置",
                 }
             }, ensure_ascii=False),
             content_type="application/json",
@@ -1461,7 +1555,7 @@ async def admin_hermes_config(request: web.Request) -> web.Response:
     })
 
 
-async def list_hermes_profiles(request: web.Request) -> web.Response:
+async def list_hermes_connections(request: web.Request) -> web.Response:
     config = request.app[GATEWAY_CONFIG_KEY]
     return web.json_response({
         "object": "list",
@@ -1469,6 +1563,50 @@ async def list_hermes_profiles(request: web.Request) -> web.Response:
             _profile_public_payload(profile)
             for profile in config.all_profiles()
         ],
+    })
+
+
+async def list_hermes_profiles(request: web.Request) -> web.Response:
+    config = request.app[GATEWAY_CONFIG_KEY]
+    profiles = config.all_profiles()
+    force = request.query.get("refresh", "").strip().casefold() in {"1", "true", "yes", "on"}
+    identities = await asyncio.gather(*(
+        _resolve_profile_identity(request.app, profile, force=force)
+        for profile in profiles
+    ))
+    data = [
+        _persona_public_payload(profile, identity)
+        for profile, identity in zip(profiles, identities)
+    ]
+    unavailable = sum(1 for item in data if not item["available"])
+    if len(data) == 1:
+        current_name = data[0].get("profile_name")
+        if current_name:
+            notice = (
+                f"当前原版 Hermes API 只公开活动 Profile「{current_name}」；"
+                "其他人格需要各自可访问的原版 Hermes Profile API 地址和 Key。"
+            )
+        else:
+            notice = (
+                "暂时无法读取当前 Hermes Profile 名称；"
+                "已保留默认连接，请检查 Hermes API 状态。"
+            )
+    elif unavailable:
+        notice = (
+            f"{unavailable} 个 Hermes Profile API 连接暂时不可用；"
+            "已保留配置项，恢复后可再刷新。"
+        )
+    else:
+        notice = None
+    return web.json_response({
+        "object": "list",
+        "data": data,
+        "notice": notice,
+        "discovery": {
+            "mode": "configured_profile_apis",
+            "directory_complete": False,
+            "reason": "hermes_api_server_has_no_machine_profile_directory",
+        },
     })
 
 
@@ -1613,6 +1751,7 @@ async def update_hermes_config(request: web.Request) -> web.Response:
         config.upstream_url = hermes_api_url
         config.upstream_token = hermes_api_token
         config.profiles = candidate_profiles
+        request.app[HERMES_PROFILE_IDENTITY_CACHE_KEY].clear()
         await request.app[EXTERNAL_RUN_OBSERVER_KEY].reset()
         extra_observers: dict[str, ExternalRunObserver] = request.app[EXTERNAL_RUN_OBSERVERS_KEY]
         for observer in tuple(extra_observers.values()):
@@ -2699,6 +2838,7 @@ def create_app(
         profiles=profiles,
     )
     app[AUTH_STATE_KEY] = AuthState(username, password_salt, password_hash, legacy_password, revision)
+    app[HERMES_PROFILE_IDENTITY_CACHE_KEY] = {}
     app[LOGIN_RATE_LIMITER_KEY] = LoginRateLimiter(login_rate_limit, login_rate_window_seconds)
     app[SETUP_LOCK_KEY] = asyncio.Lock()
     app[MEDIA_STORE_KEY] = MediaStore(
@@ -2728,6 +2868,8 @@ def create_app(
     app.router.add_get("/api/admin/overview", admin_overview)
     app.router.add_get("/api/admin/hermes-config", admin_hermes_config)
     app.router.add_put("/api/admin/hermes-config", update_hermes_config)
+    app.router.add_get("/api/hermes/connections", list_hermes_connections)
+    app.router.add_get("/api/hermes/personas", list_hermes_profiles)
     app.router.add_get("/api/hermes/profiles", list_hermes_profiles)
     app.router.add_get("/api/admin/files", admin_files)
     app.router.add_get("/api/admin/audio", admin_audio)

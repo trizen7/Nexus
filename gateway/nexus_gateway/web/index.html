@@ -151,8 +151,8 @@
             <label class="field"><span>当前 Nexus 密码</span><input id="hermesCurrentPassword" type="password" autocomplete="current-password" required></label>
             <div class="profile-config span-two">
               <div class="profile-config-head">
-                <div><strong>其他人格（Hermes Profile）</strong><span>每个人格使用独立的原版 Hermes HTTP API 地址与 Key。</span></div>
-                <button class="button compact secondary" id="addHermesProfileButton" type="button">添加人格</button>
+                <div><strong>其他 Profile API 连接</strong><span>每项连接一个可独立访问的原版 Hermes Profile API；App 会从 API 动态读取人格名。</span></div>
+                <button class="button compact secondary" id="addHermesProfileButton" type="button">添加连接</button>
               </div>
               <div id="hermesProfileRows" class="profile-rows"></div>
               <p class="muted profile-help">Hermes API Server 不提供机器级 Profile 列表。若使用 multiplex，请填写形如 <code>http://Hermes主机:8642/p/profile-name</code> 的完整地址；Nexus 只验证和调用这些 API，不会读取或修改 Hermes 文件。</p>

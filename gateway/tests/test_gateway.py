@@ -1768,13 +1768,44 @@ async def test_profile_directory_and_proxy_use_selected_original_hermes_api(
 ):
     headers = await configure_work_profile(gateway_client, upstream_client)
 
-    directory = await gateway_client.get("/api/hermes/profiles", headers=headers)
+    directory = await gateway_client.get("/api/hermes/personas?refresh=true", headers=headers)
     assert directory.status == 200
-    profiles = (await directory.json())["data"]
+    payload = await directory.json()
+    profiles = payload["data"]
     assert profiles == [
-        {"id": "default", "name": "Hermes 默认（default）", "is_default": True},
-        {"id": "work", "name": "工作", "is_default": False},
+        {
+            "id": "default",
+            "name": "test-model",
+            "profile_name": "test-model",
+            "connection_id": "default",
+            "connection_name": "Hermes 默认（default）",
+            "is_default": True,
+            "available": True,
+            "state": "ok",
+            "source": "hermes_profile_api",
+        },
+        {
+            "id": "work",
+            "name": "work",
+            "profile_name": "work",
+            "connection_id": "work",
+            "connection_name": "工作",
+            "is_default": False,
+            "available": True,
+            "state": "ok",
+            "source": "hermes_profile_api",
+        },
     ]
+    assert payload["notice"] is None
+    assert payload["discovery"]["directory_complete"] is False
+
+    legacy_directory = await gateway_client.get("/api/hermes/profiles", headers=headers)
+    assert legacy_directory.status == 200
+    assert [item["profile_name"] for item in (await legacy_directory.json())["data"]] == ["test-model", "work"]
+
+    connections = await gateway_client.get("/api/hermes/connections", headers=headers)
+    assert connections.status == 200
+    assert [item["id"] for item in (await connections.json())["data"]] == ["default", "work"]
 
     sessions = await gateway_client.get("/api/sessions", headers=headers)
     assert sessions.status == 200
@@ -1789,6 +1820,95 @@ async def test_profile_directory_and_proxy_use_selected_original_hermes_api(
     assert chat.status == 200
     assert "work" in await chat.text()
     assert upstream_client.profile_captured_chat == {"message": "profile chat"}
+
+
+@pytest.mark.asyncio
+async def test_persona_directory_reads_the_active_profile_name_from_original_hermes(
+    gateway_client: TestClient,
+    upstream_client: TestClient,
+):
+    upstream_client.models_state["payload"] = {
+        "object": "list",
+        "data": [
+            {"id": "主人格", "object": "model", "parent": None},
+            {"id": "gpt-5.6-sol", "object": "model", "parent": "主人格"},
+        ],
+    }
+    headers = await auth_headers(gateway_client)
+
+    response = await gateway_client.get("/api/hermes/personas?refresh=true", headers=headers)
+
+    assert response.status == 200
+    raw = await response.text()
+    payload = json.loads(raw)
+    assert payload["data"][0]["name"] == "主人格"
+    assert payload["data"][0]["profile_name"] == "主人格"
+    assert payload["data"][0]["connection_id"] == "default"
+    assert payload["data"][0]["available"] is True
+    assert "gpt-5.6-sol" not in [item["name"] for item in payload["data"]]
+    assert "upstream-secret" not in raw
+    assert "主人格" in payload["notice"]
+
+
+@pytest.mark.asyncio
+async def test_persona_directory_keeps_configured_connection_when_identity_refresh_fails(
+    gateway_client: TestClient,
+    upstream_client: TestClient,
+):
+    upstream_client.models_state["status"] = 503
+    headers = await auth_headers(gateway_client)
+
+    response = await gateway_client.get("/api/hermes/personas?refresh=true", headers=headers)
+
+    assert response.status == 200
+    payload = await response.json()
+    assert payload["data"] == [{
+        "id": "default",
+        "name": "Hermes 默认（default）",
+        "profile_name": None,
+        "connection_id": "default",
+        "connection_name": "Hermes 默认（default）",
+        "is_default": True,
+        "available": False,
+        "state": "unavailable",
+        "source": "hermes_profile_api",
+    }]
+    assert "无法读取" in payload["notice"]
+
+
+@pytest.mark.asyncio
+async def test_persona_directory_marks_upstream_key_rejection_without_leaking_key(
+    gateway_client: TestClient,
+    upstream_client: TestClient,
+):
+    upstream_client.expected_auth["token"] = "different-upstream-secret"
+    headers = await auth_headers(gateway_client)
+
+    response = await gateway_client.get("/api/hermes/personas?refresh=true", headers=headers)
+
+    assert response.status == 200
+    raw = await response.text()
+    payload = json.loads(raw)
+    assert payload["data"][0]["state"] == "auth_failed"
+    assert payload["data"][0]["available"] is False
+    assert "upstream-secret" not in raw
+    assert "different-upstream-secret" not in raw
+
+
+@pytest.mark.asyncio
+async def test_persona_directory_caches_successful_read_only_identity_probe(
+    gateway_client: TestClient,
+    upstream_client: TestClient,
+):
+    headers = await auth_headers(gateway_client)
+    before = upstream_client.probe_counts.get("models", 0)
+
+    first = await gateway_client.get("/api/hermes/personas", headers=headers)
+    second = await gateway_client.get("/api/hermes/personas", headers=headers)
+
+    assert first.status == 200
+    assert second.status == 200
+    assert upstream_client.probe_counts.get("models", 0) == before + 1
 
 
 @pytest.mark.asyncio
@@ -1955,6 +2075,25 @@ async def test_saved_profiles_are_restored_after_gateway_restart(
         sessions = await client.get("/api/sessions", headers=profile_headers)
         assert sessions.status == 200
         assert [item["id"] for item in (await sessions.json())["data"]] == ["work-session"]
+
+
+@pytest.mark.asyncio
+async def test_connection_header_selects_the_configured_original_hermes_profile_api(
+    gateway_client: TestClient,
+    upstream_client: TestClient,
+):
+    legacy_headers = await configure_work_profile(gateway_client, upstream_client)
+    headers = {
+        key: value
+        for key, value in legacy_headers.items()
+        if key != "X-Nexus-Hermes-Profile"
+    }
+    headers["X-Nexus-Hermes-Connection"] = "work"
+
+    response = await gateway_client.get("/api/sessions", headers=headers)
+
+    assert response.status == 200
+    assert [item["id"] for item in (await response.json())["data"]] == ["work-session"]
 
 
 @pytest.mark.asyncio
