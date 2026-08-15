@@ -1,6 +1,7 @@
 # -*- mode: python ; coding: utf-8 -*-
 
 from pathlib import Path
+from PyInstaller.utils.hooks import copy_metadata
 
 project_root = Path(SPECPATH)
 web_root = project_root / "nexus_gateway" / "web"
@@ -13,7 +14,7 @@ a = Analysis(
         (str(web_root / "index.html"), "nexus_gateway/web"),
         (str(web_root / "app.js"), "nexus_gateway/web"),
         (str(web_root / "styles.css"), "nexus_gateway/web"),
-    ],
+    ] + copy_metadata("edge-tts"),
     hiddenimports=[],
     hookspath=[],
     hooksconfig={},
@@ -21,6 +22,7 @@ a = Analysis(
     excludes=[],
     noarchive=False,
     optimize=1,
+    module_collection_mode={"edge_tts": "py"},
 )
 pyz = PYZ(a.pure)
 

@@ -180,6 +180,10 @@ def _runtime_entries(
         "runtime/nexus-gateway/_internal/nexus_gateway/web/styles.css": TarEntry(
             (ROOT / "gateway" / "nexus_gateway" / "web" / "styles.css").read_bytes()
         ),
+        "runtime/nexus-gateway/_internal/edge_tts/communicate.py": TarEntry(b"# modifiable edge-tts source\n"),
+        "runtime/nexus-gateway/_internal/edge_tts-7.2.7.dist-info/licenses/LICENSE": TarEntry(
+            b"GNU LESSER GENERAL PUBLIC LICENSE\nThe MIT License\n"
+        ),
     }
     for name in missing or set():
         files.pop(name, None)
@@ -292,9 +296,9 @@ def test_fnos_manifest_desktop_and_icons_are_consistent() -> None:
         (ROOT / "gateway" / "nexus_gateway" / "__init__.py").read_text(encoding="utf-8"),
     ).group(1)
 
-    assert gateway_version == "0.1.10"
+    assert gateway_version == "0.1.17"
     assert manifest["appname"] == "nexus-gateway"
-    assert manifest["version"] == "0.1.10"
+    assert manifest["version"] == "0.1.17"
     assert manifest["version"] == gateway_version
     assert manifest["source"] == "thirdparty"
     assert manifest["platform"] == "all"
@@ -452,6 +456,14 @@ def test_fnos_launcher_applies_partial_configuration_without_erasing_values(
     module.apply_pending_setup()
     before_account = json.loads((tmp_path / "account.json").read_text(encoding="utf-8"))
     before_config = json.loads((tmp_path / "config.json").read_text(encoding="utf-8"))
+    before_config["openai_asr"] = {
+        "enabled": True,
+        "base_url": "https://asr.example/v1",
+        "api_key": "test-asr-key",
+        "model": "whisper-test",
+    }
+    before_config["hermes_profiles"] = [{"id": "work"}]
+    (tmp_path / "config.json").write_text(json.dumps(before_config), encoding="utf-8")
 
     replacements = {
         "username": "operator",
@@ -481,6 +493,8 @@ def test_fnos_launcher_applies_partial_configuration_without_erasing_values(
         assert after_config["hermes_api_url"] == before_config["hermes_api_url"]
     else:
         assert after_config == before_config
+    assert after_config["openai_asr"] == before_config["openai_asr"]
+    assert after_config["hermes_profiles"] == before_config["hermes_profiles"]
 
 
 @pytest.mark.parametrize("invalid_revision", [True, 0, -1, 1.5, "1.5", "not-an-integer"])
@@ -684,6 +698,8 @@ def test_fnos_build_and_workflows_export_native_runtime_directories() -> None:
     assert "find /runtime -type l" in dockerfile
     assert "--help" in dockerfile
     assert "fnos_launcher.py" in spec
+    assert 'copy_metadata("edge-tts")' in spec
+    assert 'module_collection_mode={"edge_tts": "py"}' in spec
 
     for path in workflows:
         workflow = path.read_text(encoding="utf-8")
@@ -786,7 +802,7 @@ def test_fnos_verifier_accepts_self_contained_native_packages(tmp_path: Path, ar
     digest = hashlib.sha256(fpk.read_bytes()).hexdigest()
     checksum = tmp_path / "SHA256SUMS.txt"
     checksum.write_text(
-        "0" * 64 + "  Nexus-Android-0.1.10-release.apk\n" + f"{digest}  {fpk.name}\n",
+        "0" * 64 + "  Nexus-Android-0.1.16-release.apk\n" + f"{digest}  {fpk.name}\n",
         encoding="utf-8",
     )
 
@@ -875,6 +891,6 @@ def test_fnos_verifier_requires_unified_checksum_entry(tmp_path: Path) -> None:
     verifier = _load_verifier()
     fpk = _build_synthetic_fpk(tmp_path, "amd64")
     checksum = tmp_path / "SHA256SUMS.txt"
-    checksum.write_text("0" * 64 + "  Nexus-Android-0.1.10-release.apk\n", encoding="utf-8")
+    checksum.write_text("0" * 64 + "  Nexus-Android-0.1.16-release.apk\n", encoding="utf-8")
     with pytest.raises(verifier.VerificationError, match="does not contain"):
         verifier.verify_package(fpk, checksum)

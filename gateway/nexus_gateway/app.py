@@ -21,6 +21,19 @@ from urllib.parse import quote, urlsplit
 from aiohttp import ClientSession, ClientTimeout, FormData, web
 
 from . import __version__
+from .cloud_asr import (
+    CloudAsrLimits,
+    CloudAsrProvider,
+    cloud_asr_capabilities,
+    cloud_asr_stream,
+    configure_cloud_asr,
+)
+from .openai_asr import (
+    OpenAiAsrConfig,
+    normalize_openai_base_url,
+    normalize_openai_model,
+    transcribe_openai_compatible,
+)
 
 CHUNK_SIZE = 256 * 1024
 IMAGE_MIME_TYPES = {"image/jpeg", "image/png", "image/webp", "image/gif"}
@@ -47,6 +60,11 @@ RUN_TRACKER_KEY = web.AppKey("run_tracker", object)
 EXTERNAL_RUN_OBSERVER_KEY = web.AppKey("external_run_observer", object)
 EXTERNAL_RUN_OBSERVERS_KEY = web.AppKey("external_run_observers", dict)
 TRANSCRIBE_AUDIO_KEY = web.AppKey("transcribe_audio", object)
+SYNTHESIZE_SPEECH_KEY = web.AppKey("synthesize_speech", object)
+SPEECH_SEMAPHORE_KEY = web.AppKey("speech_semaphore", asyncio.Semaphore)
+SPEECH_MAX_AUDIO_BYTES_KEY = web.AppKey("speech_max_audio_bytes", int)
+EPHEMERAL_CLEANUP_TASKS_KEY = web.AppKey("ephemeral_cleanup_tasks", set)
+MANAGED_PATH_GUARD_KEY = web.AppKey("managed_path_guard", object)
 REQUEST_ATTACHMENT_IDS_KEY = web.RequestKey("nexus_attachment_ids", list)
 HERMES_CONNECTION_HEADER = "X-Nexus-Hermes-Connection"
 HERMES_PROFILE_HEADER = "X-Nexus-Hermes-Profile"  # Legacy Nexus clients.
@@ -86,11 +104,36 @@ HERMES_UNAVAILABLE_MESSAGE = _hermes_unavailable_message()
 HERMES_AUTH_FAILED_MESSAGE = (
     "Hermes API Server Key 无效或无权访问，请在 Nexus 配置中检查 Hermes API 地址和 API Server Key"
 )
+HERMES_MODEL_NOT_CONFIGURED_MESSAGE = "Hermes 尚未配置可用的调用模型，请先在 Hermes 中完成模型配置"
 HERMES_AUTH_PROBE_PATHS = ("/health/detailed", "/v1/models", "/api/sessions")
 HERMES_AUTH_PROBE_FALLBACK_STATUSES = {404, 405, 501}
 HERMES_PROBE_TIMEOUT = ClientTimeout(total=10, connect=5)
 HERMES_PROFILE_IDENTITY_CACHE_SECONDS = 30.0
 HERMES_PROFILE_IDENTITY_FAILURE_CACHE_SECONDS = 5.0
+SPEECH_VOICES = {
+    "xiaoxiao": "zh-CN-XiaoxiaoNeural",
+    "xiaoyi": "zh-CN-XiaoyiNeural",
+    "yunxi": "zh-CN-YunxiNeural",
+    "yunjian": "zh-CN-YunjianNeural",
+}
+SPEECH_MAX_CHARS = 600
+SPEECH_MAX_AUDIO_BYTES = 4 * 1024 * 1024
+SPEECH_MAX_CONCURRENCY = 2
+SPEECH_TIMEOUT = ClientTimeout(total=20, connect=6)
+TRANSCRIPTION_TIMEOUT_SECONDS = 90.0
+EXTERNAL_RUN_PROBE_TIMEOUT = ClientTimeout(total=2, connect=1, sock_read=1.5)
+MODEL_CATALOG_TIMEOUT = ClientTimeout(total=20, connect=5, sock_read=18)
+MODEL_CATALOG_ATTEMPTS = 2
+MODEL_LOCK_TIMEOUT = ClientTimeout(total=10, connect=5, sock_read=8)
+MAX_CHAT_ATTACHMENTS = 16
+MAX_CHAT_ATTACHMENT_BYTES = 20 * 1024 * 1024
+ATTACHMENT_SHARE_TTL_SECONDS = 10 * 60
+SSE_EVENT_BUFFER_LIMIT = 1024 * 1024
+EPHEMERAL_CLEANUP_RETRY_DELAYS = (0.0, 0.05, 0.2, 0.5, 1.0)
+TRANSCRIPTION_PROMPT = (
+    "普通话对话，请使用简体中文，并根据语义添加逗号、句号和问号。"
+    "专有名词：Nexus、Hermes、Android、Gateway、API、模型、会话、定时任务。"
+)
 
 
 def _hermes_auth_failed_error() -> dict[str, dict[str, str]]:
@@ -104,6 +147,18 @@ def _hermes_auth_failed_error() -> dict[str, dict[str, str]]:
 
 class HermesUpstreamAuthError(RuntimeError):
     """Raised when Hermes rejects the Gateway's own upstream credentials."""
+
+
+class HermesModelSelectionError(RuntimeError):
+    """Raised when Hermes cannot safely apply a requested session model."""
+
+    def __init__(self, code: str, message: str) -> None:
+        super().__init__(message)
+        self.code = code
+
+
+class SpeechAudioTooLargeError(RuntimeError):
+    """Raised when synthesized audio exceeds the Gateway response limit."""
 
 
 @dataclass
@@ -132,6 +187,7 @@ class GatewayConfig:
     upstream_url: str
     upstream_token: str
     profiles: dict[str, HermesProfileConfig]
+    openai_asr: OpenAiAsrConfig
 
     def profile(self, profile_id: str | None) -> HermesProfileConfig | None:
         normalized = (profile_id or "default").strip() or "default"
@@ -161,11 +217,23 @@ class RunTracker:
     """Own mobile chat runs outside Hermes so upstream stays unmodified."""
 
     SNAPSHOT_LIMIT = 256 * 1024
+    SUBSCRIBER_QUEUE_LIMIT = 16
+    SUBSCRIBERS_PER_SESSION_LIMIT = 1
 
-    def __init__(self, state_file: Path | None = None) -> None:
-        self.state_file = Path(state_file).resolve() if state_file else None
+    def __init__(
+        self,
+        state_file: Path | None = None,
+        path_guard: "_ManagedPathGuard | None" = None,
+    ) -> None:
+        self.state_file = Path(os.path.abspath(os.fspath(state_file))) if state_file else None
+        self.path_guard = (
+            path_guard
+            if path_guard is not None
+            else (_ManagedPathGuard(self.state_file.parent) if self.state_file else None)
+        )
         self.statuses: dict[str, dict[str, Any]] = self._load()
         self.tasks: dict[str, asyncio.Task] = {}
+        self.reservations: set[str] = set()
         self.subscribers: dict[str, set[asyncio.Queue]] = {}
         self.buffers: dict[str, str] = {}
         self.last_persisted: dict[str, float] = {}
@@ -184,10 +252,13 @@ class RunTracker:
             self._save()
 
     def _load(self) -> dict[str, dict[str, Any]]:
-        if self.state_file is None or not self.state_file.is_file():
+        if self.state_file is None or not _path_entry_exists(self.state_file):
             return {}
         try:
-            data = json.loads(self.state_file.read_text(encoding="utf-8"))
+            content = _read_secure_existing_file(self.state_file)
+            if content is None:
+                return {}
+            data = json.loads(content)
             return data if isinstance(data, dict) else {}
         except (OSError, ValueError, TypeError, json.JSONDecodeError):
             return {}
@@ -195,10 +266,11 @@ class RunTracker:
     def _save(self) -> None:
         if self.state_file is None:
             return
-        self.state_file.parent.mkdir(parents=True, exist_ok=True)
-        temp = self.state_file.with_suffix(self.state_file.suffix + ".tmp")
-        temp.write_text(json.dumps(self.statuses, ensure_ascii=False, indent=2), encoding="utf-8")
-        temp.replace(self.state_file)
+        _secure_atomic_write(
+            self.state_file,
+            json.dumps(self.statuses, ensure_ascii=False, indent=2),
+            self.path_guard,
+        )
 
     def status(self, session_id: str) -> dict[str, Any]:
         status = dict(self.statuses.get(session_id) or {
@@ -213,6 +285,22 @@ class RunTracker:
         status.setdefault("source", "nexus_gateway")
         status.setdefault("stoppable", bool(status.get("active")))
         return status
+
+    def reserve(self, session_id: str) -> bool:
+        current = self.tasks.get(session_id)
+        if session_id in self.reservations or (current is not None and not current.done()):
+            return False
+        self.reservations.add(session_id)
+        return True
+
+    def attach(self, session_id: str, task: asyncio.Task) -> None:
+        if session_id not in self.reservations:
+            raise RuntimeError("run reservation is missing")
+        self.tasks[session_id] = task
+        self.reservations.discard(session_id)
+
+    def release_reservation(self, session_id: str) -> None:
+        self.reservations.discard(session_id)
 
     def start(self, session_id: str, run_id: str) -> None:
         self.statuses[session_id] = {
@@ -297,13 +385,27 @@ class RunTracker:
                 self.last_persisted[session_id] = now
                 self._save()
 
-    def publish(self, session_id: str, event: bytes) -> None:
+    async def publish(self, session_id: str, event: bytes) -> None:
         for queue in tuple(self.subscribers.get(session_id, set())):
-            queue.put_nowait(event)
+            try:
+                queue.put_nowait(event)
+            except asyncio.QueueFull:
+                self.unsubscribe(session_id, queue)
+                while not queue.empty():
+                    queue.get_nowait()
+                payload = json.dumps({
+                    "code": "slow_client",
+                    "message": "客户端接收响应过慢，流已断开",
+                }, ensure_ascii=False)
+                queue.put_nowait(f"event: error\ndata: {payload}\n\n".encode("utf-8"))
+                queue.put_nowait(None)
 
     def subscribe(self, session_id: str) -> asyncio.Queue:
-        queue: asyncio.Queue = asyncio.Queue()
-        self.subscribers.setdefault(session_id, set()).add(queue)
+        queues = self.subscribers.setdefault(session_id, set())
+        if len(queues) >= self.SUBSCRIBERS_PER_SESSION_LIMIT:
+            raise RuntimeError("session subscriber limit reached")
+        queue: asyncio.Queue = asyncio.Queue(maxsize=self.SUBSCRIBER_QUEUE_LIMIT)
+        queues.add(queue)
         return queue
 
     def unsubscribe(self, session_id: str, queue: asyncio.Queue) -> None:
@@ -312,6 +414,29 @@ class RunTracker:
             queues.discard(queue)
             if not queues:
                 self.subscribers.pop(session_id, None)
+
+    async def cancel_all(self) -> None:
+        current_task = asyncio.current_task()
+        pending = list({
+            task
+            for task in tuple(self.tasks.values())
+            if not task.done() and task is not current_task
+        })
+        for task in pending:
+            task.cancel()
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
+        for session_id, task in tuple(self.tasks.items()):
+            if task.done():
+                self.tasks.pop(session_id, None)
+        self.reservations.clear()
+        for session_id, status in tuple(self.statuses.items()):
+            if status.get("active"):
+                self.finish(
+                    session_id,
+                    "interrupted",
+                    "Nexus Gateway stopped; Hermes remote run status is unknown.",
+                )
 
 
 class ExternalRunObserver:
@@ -438,7 +563,11 @@ class ExternalRunObserver:
         session = app[HTTP_SESSION_KEY]
         headers = {"Authorization": f"Bearer {selected.upstream_token}"}
         try:
-            async with session.get(f"{selected.upstream_url}{path}", headers=headers) as response:
+            async with session.get(
+                f"{selected.upstream_url}{path}",
+                headers=headers,
+                timeout=EXTERNAL_RUN_PROBE_TIMEOUT,
+            ) as response:
                 if response.status != 200:
                     return None
                 payload = await response.json(content_type=None)
@@ -630,9 +759,11 @@ class MediaStore:
         max_upload_bytes: int,
         max_total_storage_bytes: int = 10 * 1024 * 1024 * 1024,
         min_free_disk_bytes: int = 512 * 1024 * 1024,
+        path_guard: "_ManagedPathGuard | None" = None,
     ) -> None:
-        self.root = Path(root).resolve()
-        self.root.mkdir(parents=True, exist_ok=True)
+        lexical_root = Path(os.path.abspath(os.fspath(root)))
+        self.path_guard = path_guard or _ManagedPathGuard(lexical_root.parent)
+        self.root = self.path_guard.ensure_directory(lexical_root, pin=True)
         self.max_upload_bytes = max(1, max_upload_bytes)
         self.max_total_storage_bytes = max(0, max_total_storage_bytes)
         self.min_free_disk_bytes = max(0, min_free_disk_bytes)
@@ -678,10 +809,13 @@ class MediaStore:
         if not _valid_file_id(file_id):
             return None
         for metadata in self._metadata_candidates(file_id):
-            if not metadata.is_file():
+            if not _path_entry_exists(metadata):
                 continue
             try:
-                return StoredFile(**json.loads(metadata.read_text(encoding="utf-8")))
+                content = _read_secure_existing_file(metadata)
+                if content is None:
+                    continue
+                return StoredFile(**json.loads(content))
             except (OSError, TypeError, ValueError, json.JSONDecodeError):
                 continue
         return None
@@ -690,7 +824,18 @@ class MediaStore:
         item = self._read_metadata(file_id)
         if item is None:
             return None
-        path = Path(item.server_path).resolve()
+        stored_path = Path(item.server_path)
+        try:
+            stored_stat = stored_path.lstat()
+        except OSError:
+            return None
+        if (
+            not stat.S_ISREG(stored_stat.st_mode)
+            or stored_path.is_symlink()
+            or stored_stat.st_nlink != 1
+        ):
+            return None
+        path = stored_path.resolve()
         try:
             path.relative_to(self.root)
         except ValueError:
@@ -706,7 +851,10 @@ class MediaStore:
             if metadata.name == "session_media.json":
                 continue
             try:
-                item = StoredFile(**json.loads(metadata.read_text(encoding="utf-8")))
+                content = _read_secure_existing_file(metadata)
+                if content is None:
+                    continue
+                item = StoredFile(**json.loads(content))
             except (OSError, TypeError, ValueError, json.JSONDecodeError):
                 continue
             if category is not None and item.category != category:
@@ -723,7 +871,14 @@ class MediaStore:
         date = time.strftime("%Y-%m-%d", time.localtime())
         category_dir = "语音" if resolved_category == "audio" else "文件"
         target_dir = self.root / category_dir / date
-        target_dir.mkdir(parents=True, exist_ok=True)
+        try:
+            target_dir = self.path_guard.ensure_directory(target_dir)
+            self.path_guard.verify_directory(self.root)
+        except OSError:
+            raise self._storage_error(
+                "unsafe_storage_path",
+                "Media storage path failed its safety check",
+            )
         file_id = uuid.uuid4().hex
         suffix = Path(clean_name).suffix[:16]
         final_path = target_dir / f"{file_id}{suffix}"
@@ -732,8 +887,29 @@ class MediaStore:
         size = 0
         reserved_bytes = 0
         committed = False
+        upload_directory_descriptor = -1
         try:
-            with temp_path.open("wb") as handle:
+            upload_parent, upload_parent_identity = self.path_guard.verify_write_target(temp_path)
+            upload_flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+            if hasattr(os, "O_BINARY"):
+                upload_flags |= os.O_BINARY
+            use_directory_handle = os.name != "nt" and os.open in os.supports_dir_fd
+            if use_directory_handle:
+                directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+                upload_directory_descriptor = os.open(upload_parent, directory_flags)
+                opened_parent = os.fstat(upload_directory_descriptor)
+                if _DirectoryIdentity(opened_parent.st_dev, opened_parent.st_ino) != upload_parent_identity:
+                    raise OSError("media directory changed before upload")
+                upload_descriptor = os.open(
+                    temp_path.name,
+                    upload_flags,
+                    0o600,
+                    dir_fd=upload_directory_descriptor,
+                )
+            else:
+                self.path_guard.verify_directory(upload_parent, upload_parent_identity)
+                upload_descriptor = os.open(temp_path, upload_flags, 0o600)
+            with os.fdopen(upload_descriptor, "wb") as handle:
                 while True:
                     chunk = await field.read_chunk(size=CHUNK_SIZE)
                     if not chunk:
@@ -762,8 +938,25 @@ class MediaStore:
                 date=date,
             )
             async with self._capacity_lock:
-                temp_path.replace(final_path)
-                self._metadata_path(file_id, target_dir).write_text(json.dumps(asdict(item), ensure_ascii=False, indent=2), encoding="utf-8")
+                self.path_guard.verify_write_target(final_path)
+                self.path_guard.verify_directory(upload_parent, upload_parent_identity)
+                if use_directory_handle:
+                    opened_parent = os.fstat(upload_directory_descriptor)
+                    if _DirectoryIdentity(opened_parent.st_dev, opened_parent.st_ino) != upload_parent_identity:
+                        raise OSError("media directory changed before upload commit")
+                    os.replace(
+                        temp_path.name,
+                        final_path.name,
+                        src_dir_fd=upload_directory_descriptor,
+                        dst_dir_fd=upload_directory_descriptor,
+                    )
+                else:
+                    os.replace(temp_path, final_path)
+                _secure_atomic_write(
+                    self._metadata_path(file_id, target_dir),
+                    json.dumps(asdict(item), ensure_ascii=False, indent=2),
+                    self.path_guard,
+                )
                 self._reserved_upload_bytes = max(0, self._reserved_upload_bytes - reserved_bytes)
                 reserved_bytes = 0
                 committed = True
@@ -771,18 +964,32 @@ class MediaStore:
         finally:
             if reserved_bytes:
                 await asyncio.shield(self._release_upload_bytes(reserved_bytes))
-            temp_path.unlink(missing_ok=True)
+            if upload_directory_descriptor != -1:
+                try:
+                    os.unlink(temp_path.name, dir_fd=upload_directory_descriptor)
+                except FileNotFoundError:
+                    pass
+                finally:
+                    os.close(upload_directory_descriptor)
+            else:
+                try:
+                    self.path_guard.unlink_file(temp_path)
+                except OSError:
+                    pass
             if not committed:
-                final_path.unlink(missing_ok=True)
+                try:
+                    self.path_guard.unlink_file(final_path)
+                except OSError:
+                    pass
 
     def delete(self, file_id: str) -> bool:
         found = self.get(file_id)
         if found is None:
             return False
         _, path = found
-        path.unlink(missing_ok=True)
+        self.path_guard.unlink_file(path)
         for metadata in self._metadata_candidates(file_id):
-            metadata.unlink(missing_ok=True)
+            self.path_guard.unlink_file(metadata)
         return True
 
     def record_session_media(
@@ -801,20 +1008,35 @@ class MediaStore:
             return
         index_path = self.root / "session_media.json"
         try:
-            index = json.loads(index_path.read_text(encoding="utf-8")) if index_path.exists() else {}
-        except (OSError, ValueError, json.JSONDecodeError):
+            if _path_entry_exists(index_path):
+                content = _read_secure_existing_file(index_path)
+                if content is None:
+                    raise OSError("session media index is not a regular single-link file")
+                index = json.loads(content)
+            else:
+                index = {}
+        except (ValueError, json.JSONDecodeError):
             index = {}
         index.setdefault(session_id, []).append({
             "marker": marker,
             "file_ids": [item.id for item in items],
             "attachment_kinds": attachment_kinds or {},
         })
-        index_path.write_text(json.dumps(index, ensure_ascii=False, indent=2), encoding="utf-8")
+        _secure_atomic_write(
+            index_path,
+            json.dumps(index, ensure_ascii=False, indent=2),
+            self.path_guard,
+        )
 
     def discard_last_session_media(self, session_id: str, file_ids: list[str]) -> None:
         index_path = self.root / "session_media.json"
         try:
-            index = json.loads(index_path.read_text(encoding="utf-8")) if index_path.exists() else {}
+            if not _path_entry_exists(index_path):
+                return
+            content = _read_secure_existing_file(index_path)
+            if content is None:
+                return
+            index = json.loads(content)
         except (OSError, ValueError, json.JSONDecodeError):
             return
         entries = index.get(session_id)
@@ -831,7 +1053,11 @@ class MediaStore:
             index[session_id] = entries
         else:
             index.pop(session_id, None)
-        index_path.write_text(json.dumps(index, ensure_ascii=False, indent=2), encoding="utf-8")
+        _secure_atomic_write(
+            index_path,
+            json.dumps(index, ensure_ascii=False, indent=2),
+            self.path_guard,
+        )
 
     @staticmethod
     def _visible_message_text(content: Any) -> str:
@@ -863,7 +1089,10 @@ class MediaStore:
     def enrich_session_messages(self, session_id: str, payload: dict[str, Any]) -> dict[str, Any]:
         index_path = self.root / "session_media.json"
         try:
-            raw_entries = json.loads(index_path.read_text(encoding="utf-8")).get(session_id, [])
+            content = _read_secure_existing_file(index_path)
+            if content is None:
+                return payload
+            raw_entries = json.loads(content).get(session_id, [])
         except (OSError, ValueError, json.JSONDecodeError):
             return payload
         entries = []
@@ -1006,9 +1235,54 @@ def _decode_token(token: str, secret: str) -> tuple[str, int] | None:
         return None
 
 
+def _attachment_share_signature(file_id: str, expires_at: int, secret: str) -> str:
+    payload = f"nexus-attachment:{file_id}:{expires_at}"
+    return hmac.new(secret.encode(), payload.encode(), hashlib.sha256).hexdigest()
+
+
+def _valid_attachment_share_request(request: web.Request) -> bool:
+    if request.method != "GET":
+        return False
+    config = request.app[GATEWAY_CONFIG_KEY]
+    if not config.initialized or len(config.session_secret) < 16:
+        return False
+    match = re.fullmatch(r"/api/files/([0-9a-f]{32})", request.path)
+    if match is None:
+        return False
+    try:
+        expires_at = int(request.query.get("expires", ""))
+    except ValueError:
+        return False
+    now = int(time.time())
+    if expires_at <= now or expires_at > now + ATTACHMENT_SHARE_TTL_SECONDS:
+        return False
+    supplied = request.query.get("signature", "")
+    expected = _attachment_share_signature(
+        match.group(1),
+        expires_at,
+        config.session_secret,
+    )
+    return hmac.compare_digest(supplied, expected)
+
+
+def _attachment_share_url(request: web.Request, file_id: str) -> str:
+    expires_at = int(time.time()) + ATTACHMENT_SHARE_TTL_SECONDS
+    signature = _attachment_share_signature(
+        file_id,
+        expires_at,
+        request.app[GATEWAY_CONFIG_KEY].session_secret,
+    )
+    forwarded_scheme = request.headers.get("X-Forwarded-Proto", "").split(",", 1)[0].strip().lower()
+    scheme = forwarded_scheme if forwarded_scheme in {"http", "https"} else request.scheme
+    return (
+        f"{scheme}://{request.host}/api/files/{file_id}"
+        f"?expires={expires_at}&signature={signature}"
+    )
+
+
 @web.middleware
 async def device_auth(request: web.Request, handler):
-    if request.path in PUBLIC_PATHS:
+    if request.path in PUBLIC_PATHS or _valid_attachment_share_request(request):
         return await handler(request)
     if not request.app[GATEWAY_CONFIG_KEY].initialized:
         return web.json_response(
@@ -1028,6 +1302,9 @@ async def _create_client_session(app: web.Application) -> None:
 
 
 async def _close_client_session(app: web.Application) -> None:
+    tracker = app.get(RUN_TRACKER_KEY)
+    if isinstance(tracker, RunTracker):
+        await tracker.cancel_all()
     session = app[HTTP_SESSION_KEY]
     if not session.closed:
         await session.close()
@@ -1376,7 +1653,14 @@ async def login(request: web.Request) -> web.Response:
     limiter.record_success(client_ip)
     if auth_state.legacy_password:
         salt, password_hash = _hash_password(password)
-        _write_credentials(request.app[CREDENTIALS_PATH_KEY], username, salt, password_hash, auth_state.revision)
+        _write_credentials(
+            request.app[CREDENTIALS_PATH_KEY],
+            username,
+            salt,
+            password_hash,
+            auth_state.revision,
+            request.app[MANAGED_PATH_GUARD_KEY],
+        )
         auth_state.password_salt = salt
         auth_state.password_hash = password_hash
         auth_state.legacy_password = ""
@@ -1388,14 +1672,21 @@ async def login(request: web.Request) -> web.Response:
     })
 
 
-def _write_credentials(path: Path, username: str, password_salt: str, password_hash: str, revision: int) -> None:
+def _write_credentials(
+    path: Path,
+    username: str,
+    password_salt: str,
+    password_hash: str,
+    revision: int,
+    path_guard: "_ManagedPathGuard | None" = None,
+) -> None:
     _secure_atomic_write(path, json.dumps({
         "username": username,
         "password_scheme": "scrypt",
         "password_salt": password_salt,
         "password_hash": password_hash,
         "revision": revision,
-    }, ensure_ascii=False, indent=2))
+    }, ensure_ascii=False, indent=2), path_guard)
 
 
 def _write_config(
@@ -1404,6 +1695,8 @@ def _write_config(
     hermes_api_token: str,
     session_secret: str,
     profiles: dict[str, HermesProfileConfig] | None = None,
+    path_guard: "_ManagedPathGuard | None" = None,
+    openai_asr: OpenAiAsrConfig | None = None,
 ) -> None:
     payload: dict[str, Any] = {
         "hermes_api_url": hermes_api_url.rstrip("/"),
@@ -1421,7 +1714,18 @@ def _write_config(
             }
             for profile in configured_profiles.values()
         ]
-    _secure_atomic_write(path, json.dumps(payload, ensure_ascii=False, indent=2))
+    if openai_asr is not None and (openai_asr.base_url or openai_asr.api_key):
+        payload["openai_asr"] = {
+            "enabled": openai_asr.enabled,
+            "base_url": openai_asr.base_url,
+            "api_key": openai_asr.api_key,
+            "model": openai_asr.model,
+        }
+    _secure_atomic_write(
+        path,
+        json.dumps(payload, ensure_ascii=False, indent=2),
+        path_guard,
+    )
 
 
 async def setup(request: web.Request) -> web.Response:
@@ -1483,7 +1787,7 @@ async def setup(request: web.Request) -> web.Response:
                 "hermes_api_url": hermes_api_url.rstrip("/"),
                 "hermes_api_token": hermes_api_token,
                 "session_secret": session_secret,
-            }, ensure_ascii=False, indent=2))
+            }, ensure_ascii=False, indent=2), request.app[MANAGED_PATH_GUARD_KEY])
             password_salt, password_hash = _hash_password(password)
             credentials_identity = _secure_exclusive_write(credentials_path, json.dumps({
                 "username": username,
@@ -1491,11 +1795,22 @@ async def setup(request: web.Request) -> web.Response:
                 "password_salt": password_salt,
                 "password_hash": password_hash,
                 "revision": 1,
-            }, ensure_ascii=False, indent=2))
-            token_path.unlink()
+            }, ensure_ascii=False, indent=2), request.app[MANAGED_PATH_GUARD_KEY])
+            request.app[MANAGED_PATH_GUARD_KEY].unlink_file(
+                token_path,
+                missing_ok=False,
+            )
         except Exception:
-            _unlink_owned_file(config_path, config_identity)
-            _unlink_owned_file(credentials_path, credentials_identity)
+            _unlink_owned_file(
+                config_path,
+                config_identity,
+                request.app[MANAGED_PATH_GUARD_KEY],
+            )
+            _unlink_owned_file(
+                credentials_path,
+                credentials_identity,
+                request.app[MANAGED_PATH_GUARD_KEY],
+            )
             raise
 
         config.session_secret = session_secret
@@ -1529,7 +1844,14 @@ async def change_account(request: web.Request) -> web.Response:
         return web.json_response({"error": {"code": "weak_password", "message": "新密码至少需要 8 个字符"}}, status=400)
     revision = auth_state.revision + 1
     password_salt, password_hash = _hash_password(password)
-    _write_credentials(request.app[CREDENTIALS_PATH_KEY], username, password_salt, password_hash, revision)
+    _write_credentials(
+        request.app[CREDENTIALS_PATH_KEY],
+        username,
+        password_salt,
+        password_hash,
+        revision,
+        request.app[MANAGED_PATH_GUARD_KEY],
+    )
     auth_state.username = username
     auth_state.password_salt = password_salt
     auth_state.password_hash = password_hash
@@ -1552,6 +1874,78 @@ async def admin_hermes_config(request: web.Request) -> web.Response:
             _profile_public_payload(profile, admin=True)
             for profile in config.profiles.values()
         ],
+    })
+
+
+async def admin_asr_config(request: web.Request) -> web.Response:
+    config = request.app[GATEWAY_CONFIG_KEY].openai_asr
+    return web.json_response({
+        "enabled": config.enabled,
+        "base_url": config.base_url,
+        "model": config.model,
+        "key_configured": bool(config.api_key),
+    })
+
+
+async def update_asr_config(request: web.Request) -> web.Response:
+    try:
+        body = await request.json()
+    except (json.JSONDecodeError, ValueError):
+        return web.json_response({"error": {"code": "invalid_json", "message": "请求 JSON 无效"}}, status=400)
+    if not _verify_password(str(body.get("current_password", "")), request.app[AUTH_STATE_KEY]):
+        return web.json_response({"error": {"code": "invalid_current_password", "message": "当前密码错误"}}, status=401)
+
+    enabled = body.get("enabled") is True
+    async with request.app[SETUP_LOCK_KEY]:
+        gateway_config = request.app[GATEWAY_CONFIG_KEY]
+        current = gateway_config.openai_asr
+        supplied_url = str(body.get("base_url", "")).strip()
+        base_url = normalize_openai_base_url(supplied_url) if supplied_url else current.base_url
+        supplied_model = str(body.get("model", "")).strip()
+        model = normalize_openai_model(supplied_model) if supplied_model else current.model
+        supplied_key = str(body.get("api_key", "")).strip()
+        if supplied_url and base_url is None:
+            return web.json_response({"error": {
+                "code": "invalid_online_asr_url",
+                "message": "在线 ASR 地址必须是有效的 http:// 或 https:// 地址",
+            }}, status=400)
+        if supplied_model and model is None:
+            return web.json_response({"error": {
+                "code": "invalid_online_asr_model",
+                "message": "在线 ASR 模型名称无效",
+            }}, status=400)
+        if not supplied_key and base_url != current.base_url:
+            return web.json_response({"error": {
+                "code": "missing_online_asr_key",
+                "message": "修改在线 ASR 地址时必须重新填写 API Key",
+            }}, status=400)
+        candidate = OpenAiAsrConfig(
+            enabled=enabled,
+            base_url=base_url or "",
+            api_key=supplied_key or current.api_key,
+            model=model or "whisper-1",
+        )
+        if enabled and not candidate.configured:
+            return web.json_response({"error": {
+                "code": "incomplete_online_asr_config",
+                "message": "启用在线 ASR 前请填写地址、API Key 和模型",
+            }}, status=400)
+        _write_config(
+            request.app[CONFIG_PATH_KEY],
+            gateway_config.upstream_url,
+            gateway_config.upstream_token,
+            gateway_config.session_secret,
+            gateway_config.profiles,
+            request.app[MANAGED_PATH_GUARD_KEY],
+            candidate,
+        )
+        gateway_config.openai_asr = candidate
+    return web.json_response({
+        "status": "ok",
+        "enabled": candidate.enabled,
+        "base_url": candidate.base_url,
+        "model": candidate.model,
+        "key_configured": bool(candidate.api_key),
     })
 
 
@@ -1747,6 +2141,8 @@ async def update_hermes_config(request: web.Request) -> web.Response:
             hermes_api_token,
             config.session_secret,
             candidate_profiles,
+            request.app[MANAGED_PATH_GUARD_KEY],
+            config.openai_asr,
         )
         config.upstream_url = hermes_api_url
         config.upstream_token = hermes_api_token
@@ -1904,6 +2300,9 @@ async def _transcribe_via_hermes_api(
     form = FormData()
     try:
         with Path(item.server_path).open("rb") as handle:
+            form.add_field("language", "zh")
+            form.add_field("prompt", TRANSCRIPTION_PROMPT)
+            form.add_field("temperature", "0")
             form.add_field(
                 "file",
                 handle,
@@ -1951,44 +2350,252 @@ async def _transcribe_via_hermes_api(
     }
 
 
+def _track_ephemeral_cleanup_task(app: web.Application, task: asyncio.Task) -> None:
+    tasks = app.get(EPHEMERAL_CLEANUP_TASKS_KEY)
+    if tasks is None:
+        tasks = set()
+        app[EPHEMERAL_CLEANUP_TASKS_KEY] = tasks
+    tasks.add(task)
+    task.add_done_callback(tasks.discard)
+
+
+async def _finish_transcription_and_cleanup(
+    app: web.Application,
+    worker: asyncio.Task | None,
+    file_id: str | None,
+) -> None:
+    if worker is not None:
+        try:
+            await asyncio.shield(worker)
+        except BaseException:
+            pass
+    if file_id is None:
+        return
+    store: MediaStore = app[MEDIA_STORE_KEY]
+    for delay in EPHEMERAL_CLEANUP_RETRY_DELAYS:
+        if delay:
+            await asyncio.sleep(delay)
+        try:
+            if store.delete(file_id) or store.get(file_id) is None:
+                return
+        except OSError:
+            continue
+
+
+def _defer_transcription_cleanup(
+    app: web.Application,
+    worker: asyncio.Task | None,
+    file_id: str | None,
+) -> None:
+    task = asyncio.create_task(_finish_transcription_and_cleanup(app, worker, file_id))
+    _track_ephemeral_cleanup_task(app, task)
+
+
+def _delete_ephemeral_or_retry(app: web.Application, file_id: str) -> None:
+    try:
+        if app[MEDIA_STORE_KEY].delete(file_id):
+            return
+    except OSError:
+        pass
+    _defer_transcription_cleanup(app, None, file_id)
+
+
 async def transcribe_upload(request: web.Request) -> web.Response:
     try:
         reader = await request.multipart()
     except (AssertionError, ValueError):
         return web.json_response({"error": {"code": "multipart_required", "message": "请上传录音文件"}}, status=400)
+    ephemeral = False
+    item: StoredFile | None = None
     async for field in reader:
-        if field.name != "file" or not field.filename:
+        if field.name == "ephemeral":
+            ephemeral = (await field.text()).strip().casefold() in {"1", "true", "yes"}
+            continue
+        if field.name != "file" or not field.filename or item is not None:
             continue
         item = await request.app[MEDIA_STORE_KEY].save(field, category="audio")
-        if not item.mime_type.startswith("audio/"):
-            request.app[MEDIA_STORE_KEY].delete(item.id)
-            return web.json_response({"error": {"code": "audio_required", "message": "上传内容不是音频"}}, status=400)
+    if item is None:
+        return web.json_response({"error": {"code": "file_required", "message": "缺少录音文件"}}, status=400)
+    if not item.mime_type.startswith("audio/"):
+        request.app[MEDIA_STORE_KEY].delete(item.id)
+        return web.json_response({"error": {"code": "audio_required", "message": "上传内容不是音频"}}, status=400)
+
+    file_payload = item.public_dict()
+    worker_task: asyncio.Task | None = None
+    cleanup_deferred = False
+    try:
         transcriber = request.app[TRANSCRIBE_AUDIO_KEY]
         try:
             if transcriber is None:
-                result = await _transcribe_via_hermes_api(request.app, _request_profile(request), item)
+                online_config = request.app[GATEWAY_CONFIG_KEY].openai_asr
+                if online_config.configured:
+                    transcription = transcribe_openai_compatible(
+                        request.app[HTTP_SESSION_KEY],
+                        online_config,
+                        path=item.server_path,
+                        filename=item.name,
+                        mime_type=item.mime_type,
+                        prompt=TRANSCRIPTION_PROMPT,
+                    )
+                else:
+                    transcription = _transcribe_via_hermes_api(request.app, _request_profile(request), item)
             else:
-                result = await asyncio.to_thread(transcriber, item.server_path)
+                worker_task = asyncio.create_task(asyncio.to_thread(transcriber, item.server_path))
+                transcription = asyncio.shield(worker_task)
+            result = await asyncio.wait_for(
+                transcription,
+                timeout=TRANSCRIPTION_TIMEOUT_SECONDS,
+            )
+        except asyncio.CancelledError:
+            if worker_task is not None:
+                _defer_transcription_cleanup(
+                    request.app,
+                    worker_task,
+                    item.id if ephemeral else None,
+                )
+                cleanup_deferred = ephemeral
+            raise
+        except asyncio.TimeoutError:
+            if worker_task is not None:
+                _defer_transcription_cleanup(
+                    request.app,
+                    worker_task,
+                    item.id if ephemeral else None,
+                )
+                cleanup_deferred = ephemeral
+            return web.json_response({
+                "error": {
+                    "code": "transcription_timeout",
+                    "message": "语音转写超时，请重试",
+                },
+                "file": file_payload,
+            }, status=504)
         except HermesUpstreamAuthError:
             return web.json_response({
                 **_hermes_auth_failed_error(),
-                "file": item.public_dict(),
+                "file": file_payload,
             }, status=502)
+        except Exception:
+            return web.json_response({
+                "error": {
+                    "code": "transcription_failed",
+                    "message": "语音转写失败",
+                },
+                "file": file_payload,
+            }, status=503)
         if not result.get("success"):
             return web.json_response({
                 "error": {
                     "code": str(result.get("code") or "transcription_failed"),
                     "message": str(result.get("message") or "语音转写失败"),
                 },
-                "file": item.public_dict(),
+                "file": file_payload,
             }, status=int(result.get("status") or 503))
         return web.json_response({
             "object": "nexus.audio.transcription",
             "transcript": str(result.get("transcript", "")).strip(),
             "provider": result.get("provider"),
-            "file": item.public_dict(),
+            "file": file_payload,
         })
-    return web.json_response({"error": {"code": "file_required", "message": "缺少录音文件"}}, status=400)
+    finally:
+        if ephemeral and not cleanup_deferred:
+            _delete_ephemeral_or_retry(request.app, item.id)
+
+
+async def _synthesize_via_edge_tts(
+    text: str,
+    voice: str,
+    max_audio_bytes: int = SPEECH_MAX_AUDIO_BYTES,
+) -> bytes:
+    try:
+        import edge_tts
+    except ImportError as error:
+        raise RuntimeError("Gateway 未安装语音合成组件") from error
+
+    audio = bytearray()
+    communicator = edge_tts.Communicate(text=text, voice=voice)
+    async for chunk in communicator.stream():
+        if chunk.get("type") == "audio":
+            data = chunk.get("data") or b""
+            if len(audio) + len(data) > max_audio_bytes:
+                raise SpeechAudioTooLargeError("synthesized audio exceeds the response limit")
+            audio.extend(data)
+    if not audio:
+        raise RuntimeError("语音服务没有返回音频")
+    return bytes(audio)
+
+
+async def synthesize_speech(request: web.Request) -> web.Response:
+    try:
+        body = await request.json()
+    except (json.JSONDecodeError, ValueError):
+        return web.json_response(
+            {"error": {"code": "invalid_json", "message": "请求 JSON 无效"}},
+            status=400,
+        )
+    if not isinstance(body, dict):
+        body = {}
+    text = re.sub(r"\s+", " ", str(body.get("text") or "")).strip()
+    if not text:
+        return web.json_response(
+            {"error": {"code": "speech_text_required", "message": "缺少要朗读的文本"}},
+            status=400,
+        )
+    if len(text) > SPEECH_MAX_CHARS:
+        return web.json_response(
+            {"error": {"code": "speech_text_too_long", "message": "单段朗读文本过长"}},
+            status=413,
+        )
+    voice_id = str(body.get("voice") or "xiaoxiao").strip().casefold()
+    voice = SPEECH_VOICES.get(voice_id)
+    if voice is None:
+        return web.json_response(
+            {"error": {"code": "unsupported_voice", "message": "不支持该音色"}},
+            status=400,
+        )
+    synthesizer = request.app[SYNTHESIZE_SPEECH_KEY]
+    semaphore = request.app[SPEECH_SEMAPHORE_KEY]
+    max_audio_bytes = request.app[SPEECH_MAX_AUDIO_BYTES_KEY]
+
+    async def synthesize() -> bytes:
+        async with semaphore:
+            if synthesizer is None:
+                return await _synthesize_via_edge_tts(text, voice, max_audio_bytes)
+            result = synthesizer(text, voice)
+            return await result if asyncio.iscoroutine(result) else result
+
+    try:
+        audio = await asyncio.wait_for(synthesize(), timeout=SPEECH_TIMEOUT.total)
+    except asyncio.TimeoutError:
+        return web.json_response(
+            {"error": {"code": "speech_timeout", "message": "语音合成超时，请重试"}},
+            status=504,
+        )
+    except SpeechAudioTooLargeError:
+        return web.json_response(
+            {"error": {"code": "speech_response_too_large", "message": "Speech audio response is too large"}},
+            status=502,
+        )
+    except Exception:
+        return web.json_response(
+            {"error": {"code": "speech_failed", "message": "语音合成暂不可用"}},
+            status=503,
+        )
+    if not isinstance(audio, (bytes, bytearray)) or not audio:
+        return web.json_response(
+            {"error": {"code": "speech_failed", "message": "语音服务没有返回音频"}},
+            status=503,
+        )
+    if len(audio) > max_audio_bytes:
+        return web.json_response(
+            {"error": {"code": "speech_response_too_large", "message": "Speech audio response is too large"}},
+            status=502,
+        )
+    return web.Response(
+        body=bytes(audio),
+        content_type="audio/mpeg",
+        headers={"Cache-Control": "no-store", "X-Nexus-Voice": voice_id},
+    )
 
 
 async def file_metadata(request: web.Request) -> web.Response:
@@ -2045,6 +2652,7 @@ def _attachment_part(
     path: Path,
     kind: str | None = None,
     mobile_client: bool = False,
+    download_url: str | None = None,
 ) -> dict[str, Any]:
     if item.mime_type in IMAGE_MIME_TYPES and kind != "file":
         encoded = base64.b64encode(path.read_bytes()).decode("ascii")
@@ -2052,6 +2660,11 @@ def _attachment_part(
     note = f"附件：{item.name}\n类型：{item.mime_type}\n大小：{item.size} 字节"
     if mobile_client:
         note += "\n来源：Nexus Android 手机端附件"
+    if download_url:
+        note += (
+            f"\n下载地址：{download_url}"
+            "\n读取说明：这是短时有效的只读附件地址；请立即通过 HTTP/Web 工具读取实际文件内容。"
+        )
     if item.mime_type in TEXT_MIME_TYPES and item.size <= 512 * 1024:
         try:
             text = path.read_text(encoding="utf-8")
@@ -2073,6 +2686,30 @@ async def _prepare_chat_body(
         raise web.HTTPBadRequest(text=json.dumps({"error": {"code": "invalid_attachment_ids", "message": "attachment_ids 必须是数组"}}, ensure_ascii=False), content_type="application/json")
     if not attachment_ids:
         return body
+    if not isinstance(attachment_kinds, dict):
+        raise web.HTTPBadRequest(text=json.dumps({"error": {"code": "invalid_attachment_kinds", "message": "attachment_kinds 必须是对象"}}, ensure_ascii=False), content_type="application/json")
+    if len(attachment_ids) > MAX_CHAT_ATTACHMENTS:
+        raise web.HTTPBadRequest(text=json.dumps({"error": {"code": "too_many_attachments", "message": f"单条消息最多包含 {MAX_CHAT_ATTACHMENTS} 个附件"}}, ensure_ascii=False), content_type="application/json")
+
+    normalized_ids = [str(file_id) for file_id in attachment_ids]
+    if len(set(normalized_ids)) != len(normalized_ids):
+        raise web.HTTPBadRequest(text=json.dumps({"error": {"code": "duplicate_attachment_id", "message": "附件列表包含重复文件"}}, ensure_ascii=False), content_type="application/json")
+
+    resolved_attachments: list[tuple[StoredFile, Path]] = []
+    total_attachment_bytes = 0
+    for file_id in normalized_ids:
+        found = request.app[MEDIA_STORE_KEY].get(file_id)
+        if found is None:
+            raise web.HTTPBadRequest(text=json.dumps({"error": {"code": "attachment_not_found", "message": f"附件不存在：{file_id}"}}, ensure_ascii=False), content_type="application/json")
+        total_attachment_bytes += found[0].size
+        if total_attachment_bytes > MAX_CHAT_ATTACHMENT_BYTES:
+            raise web.HTTPRequestEntityTooLarge(
+                max_size=MAX_CHAT_ATTACHMENT_BYTES,
+                actual_size=total_attachment_bytes,
+                text=json.dumps({"error": {"code": "attachments_too_large", "message": "附件总大小超过单条消息限制"}}, ensure_ascii=False),
+                content_type="application/json",
+            )
+        resolved_attachments.append(found)
 
     current_message = body.get("message", "")
     parts: list[dict[str, Any]] = []
@@ -2080,18 +2717,15 @@ async def _prepare_chat_body(
         parts.append({"type": "text", "text": current_message})
     elif isinstance(current_message, list):
         parts.extend(current_message)
-    normalized_ids = [str(file_id) for file_id in attachment_ids]
     request[REQUEST_ATTACHMENT_IDS_KEY] = normalized_ids
     marker = current_message.strip() if isinstance(current_message, str) else ""
-    for file_id in normalized_ids:
-        found = request.app[MEDIA_STORE_KEY].get(file_id)
-        if found is None:
-            raise web.HTTPBadRequest(text=json.dumps({"error": {"code": "attachment_not_found", "message": f"附件不存在：{file_id}"}}, ensure_ascii=False), content_type="application/json")
+    for file_id, found in zip(normalized_ids, resolved_attachments):
         parts.append(
             _attachment_part(
                 *found,
                 kind=str(attachment_kinds.get(file_id, "")),
                 mobile_client=mobile_client,
+                download_url=_attachment_share_url(request, file_id),
             )
         )
     session_match = re.fullmatch(r"/api/sessions/([^/]+)/chat(?:/stream)?", request.path)
@@ -2190,8 +2824,29 @@ async def proxy(request: web.Request) -> web.StreamResponse:
         task = tracker.tasks.get(tracking_id)
         if task is not None and not task.done():
             task.cancel()
-            return web.json_response({"session_id": session_id, "stopped": True})
-        return web.json_response({"session_id": session_id, "stopped": False})
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
+            except Exception:
+                # The run task owns its terminal status; stopping only waits for cleanup.
+                pass
+            return web.json_response({
+                "session_id": session_id,
+                "stopped": True,
+                "local_forwarding_cancelled": True,
+                "remote_status": "unknown",
+                "remote_stopped": False,
+            })
+        return web.json_response({
+            "session_id": session_id,
+            "stopped": False,
+            "local_forwarding_cancelled": False,
+            "remote_status": "unknown",
+            "remote_stopped": False,
+        })
+    if request.method == "POST" and re.fullmatch(r"/api/sessions/[^/]+/chat", request.path):
+        return await _tracked_session_chat(request)
     if request.method == "POST" and re.fullmatch(r"/api/sessions/[^/]+/chat/stream", request.path):
         return await _tracked_session_stream(request)
     relative = request.path if is_message_history else request.path_qs
@@ -2202,6 +2857,8 @@ async def proxy(request: web.Request) -> web.StreamResponse:
                 body = await request.json()
             except (json.JSONDecodeError, ValueError):
                 return web.json_response({"error": {"code": "invalid_json", "message": "请求 JSON 无效"}}, status=400)
+            if not isinstance(body, dict):
+                return web.json_response({"error": {"code": "invalid_json", "message": "请求 JSON 必须是对象"}}, status=400)
             mobile_client = _apply_client_context(body)
             session_id = request.path.split("/")[3] if "/api/sessions/" in request.path else ""
             body = await _prepare_chat_body(
@@ -2210,7 +2867,32 @@ async def proxy(request: web.Request) -> web.StreamResponse:
                 mobile_client=mobile_client,
                 session_storage_id=_scoped_session_id(profile, session_id) if session_id else None,
             )
-            body.pop("persona_model", None)
+            validation_error = _normalize_chat_model_config(body)
+            if validation_error is not None:
+                return validation_error
+            selected_provider = str(body.get("provider") or "").strip()
+            selected_model = str(body.get("model") or "").strip()
+            if request.path.endswith("/chat") and selected_provider and selected_model:
+                model_options = body.get("model_options")
+                try:
+                    await _lock_selected_session_model(
+                        request,
+                        profile,
+                        session_id,
+                        selected_provider,
+                        selected_model,
+                        model_options if isinstance(model_options, dict) else None,
+                    )
+                except HermesUpstreamAuthError:
+                    return web.json_response(_hermes_auth_failed_error(), status=502)
+                except HermesModelSelectionError as error:
+                    return web.json_response(
+                        {"error": {"code": error.code, "message": str(error)}},
+                        status=400,
+                    )
+                body.pop("provider", None)
+                body.pop("model", None)
+                body.pop("require_model_lock", None)
             body_bytes = json.dumps(body, ensure_ascii=False).encode("utf-8")
         else:
             body_bytes = await request.read()
@@ -2226,6 +2908,12 @@ async def proxy(request: web.Request) -> web.StreamResponse:
     if upstream.status in {401, 403}:
         upstream.release()
         return web.json_response(_hermes_auth_failed_error(), status=502)
+    if upstream.status >= 500:
+        upstream.release()
+        return web.json_response(
+            {"error": {"code": "hermes_upstream_error", "message": "上游服务暂时不可用"}},
+            status=502,
+        )
     excluded = {"content-length", "transfer-encoding", "connection", "content-encoding"}
     headers = {key: value for key, value in upstream.headers.items() if key.lower() not in excluded}
     if is_message_history:
@@ -2259,28 +2947,303 @@ async def proxy(request: web.Request) -> web.StreamResponse:
     return response
 
 
+def _normalize_chat_model_config(body: dict[str, Any]) -> web.Response | None:
+    body.pop("persona_model", None)
+    legacy_model = body.pop("inference_model", None)
+    legacy_provider = body.pop("inference_provider", None)
+    if "model" not in body and legacy_model is not None and legacy_model != "":
+        body["model"] = legacy_model
+    if "provider" not in body and legacy_provider is not None and legacy_provider != "":
+        body["provider"] = legacy_provider
+
+    for field in ("model", "provider"):
+        value = body.get(field)
+        if value is None or value == "":
+            body.pop(field, None)
+        elif not isinstance(value, str) or not value.strip():
+            return web.json_response(
+                {"error": {"code": "invalid_model_selection", "message": "模型配置无效"}},
+                status=400,
+            )
+        else:
+            body[field] = value.strip()
+    if "provider" in body and "model" not in body:
+        return web.json_response(
+            {"error": {"code": "invalid_model_selection", "message": "选择供应商时必须同时选择模型"}},
+            status=400,
+        )
+    if "require_model_lock" in body and not isinstance(body["require_model_lock"], bool):
+        return web.json_response(
+            {"error": {"code": "invalid_model_selection", "message": "模型锁定配置无效"}},
+            status=400,
+        )
+    if "model" in body and "provider" in body:
+        body.setdefault("require_model_lock", True)
+    elif body.get("require_model_lock") is True:
+        return web.json_response(
+            {"error": {"code": "invalid_model_selection", "message": "锁定模型时必须同时选择供应商和模型"}},
+            status=400,
+        )
+
+    raw_model_options = body.get("model_options")
+    if raw_model_options is None:
+        model_options: dict[str, Any] = {}
+    elif not isinstance(raw_model_options, dict):
+        return web.json_response(
+            {"error": {"code": "invalid_model_options", "message": "模型参数无效"}},
+            status=400,
+        )
+    else:
+        model_options = dict(raw_model_options)
+    legacy_reasoning_effort = body.pop("reasoning_effort", None)
+    if legacy_reasoning_effort is not None and legacy_reasoning_effort != "":
+        model_options["reasoning_effort"] = legacy_reasoning_effort
+    raw_reasoning_effort = model_options.get("reasoning_effort")
+    if raw_reasoning_effort is None or raw_reasoning_effort == "":
+        model_options.pop("reasoning_effort", None)
+    elif not isinstance(raw_reasoning_effort, str) or raw_reasoning_effort.strip().lower() not in ALLOWED_REASONING_EFFORTS:
+        return web.json_response(
+            {"error": {"code": "invalid_reasoning_effort", "message": "推理深度无效"}},
+            status=400,
+        )
+    else:
+        model_options["reasoning_effort"] = raw_reasoning_effort.strip().lower()
+    if model_options:
+        body["model_options"] = model_options
+    else:
+        body.pop("model_options", None)
+    return None
+
+
 def _session_sse_event(event_name: str, payload: dict[str, Any] | None = None) -> bytes:
     data = json.dumps(payload or {}, ensure_ascii=False, separators=(",", ":"))
     return f"event: {event_name}\ndata: {data}\n\n".encode("utf-8")
 
 
-class _OpenAISessionStreamAdapter:
-    """Convert Hermes' OpenAI-compatible SSE into the mobile session SSE contract."""
+def _parse_session_sse_block(block: bytes) -> tuple[str, dict[str, Any]]:
+    event_name = ""
+    data_lines: list[str] = []
+    for raw_line in block.decode("utf-8", errors="replace").splitlines():
+        if raw_line.startswith("event:"):
+            event_name = raw_line.partition(":")[2].strip()
+        elif raw_line.startswith("data:"):
+            data_lines.append(raw_line.partition(":")[2].lstrip())
+    data_text = "\n".join(data_lines).strip()
+    try:
+        payload = json.loads(data_text) if data_text else {}
+    except json.JSONDecodeError:
+        payload = {}
+    return event_name, payload if isinstance(payload, dict) else {}
 
-    def __init__(self) -> None:
+
+def _friendly_model_setup_error(event_name: str, payload: dict[str, Any]) -> dict[str, str] | None:
+    message = str(payload.get("message") or "")
+    if event_name != "error" or "no llm provider configured" not in message.casefold():
+        return None
+    return {
+        "code": "model_not_configured",
+        "message": HERMES_MODEL_NOT_CONFIGURED_MESSAGE,
+    }
+
+
+def _safe_upstream_stream_error(
+    code: str = "hermes_upstream_error",
+    message: str = "上游服务暂时不可用",
+) -> bytes:
+    return _session_sse_event("error", {"code": code, "message": message})
+
+
+def _canonical_model_provider(provider: Any) -> str:
+    value = str(provider or "").strip()
+    return value.removeprefix("custom:")
+
+
+async def _lock_selected_session_model(
+    request: web.Request,
+    profile: HermesProfileConfig,
+    session_id: str,
+    provider: str,
+    model: str,
+    model_options: dict[str, Any] | None,
+) -> bool:
+    """Validate a picker selection and persist it through Hermes' public API."""
+    session = request.app[HTTP_SESSION_KEY]
+    headers = _upstream_headers(request.app, request, profile)
+    headers.update({"Accept": "application/json", "Content-Type": "application/json"})
+    options_response = None
+    for attempt in range(MODEL_CATALOG_ATTEMPTS):
+        try:
+            options_response = await session.get(
+                f"{profile.upstream_url}/api/model/options?explicit_only=true&refresh=0",
+                headers=headers,
+                timeout=MODEL_CATALOG_TIMEOUT,
+            )
+            break
+        except asyncio.TimeoutError:
+            if attempt + 1 >= MODEL_CATALOG_ATTEMPTS:
+                raise HermesModelSelectionError(
+                    "model_catalog_timeout",
+                    "读取 Hermes 模型列表超时，请重试",
+                ) from None
+    if options_response is None:
+        raise HermesModelSelectionError(
+            "model_catalog_timeout",
+            "读取 Hermes 模型列表超时，请重试",
+        )
+    try:
+        if options_response.status in {401, 403}:
+            raise HermesUpstreamAuthError()
+        if not options_response.ok:
+            raise HermesModelSelectionError(
+                "model_catalog_unavailable",
+                "Hermes 模型列表暂时不可用，请刷新后重试",
+            )
+        try:
+            options_payload = await options_response.json(content_type=None)
+        except asyncio.TimeoutError:
+            raise HermesModelSelectionError(
+                "model_catalog_timeout",
+                "读取 Hermes 模型列表超时，请重试",
+            ) from None
+        except (json.JSONDecodeError, ValueError):
+            raise HermesModelSelectionError(
+                "model_catalog_unavailable",
+                "Hermes 模型列表响应无效，请刷新后重试",
+            )
+    finally:
+        options_response.release()
+
+    providers = options_payload.get("providers") if isinstance(options_payload, dict) else None
+    provider_slug = _canonical_model_provider(provider)
+    selected_entry = next(
+        (
+            entry
+            for entry in providers or []
+            if isinstance(entry, dict)
+            and _canonical_model_provider(entry.get("slug")) == provider_slug
+        ),
+        None,
+    )
+    available_models = selected_entry.get("models") if isinstance(selected_entry, dict) else None
+    unavailable_models = selected_entry.get("unavailable_models") if isinstance(selected_entry, dict) else None
+    if (
+        not isinstance(selected_entry, dict)
+        or selected_entry.get("authenticated") is not True
+        or not isinstance(available_models, list)
+        or model not in available_models
+        or (isinstance(unavailable_models, list) and model in unavailable_models)
+    ):
+        raise HermesModelSelectionError(
+            "model_not_available",
+            "所选模型已不可用，请刷新模型列表后重试",
+        )
+
+    lock_body: dict[str, Any] = {
+        "provider": provider,
+        "model": model,
+        # Hermes 0.20 reports user-config providers as `custom` at runtime.
+        # Validation below and the stream adapter retain strict model checking.
+        "require_model_lock": False,
+    }
+    if model_options:
+        lock_body["model_options"] = dict(model_options)
+    try:
+        lock_response = await session.post(
+            f"{profile.upstream_url}/api/sessions/{quote(session_id, safe='')}/model",
+            headers=headers,
+            data=json.dumps(lock_body, ensure_ascii=False).encode("utf-8"),
+            timeout=MODEL_LOCK_TIMEOUT,
+        )
+    except asyncio.TimeoutError:
+        raise HermesModelSelectionError(
+            "model_lock_timeout",
+            "Hermes 应用所选模型超时，请重试",
+        ) from None
+    try:
+        if lock_response.status in {401, 403}:
+            raise HermesUpstreamAuthError()
+        if not lock_response.ok:
+            raise HermesModelSelectionError(
+                "model_lock_failed",
+                "Hermes 无法应用所选模型，请刷新模型列表后重试",
+            )
+        try:
+            lock_payload = await lock_response.json(content_type=None)
+        except asyncio.TimeoutError:
+            raise HermesModelSelectionError(
+                "model_lock_timeout",
+                "Hermes 应用所选模型超时，请重试",
+            ) from None
+        except (json.JSONDecodeError, ValueError):
+            raise HermesModelSelectionError(
+                "model_lock_failed",
+                "Hermes 模型锁定响应无效，请刷新模型列表后重试",
+            )
+    finally:
+        lock_response.release()
+
+    runtime = lock_payload.get("runtime") if isinstance(lock_payload, dict) else None
+    acknowledged_provider = runtime.get("provider") if isinstance(runtime, dict) else None
+    acknowledged_model = runtime.get("model") if isinstance(runtime, dict) else None
+    if (
+        acknowledged_model != model
+        or _canonical_model_provider(acknowledged_provider) != provider_slug
+    ):
+        raise HermesModelSelectionError(
+            "model_lock_failed",
+            "Hermes 未确认所选模型，请刷新模型列表后重试",
+        )
+    return (
+        str(selected_entry.get("source", "")).strip().lower() == "user-config"
+        or selected_entry.get("is_user_defined") is True
+    )
+
+
+class _NativeSelectedModelStreamAdapter:
+    """Preserve Hermes session SSE while reconciling its custom-provider alias."""
+
+    _ALIAS_MISMATCH = re.compile(
+        r"confirmed model lock runtime mismatch: "
+        r"expected provider=(?P<expected_provider>\S+) model=(?P<expected_model>.+?); "
+        r"actual provider=(?P<actual_provider>\S+) model=(?P<actual_model>.+)"
+    )
+
+    def __init__(self, provider: str, model: str, allow_custom_alias: bool) -> None:
+        self.provider = provider
+        self.model = model
+        self.allow_custom_alias = allow_custom_alias
         self._buffer = b""
+        self._lock_confirmed = False
+        self._assistant_output_seen = False
+        self._suppress_upstream_done = False
+        self._discard_remaining = False
         self.outcome: str | None = None
 
     def feed(self, chunk: bytes) -> list[bytes]:
+        if self._discard_remaining:
+            return []
+        if len(self._buffer) + len(chunk) > SSE_EVENT_BUFFER_LIMIT:
+            self._buffer = b""
+            self._discard_remaining = True
+            self.outcome = "failed"
+            return [_safe_upstream_stream_error(
+                "upstream_event_too_large",
+                "Hermes 响应事件过大，流已终止",
+            )]
         self._buffer += chunk
         blocks = re.split(br"\r?\n\r?\n", self._buffer)
         self._buffer = blocks.pop() if blocks else b""
         events: list[bytes] = []
         for block in blocks:
             events.extend(self._convert_block(block))
+            if self._discard_remaining:
+                self._buffer = b""
+                break
         return events
 
     def finish(self) -> list[bytes]:
+        if self._discard_remaining:
+            return []
         events: list[bytes] = []
         if self._buffer.strip():
             events.extend(self._convert_block(self._buffer))
@@ -2291,70 +3254,403 @@ class _OpenAISessionStreamAdapter:
         return events
 
     def _convert_block(self, block: bytes) -> list[bytes]:
-        event_name = ""
-        data_lines: list[str] = []
-        for raw_line in block.decode("utf-8", errors="replace").splitlines():
-            if raw_line.startswith("event:"):
-                event_name = raw_line.partition(":")[2].strip()
-            elif raw_line.startswith("data:"):
-                data_lines.append(raw_line.partition(":")[2].lstrip())
-        data_text = "\n".join(data_lines).strip()
-        if not data_text:
+        if not block.strip():
             return []
-        if data_text == "[DONE]":
-            return self._complete_if_needed()
-        try:
-            payload = json.loads(data_text)
-        except json.JSONDecodeError:
-            return []
-        if not isinstance(payload, dict):
-            return []
+        event_name, payload = _parse_session_sse_block(block)
+        friendly_error = _friendly_model_setup_error(event_name, payload)
+        if friendly_error is not None:
+            self.outcome = "failed"
+            return [_session_sse_event("error", friendly_error)]
 
-        if event_name == "hermes.tool.progress":
-            status = str(payload.get("status", "")).lower()
-            tool_name = payload.get("tool") or payload.get("tool_name") or payload.get("name")
-            event = "tool.completed" if status in {"completed", "complete", "success", "succeeded"} else "tool.started"
-            return [_session_sse_event(event, {"tool_name": tool_name})]
+        if event_name == "run.started":
+            runtime = payload.get("runtime")
+            self._lock_confirmed = self._runtime_confirms_selection(runtime)
+            if not self._lock_confirmed:
+                return self._fail_model_lock()
+        elif event_name == "assistant.delta":
+            if not self._lock_confirmed:
+                return self._fail_model_lock()
+            self._assistant_output_seen = bool(payload.get("delta")) or self._assistant_output_seen
+        elif event_name == "assistant.completed":
+            if not self._lock_confirmed:
+                return self._fail_model_lock()
+            self._assistant_output_seen = True
+            self.outcome = "completed"
+        elif event_name == "run.completed":
+            if not self._lock_confirmed:
+                return self._fail_model_lock()
+            completed_runtime = payload.get("runtime")
+            if completed_runtime is not None and not self._runtime_confirms_selection(completed_runtime):
+                return self._fail_model_lock()
+            self.outcome = "completed"
+        elif event_name == "error":
+            upstream_message = str(payload.get("message", ""))
+            runtime = self._custom_alias_runtime(upstream_message)
+            if runtime is not None:
+                self.outcome = "completed"
+                self._suppress_upstream_done = True
+                return [_session_sse_event("run.completed", {"completed": True, "runtime": runtime})]
+            self.outcome = "failed"
+            if self._ALIAS_MISMATCH.fullmatch(upstream_message.strip()) is not None:
+                return [_safe_upstream_stream_error(
+                    "model_lock_failed",
+                    "Hermes 未确认所选模型，请刷新模型列表后重试",
+                )]
+            return [_safe_upstream_stream_error()]
+        elif event_name == "done":
+            if self._suppress_upstream_done:
+                return []
+            if not self._lock_confirmed:
+                return self._fail_model_lock()
+            if self.outcome is None:
+                self.outcome = "completed"
+                return [_session_sse_event("run.completed", {"completed": True})]
 
-        choices = payload.get("choices")
-        if not isinstance(choices, list) or not choices:
-            if payload.get("error"):
-                return self._fail("Hermes 模型请求失败")
-            return []
-        choice = choices[0] if isinstance(choices[0], dict) else {}
-        delta = choice.get("delta") if isinstance(choice.get("delta"), dict) else {}
-        content = delta.get("content")
-        events: list[bytes] = []
-        if isinstance(content, str) and content:
-            events.append(_session_sse_event("assistant.delta", {"delta": content}))
-        elif isinstance(content, list):
-            text = "".join(
-                str(part.get("text", ""))
-                for part in content
-                if isinstance(part, dict) and part.get("type") in {"text", "output_text"}
+        return [block + b"\n\n"]
+
+    def _runtime_confirms_selection(self, runtime: Any) -> bool:
+        if not isinstance(runtime, dict):
+            return False
+        requested = runtime.get("requested")
+        actual_provider = str(runtime.get("provider") or "").strip()
+        actual_model = str(runtime.get("model") or "").strip()
+        actual_runtime_pending = (
+            runtime.get("model_lock") == "accepted"
+            and not actual_provider
+            and not actual_model
+        )
+        provider_matches = (
+            _canonical_model_provider(actual_provider) == _canonical_model_provider(self.provider)
+            or (self.allow_custom_alias and actual_provider == "custom")
+        )
+        return bool(
+            isinstance(requested, dict)
+            and runtime.get("route_source") == "session_model_lock"
+            and runtime.get("model_lock") in {"accepted", "confirmed"}
+            and _canonical_model_provider(requested.get("provider"))
+            == _canonical_model_provider(self.provider)
+            and requested.get("model") == self.model
+            and (
+                actual_runtime_pending
+                or (actual_model == self.model and provider_matches)
             )
-            if text:
-                events.append(_session_sse_event("assistant.delta", {"delta": text}))
+        )
 
-        finish_reason = choice.get("finish_reason")
-        if finish_reason:
-            if str(finish_reason).lower() == "stop":
-                events.extend(self._complete_if_needed())
-            else:
-                events.extend(self._fail("Hermes 模型请求失败"))
+    def _fail_model_lock(self) -> list[bytes]:
+        self.outcome = "failed"
+        self._discard_remaining = True
+        return [_safe_upstream_stream_error(
+            "model_lock_failed",
+            "Hermes 未确认所选模型，请刷新模型列表后重试",
+        )]
+
+    def _custom_alias_runtime(self, message: str) -> dict[str, Any] | None:
+        if not self.allow_custom_alias or not self._lock_confirmed or not self._assistant_output_seen:
+            return None
+        match = self._ALIAS_MISMATCH.fullmatch(message.strip())
+        if match is None:
+            return None
+        expected_provider = match.group("expected_provider")
+        expected_model = match.group("expected_model")
+        actual_provider = match.group("actual_provider")
+        actual_model = match.group("actual_model")
+        if (
+            _canonical_model_provider(expected_provider) != _canonical_model_provider(self.provider)
+            or expected_model != self.model
+            or actual_provider != "custom"
+            or actual_model != self.model
+        ):
+            return None
+        return {
+            "provider": actual_provider,
+            "model": actual_model,
+            "route_source": "session_model_lock",
+            "model_lock": "confirmed",
+            "requested": {"provider": self.provider, "model": self.model},
+        }
+
+
+class _HermesSessionStreamSanitizer:
+    def __init__(self) -> None:
+        self._buffer = b""
+        self.model_not_configured = False
+        self.outcome: str | None = None
+        self.message: str | None = None
+        self._discard_remaining = False
+
+    def feed(self, chunk: bytes) -> list[bytes]:
+        if self._discard_remaining:
+            return []
+        if len(self._buffer) + len(chunk) > SSE_EVENT_BUFFER_LIMIT:
+            self._buffer = b""
+            self._discard_remaining = True
+            self.outcome = "failed"
+            self.message = "Hermes 响应事件过大，流已终止"
+            return [_safe_upstream_stream_error(
+                "upstream_event_too_large",
+                self.message,
+            )]
+        self._buffer += chunk
+        blocks = re.split(br"\r?\n\r?\n", self._buffer)
+        self._buffer = blocks.pop() if blocks else b""
+        return [event for block in blocks for event in self._convert_block(block)]
+
+    def finish(self) -> list[bytes]:
+        if self._discard_remaining:
+            return []
+        events = self._convert_block(self._buffer) if self._buffer.strip() else []
+        self._buffer = b""
+        if self.outcome is None:
+            self.outcome = "failed"
+            self.message = "Hermes 响应流意外结束"
+            events.append(_session_sse_event("error", {"message": self.message}))
         return events
 
-    def _complete_if_needed(self) -> list[bytes]:
-        if self.outcome is not None:
+    def _convert_block(self, block: bytes) -> list[bytes]:
+        if not block.strip():
             return []
-        self.outcome = "completed"
-        return [_session_sse_event("run.completed", {"completed": True})]
+        event_name, payload = _parse_session_sse_block(block)
+        friendly_error = _friendly_model_setup_error(event_name, payload)
+        if friendly_error is not None:
+            self.model_not_configured = True
+            self.outcome = "failed"
+            self.message = friendly_error["message"]
+            return [_session_sse_event("error", friendly_error)]
+        if event_name == "error":
+            self.outcome = "failed"
+            self.message = "上游服务暂时不可用"
+            return [_safe_upstream_stream_error()]
+        elif event_name in {"run.completed", "assistant.completed", "done"} and self.outcome is None:
+            self.outcome = "completed"
+        return [block + b"\n\n"]
 
-    def _fail(self, message: str) -> list[bytes]:
-        if self.outcome is not None:
-            return []
-        self.outcome = "failed"
-        return [_session_sse_event("error", {"message": message})]
+
+async def _tracked_session_chat(request: web.Request) -> web.StreamResponse:
+    """Track legacy /chat without changing its HTTP response contract."""
+    profile = _request_profile(request)
+    session_id = request.path.split("/")[3]
+    tracking_id = _scoped_session_id(profile, session_id)
+    tracker: RunTracker = request.app[RUN_TRACKER_KEY]
+    if not tracker.reserve(tracking_id):
+        return web.json_response(
+            {"error": {"code": "run_active", "message": "该会话仍在处理中"}},
+            status=409,
+        )
+
+    try:
+        try:
+            body = await request.json()
+        except (json.JSONDecodeError, ValueError):
+            tracker.release_reservation(tracking_id)
+            return web.json_response(
+                {"error": {"code": "invalid_json", "message": "请求 JSON 无效"}},
+                status=400,
+            )
+        if not isinstance(body, dict):
+            tracker.release_reservation(tracking_id)
+            return web.json_response(
+                {"error": {"code": "invalid_json", "message": "请求 JSON 必须是对象"}},
+                status=400,
+            )
+        mobile_client = _apply_client_context(body)
+        body = await _prepare_chat_body(
+            request,
+            body,
+            mobile_client=mobile_client,
+            session_storage_id=tracking_id,
+        )
+        validation_error = _normalize_chat_model_config(body)
+        if validation_error is not None:
+            tracker.release_reservation(tracking_id)
+            return validation_error
+    except BaseException:
+        tracker.release_reservation(tracking_id)
+        raise
+
+    selected_provider = str(body.get("provider") or "").strip()
+    selected_model = str(body.get("model") or "").strip()
+    use_selected_model = bool(selected_provider and selected_model)
+    upstream_body = dict(body)
+    if use_selected_model:
+        upstream_body.pop("provider", None)
+        upstream_body.pop("model", None)
+        upstream_body.pop("require_model_lock", None)
+
+    current_task = asyncio.current_task()
+    if current_task is None:
+        tracker.release_reservation(tracking_id)
+        raise RuntimeError("chat request task is unavailable")
+    tracker.start(tracking_id, f"run_{uuid.uuid4().hex}")
+    tracker.attach(tracking_id, current_task)
+    upstream = None
+    try:
+        allow_custom_alias = False
+        if use_selected_model:
+            model_options = body.get("model_options")
+            try:
+                allow_custom_alias = await _lock_selected_session_model(
+                    request,
+                    profile,
+                    session_id,
+                    selected_provider,
+                    selected_model,
+                    model_options if isinstance(model_options, dict) else None,
+                )
+            except HermesUpstreamAuthError:
+                tracker.finish(tracking_id, "failed", HERMES_AUTH_FAILED_MESSAGE)
+                return web.json_response(_hermes_auth_failed_error(), status=502)
+            except HermesModelSelectionError as error:
+                attachment_ids = request.get(REQUEST_ATTACHMENT_IDS_KEY, [])
+                if attachment_ids:
+                    request.app[MEDIA_STORE_KEY].discard_last_session_media(tracking_id, attachment_ids)
+                tracker.finish(tracking_id, "failed", str(error))
+                return web.json_response(
+                    {"error": {"code": error.code, "message": str(error)}},
+                    status=400,
+                )
+
+        upstream_headers = _upstream_headers(request.app, request, profile)
+        upstream = await request.app[HTTP_SESSION_KEY].post(
+            f"{profile.upstream_url}{request.path_qs}",
+            headers=upstream_headers,
+            data=json.dumps(upstream_body, ensure_ascii=False).encode("utf-8"),
+        )
+        if upstream.status in {401, 403}:
+            tracker.finish(tracking_id, "failed", HERMES_AUTH_FAILED_MESSAGE)
+            return web.json_response(_hermes_auth_failed_error(), status=502)
+        if upstream.status >= 500:
+            tracker.finish(tracking_id, "failed", "上游服务暂时不可用")
+            return web.json_response(
+                {"error": {"code": "hermes_upstream_error", "message": "上游服务暂时不可用"}},
+                status=502,
+            )
+
+        excluded = {"content-length", "transfer-encoding", "connection", "content-encoding"}
+        headers = {key: value for key, value in upstream.headers.items() if key.lower() not in excluded}
+        content_type = upstream.headers.get("Content-Type", "").partition(";")[0].strip().casefold()
+        if use_selected_model and content_type != "text/event-stream":
+            response_body = bytearray()
+            async for chunk in upstream.content.iter_chunked(CHUNK_SIZE):
+                if len(response_body) + len(chunk) > SSE_EVENT_BUFFER_LIMIT:
+                    tracker.finish(tracking_id, "failed", "Hermes 模型响应过大")
+                    return web.json_response(
+                        {"error": {
+                            "code": "model_runtime_response_too_large",
+                            "message": "Hermes 模型响应过大，无法验证实际运行模型",
+                        }},
+                        status=502,
+                    )
+                response_body.extend(chunk)
+            try:
+                response_payload = json.loads(response_body.decode("utf-8"))
+            except (UnicodeDecodeError, json.JSONDecodeError):
+                response_payload = None
+            runtime = response_payload.get("runtime") if isinstance(response_payload, dict) else None
+            verifier = _NativeSelectedModelStreamAdapter(
+                selected_provider,
+                selected_model,
+                allow_custom_alias,
+            )
+            if not verifier._runtime_confirms_selection(runtime):
+                message = "Hermes 未确认所选模型，请刷新模型列表后重试"
+                tracker.finish(tracking_id, "failed", message)
+                return web.json_response(
+                    {"error": {"code": "model_lock_failed", "message": message}},
+                    status=502,
+                )
+            tracker.finish(tracking_id, "completed")
+            return web.Response(
+                body=bytes(response_body),
+                status=upstream.status,
+                reason=upstream.reason,
+                headers=headers,
+            )
+
+        response = web.StreamResponse(status=upstream.status, reason=upstream.reason, headers=headers)
+        client_attached = True
+        try:
+            await response.prepare(request)
+        except ConnectionResetError:
+            client_attached = False
+
+        selected_adapter = (
+            _NativeSelectedModelStreamAdapter(
+                selected_provider,
+                selected_model,
+                allow_custom_alias,
+            )
+            if use_selected_model and content_type == "text/event-stream"
+            else None
+        )
+        status_sanitizer = (
+            _HermesSessionStreamSanitizer()
+            if selected_adapter is None and content_type == "text/event-stream"
+            else None
+        )
+
+        async for chunk in upstream.content.iter_chunked(CHUNK_SIZE):
+            if selected_adapter is not None:
+                outgoing = selected_adapter.feed(chunk)
+                for event in outgoing:
+                    tracker.consume_sse(tracking_id, event)
+                    if client_attached:
+                        try:
+                            await response.write(event)
+                        except ConnectionResetError:
+                            client_attached = False
+            else:
+                if status_sanitizer is not None:
+                    status_sanitizer.feed(chunk)
+                    tracker.consume_sse(tracking_id, chunk)
+                if client_attached:
+                    try:
+                        await response.write(chunk)
+                    except ConnectionResetError:
+                        client_attached = False
+
+        if selected_adapter is not None:
+            for event in selected_adapter.finish():
+                tracker.consume_sse(tracking_id, event)
+                if client_attached:
+                    try:
+                        await response.write(event)
+                    except ConnectionResetError:
+                        client_attached = False
+            tracker.finish(tracking_id, selected_adapter.outcome or "failed")
+        elif status_sanitizer is not None:
+            status_sanitizer.finish()
+            tracker.finish(
+                tracking_id,
+                status_sanitizer.outcome or ("completed" if upstream.ok else "failed"),
+                status_sanitizer.message,
+            )
+        else:
+            tracker.finish(tracking_id, "completed" if upstream.ok else "failed")
+
+        if client_attached:
+            try:
+                await response.write_eof()
+            except ConnectionResetError:
+                pass
+        return response
+    except asyncio.CancelledError:
+        tracker.finish(
+            tracking_id,
+            "interrupted",
+            "Nexus local forwarding was cancelled; Hermes remote run status is unknown.",
+        )
+        raise
+    except Exception:
+        attachment_ids = request.get(REQUEST_ATTACHMENT_IDS_KEY, [])
+        if attachment_ids:
+            request.app[MEDIA_STORE_KEY].discard_last_session_media(tracking_id, attachment_ids)
+        tracker.finish(tracking_id, "failed", "上游服务暂时不可用")
+        raise
+    finally:
+        if upstream is not None:
+            upstream.release()
+        if tracker.tasks.get(tracking_id) is current_task:
+            tracker.tasks.pop(tracking_id, None)
 
 
 async def _tracked_session_stream(request: web.Request) -> web.StreamResponse:
@@ -2362,74 +3658,79 @@ async def _tracked_session_stream(request: web.Request) -> web.StreamResponse:
     session_id = request.path.split("/")[3]
     tracking_id = _scoped_session_id(profile, session_id)
     tracker: RunTracker = request.app[RUN_TRACKER_KEY]
-    current = tracker.tasks.get(tracking_id)
-    if current is not None and not current.done():
+    if not tracker.reserve(tracking_id):
         return web.json_response({"error": {"code": "run_active", "message": "该会话仍在处理中"}}, status=409)
+    preparation_error: web.StreamResponse | None = None
     try:
-        body = await request.json()
-    except (json.JSONDecodeError, ValueError):
-        return web.json_response({"error": {"code": "invalid_json", "message": "请求 JSON 无效"}}, status=400)
-    mobile_client = _apply_client_context(body)
-    body = await _prepare_chat_body(
-        request,
-        body,
-        mobile_client=mobile_client,
-        session_storage_id=tracking_id,
-    )
-    legacy_model = str(body.pop("model", "") or "").strip()
-    # persona_model was a Nexus-only legacy field that incorrectly treated a
-    # Hermes profile as an inference model. Profiles are now selected through
-    # X-Nexus-Hermes-Profile and mapped to an independently configured original
-    # Hermes HTTP API endpoint.
-    body.pop("persona_model", None)
-    inference_model = str(body.pop("inference_model", "") or "").strip() or legacy_model
-    raw_reasoning_effort = body.pop("reasoning_effort", None)
-    if raw_reasoning_effort is None or raw_reasoning_effort == "":
-        reasoning_effort = None
-    elif not isinstance(raw_reasoning_effort, str) or raw_reasoning_effort.strip().lower() not in ALLOWED_REASONING_EFFORTS:
-        return web.json_response(
-            {"error": {"code": "invalid_reasoning_effort", "message": "推理深度无效"}},
-            status=400,
-        )
-    else:
-        reasoning_effort = raw_reasoning_effort.strip().lower()
-    use_model_route = bool(inference_model)
-    if use_model_route:
-        messages: list[dict[str, Any]] = []
-        system_message = body.pop("system_message", None)
-        if isinstance(system_message, str) and system_message.strip():
-            messages.append({"role": "system", "content": system_message.strip()})
-        messages.append({"role": "user", "content": body.get("message", "")})
-        upstream_body = {
-            "model": inference_model,
-            "stream": True,
-            "messages": messages,
-        }
-        if reasoning_effort is not None:
-            upstream_body["reasoning_effort"] = reasoning_effort
-        upstream_path = "/v1/chat/completions"
-    else:
-        if reasoning_effort is not None:
-            body["reasoning_effort"] = reasoning_effort
-        upstream_body = body
-        upstream_path = request.path_qs
-    body_bytes = json.dumps(upstream_body, ensure_ascii=False).encode("utf-8")
-    queue = tracker.subscribe(tracking_id)
-    run_id = f"run_{uuid.uuid4().hex}"
-    tracker.start(tracking_id, run_id)
+        try:
+            body = await request.json()
+        except (json.JSONDecodeError, ValueError):
+            preparation_error = web.json_response(
+                {"error": {"code": "invalid_json", "message": "请求 JSON 无效"}},
+                status=400,
+            )
+            body = {}
+        if preparation_error is None and not isinstance(body, dict):
+            preparation_error = web.json_response(
+                {"error": {"code": "invalid_json", "message": "请求 JSON 必须是对象"}},
+                status=400,
+            )
+        if preparation_error is None:
+            mobile_client = _apply_client_context(body)
+            body = await _prepare_chat_body(
+                request,
+                body,
+                mobile_client=mobile_client,
+                session_storage_id=tracking_id,
+            )
+            preparation_error = _normalize_chat_model_config(body)
+        if preparation_error is None:
+            selected_provider = str(body.get("provider") or "").strip()
+            selected_model = str(body.get("model") or "").strip()
+            use_selected_model = bool(selected_provider and selected_model)
+            upstream_body = dict(body)
+            if use_selected_model:
+                # The original Hermes session model endpoint owns model selection.
+                # Per-message provider fields use a different raw route in Hermes 0.20.
+                upstream_body.pop("provider", None)
+                upstream_body.pop("model", None)
+                upstream_body.pop("require_model_lock", None)
+            body_bytes = json.dumps(upstream_body, ensure_ascii=False).encode("utf-8")
+            try:
+                queue = tracker.subscribe(tracking_id)
+            except RuntimeError:
+                preparation_error = web.json_response(
+                    {"error": {"code": "subscriber_limit", "message": "Run subscriber limit reached"}},
+                    status=409,
+                )
+    except BaseException:
+        tracker.release_reservation(tracking_id)
+        raise
+    if preparation_error is not None:
+        tracker.release_reservation(tracking_id)
+        return preparation_error
 
     async def consume_upstream() -> None:
         upstream = None
         try:
             upstream_headers = _upstream_headers(request.app, request, profile)
-            if use_model_route:
-                upstream_headers.update({
-                    "Accept": "text/event-stream",
-                    "Content-Type": "application/json",
-                    "X-Hermes-Session-Id": session_id,
-                })
+            upstream_headers.update({
+                "Accept": "text/event-stream",
+                "Content-Type": "application/json",
+            })
+            allow_custom_alias = False
+            if use_selected_model:
+                model_options = body.get("model_options")
+                allow_custom_alias = await _lock_selected_session_model(
+                    request,
+                    profile,
+                    session_id,
+                    selected_provider,
+                    selected_model,
+                    model_options if isinstance(model_options, dict) else None,
+                )
             upstream = await request.app[HTTP_SESSION_KEY].post(
-                f"{profile.upstream_url}{upstream_path}",
+                f"{profile.upstream_url}{request.path_qs}",
                 headers=upstream_headers,
                 data=body_bytes,
             )
@@ -2437,26 +3738,40 @@ async def _tracked_session_stream(request: web.Request) -> web.StreamResponse:
                 raise HermesUpstreamAuthError()
             if not upstream.ok:
                 raise RuntimeError(f"Hermes HTTP {upstream.status}")
-            if use_model_route:
-                adapter = _OpenAISessionStreamAdapter()
-                started = _session_sse_event("run.started", {"run_id": run_id})
-                tracker.consume_sse(tracking_id, started)
-                tracker.publish(tracking_id, started)
+            if use_selected_model:
+                adapter = _NativeSelectedModelStreamAdapter(
+                    selected_provider,
+                    selected_model,
+                    allow_custom_alias,
+                )
                 async for chunk in upstream.content.iter_chunked(CHUNK_SIZE):
                     for event in adapter.feed(chunk):
                         tracker.consume_sse(tracking_id, event)
-                        tracker.publish(tracking_id, event)
+                        await tracker.publish(tracking_id, event)
                 for event in adapter.finish():
                     tracker.consume_sse(tracking_id, event)
-                    tracker.publish(tracking_id, event)
+                    await tracker.publish(tracking_id, event)
                 tracker.finish(tracking_id, adapter.outcome or "failed")
             else:
+                sanitizer = _HermesSessionStreamSanitizer()
                 async for chunk in upstream.content.iter_chunked(CHUNK_SIZE):
-                    tracker.consume_sse(tracking_id, chunk)
-                    tracker.publish(tracking_id, chunk)
-                tracker.finish(tracking_id, "completed")
+                    for event in sanitizer.feed(chunk):
+                        tracker.consume_sse(tracking_id, event)
+                        await tracker.publish(tracking_id, event)
+                for event in sanitizer.finish():
+                    tracker.consume_sse(tracking_id, event)
+                    await tracker.publish(tracking_id, event)
+                tracker.finish(
+                    tracking_id,
+                    sanitizer.outcome or "failed",
+                    sanitizer.message,
+                )
         except asyncio.CancelledError:
-            tracker.finish(tracking_id, "stopped")
+            tracker.finish(
+                tracking_id,
+                "interrupted",
+                "Nexus local forwarding was cancelled; Hermes remote run status is unknown.",
+            )
             raise
         except HermesUpstreamAuthError:
             attachment_ids = request.get(REQUEST_ATTACHMENT_IDS_KEY, [])
@@ -2467,21 +3782,35 @@ async def _tracked_session_stream(request: web.Request) -> web.StreamResponse:
                 "code": "hermes_auth_failed",
                 "message": HERMES_AUTH_FAILED_MESSAGE,
             }, ensure_ascii=False)
-            tracker.publish(tracking_id, f"event: error\ndata: {payload}\n\n".encode("utf-8"))
+            await tracker.publish(tracking_id, f"event: error\ndata: {payload}\n\n".encode("utf-8"))
+        except HermesModelSelectionError as error:
+            attachment_ids = request.get(REQUEST_ATTACHMENT_IDS_KEY, [])
+            if attachment_ids:
+                request.app[MEDIA_STORE_KEY].discard_last_session_media(tracking_id, attachment_ids)
+            tracker.finish(tracking_id, "failed", str(error))
+            payload = json.dumps({"code": error.code, "message": str(error)}, ensure_ascii=False)
+            await tracker.publish(tracking_id, f"event: error\ndata: {payload}\n\n".encode("utf-8"))
         except Exception:
             attachment_ids = request.get(REQUEST_ATTACHMENT_IDS_KEY, [])
             if attachment_ids:
                 request.app[MEDIA_STORE_KEY].discard_last_session_media(tracking_id, attachment_ids)
             tracker.finish(tracking_id, "failed", "上游服务暂时不可用")
             payload = json.dumps({"message": "上游服务暂时不可用"}, ensure_ascii=False)
-            tracker.publish(tracking_id, f"event: error\ndata: {payload}\n\n".encode("utf-8"))
+            await tracker.publish(tracking_id, f"event: error\ndata: {payload}\n\n".encode("utf-8"))
         finally:
             if upstream is not None:
                 upstream.release()
-            tracker.publish(tracking_id, b"event: done\ndata: {}\n\n")
+            await tracker.publish(tracking_id, b"event: done\ndata: {}\n\n")
 
-    task = asyncio.create_task(consume_upstream())
-    tracker.tasks[tracking_id] = task
+    run_id = f"run_{uuid.uuid4().hex}"
+    try:
+        tracker.start(tracking_id, run_id)
+        task = asyncio.create_task(consume_upstream())
+        tracker.attach(tracking_id, task)
+    except BaseException:
+        tracker.release_reservation(tracking_id)
+        tracker.unsubscribe(tracking_id, queue)
+        raise
 
     def discard_completed_task(completed: asyncio.Task) -> None:
         if tracker.tasks.get(tracking_id) is completed:
@@ -2493,10 +3822,12 @@ async def _tracked_session_stream(request: web.Request) -> web.StreamResponse:
         "Cache-Control": "no-cache",
         "X-Accel-Buffering": "no",
     })
-    await response.prepare(request)
     try:
+        await response.prepare(request)
         while True:
             chunk = await queue.get()
+            if chunk is None:
+                break
             await response.write(chunk)
             if task.done() and queue.empty():
                 break
@@ -2512,36 +3843,205 @@ def _valid_file_id(file_id: str) -> bool:
     return len(file_id) == 32 and all(char in "0123456789abcdef" for char in file_id)
 
 
-def _secure_atomic_write(path: Path, content: str) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.parent / f".{path.name}.{uuid.uuid4().hex}.tmp"
+@dataclass(frozen=True)
+class _DirectoryIdentity:
+    device: int
+    inode: int
+
+
+def _is_reparse_entry(path: Path, entry_stat: os.stat_result) -> bool:
+    if path.is_symlink():
+        return True
+    if hasattr(os.path, "isjunction") and os.path.isjunction(path):
+        return True
+    reparse_flag = getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0)
+    return bool(getattr(entry_stat, "st_file_attributes", 0) & reparse_flag)
+
+
+class _ManagedPathGuard:
+    """Pins Nexus-owned directory identities and rejects redirected write paths."""
+
+    def __init__(self, root: Path) -> None:
+        self.root = Path(os.path.abspath(os.fspath(root)))
+        self.root.mkdir(parents=True, exist_ok=True)
+        root_stat = self._directory_stat(self.root)
+        self._anchors: dict[Path, _DirectoryIdentity] = {
+            self.root: self._identity(root_stat),
+        }
+        if os.name != "nt":
+            os.chmod(self.root, 0o700, follow_symlinks=False)
+
+    @staticmethod
+    def _identity(entry_stat: os.stat_result) -> _DirectoryIdentity:
+        return _DirectoryIdentity(entry_stat.st_dev, entry_stat.st_ino)
+
+    @staticmethod
+    def _directory_stat(path: Path) -> os.stat_result:
+        entry_stat = path.lstat()
+        if not stat.S_ISDIR(entry_stat.st_mode) or _is_reparse_entry(path, entry_stat):
+            raise OSError(f"managed directory is redirected or is not a directory: {path}")
+        return entry_stat
+
+    def _managed_path(self, path: Path) -> Path:
+        candidate = Path(os.path.abspath(os.fspath(path)))
+        try:
+            candidate.relative_to(self.root)
+        except ValueError as error:
+            raise OSError(f"path is outside the Nexus data directory: {candidate}") from error
+        return candidate
+
+    def _verify_anchor(self, path: Path, entry_stat: os.stat_result) -> None:
+        expected = self._anchors.get(path)
+        if expected is not None and self._identity(entry_stat) != expected:
+            raise OSError(f"managed directory identity changed: {path}")
+
+    def ensure_directory(self, path: Path, *, pin: bool = False) -> Path:
+        target = self._managed_path(path)
+        root_stat = self._directory_stat(self.root)
+        self._verify_anchor(self.root, root_stat)
+        current = self.root
+        relative = target.relative_to(self.root)
+        for part in relative.parts:
+            current = current / part
+            try:
+                entry_stat = self._directory_stat(current)
+            except FileNotFoundError:
+                self._verify_anchor(self.root, self._directory_stat(self.root))
+                os.mkdir(current, 0o700)
+                entry_stat = self._directory_stat(current)
+            self._verify_anchor(current, entry_stat)
+        if pin:
+            self._anchors[target] = self._identity(self._directory_stat(target))
+        return target
+
+    def verify_directory(
+        self,
+        path: Path,
+        expected: _DirectoryIdentity | None = None,
+    ) -> _DirectoryIdentity:
+        target = self.ensure_directory(path)
+        entry_stat = self._directory_stat(target)
+        identity = self._identity(entry_stat)
+        if expected is not None and identity != expected:
+            raise OSError(f"managed directory identity changed during write: {target}")
+        return identity
+
+    def verify_write_target(self, path: Path) -> tuple[Path, _DirectoryIdentity]:
+        target = self._managed_path(path)
+        if target == self.root:
+            raise OSError("the Nexus data directory cannot be used as a file target")
+        parent = self.ensure_directory(target.parent)
+        parent_identity = self.verify_directory(parent)
+        try:
+            target_stat = target.lstat()
+        except FileNotFoundError:
+            pass
+        else:
+            if (
+                not stat.S_ISREG(target_stat.st_mode)
+                or _is_reparse_entry(target, target_stat)
+                or target_stat.st_nlink != 1
+            ):
+                raise OSError(f"managed file target is redirected or hard-linked: {target}")
+        return parent, parent_identity
+
+    def unlink_file(self, path: Path, *, missing_ok: bool = True) -> None:
+        target = self._managed_path(path)
+        try:
+            parent, parent_identity = self.verify_write_target(target)
+        except FileNotFoundError:
+            if missing_ok:
+                return
+            raise
+        if not _path_entry_exists(target):
+            if missing_ok:
+                return
+            raise FileNotFoundError(target)
+        use_directory_handle = os.name != "nt" and os.unlink in os.supports_dir_fd
+        if use_directory_handle:
+            directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+            directory_descriptor = os.open(parent, directory_flags)
+            try:
+                opened_parent = os.fstat(directory_descriptor)
+                if _DirectoryIdentity(opened_parent.st_dev, opened_parent.st_ino) != parent_identity:
+                    raise OSError("managed parent changed before file removal")
+                os.unlink(target.name, dir_fd=directory_descriptor)
+            finally:
+                os.close(directory_descriptor)
+        else:
+            self.verify_directory(parent, parent_identity)
+            target.unlink(missing_ok=missing_ok)
+
+
+def _secure_atomic_write(
+    path: Path,
+    content: str,
+    path_guard: _ManagedPathGuard | None = None,
+) -> None:
+    guard = path_guard or _ManagedPathGuard(path.parent)
+    path = guard._managed_path(path)
+    parent, parent_identity = guard.verify_write_target(path)
+    temporary_name = f".{path.name}.{uuid.uuid4().hex}.tmp"
+    temporary = parent / temporary_name
     flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
     if hasattr(os, "O_BINARY"):
         flags |= os.O_BINARY
-    descriptor = os.open(temporary, flags, 0o600)
+    descriptor = -1
+    directory_descriptor = -1
+    use_directory_handle = os.name != "nt" and os.open in os.supports_dir_fd
     try:
+        if use_directory_handle:
+            directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+            directory_descriptor = os.open(parent, directory_flags)
+            opened_parent = os.fstat(directory_descriptor)
+            if _DirectoryIdentity(opened_parent.st_dev, opened_parent.st_ino) != parent_identity:
+                raise OSError("managed parent changed before temporary file creation")
+            descriptor = os.open(temporary_name, flags, 0o600, dir_fd=directory_descriptor)
+        else:
+            guard.verify_directory(parent, parent_identity)
+            descriptor = os.open(temporary, flags, 0o600)
         with os.fdopen(descriptor, "w", encoding="utf-8", newline="\n") as handle:
             descriptor = -1
             handle.write(content)
             handle.flush()
             os.fsync(handle.fileno())
-        if os.name != "nt":
-            os.chmod(temporary, 0o600)
-            if stat.S_IMODE(os.stat(temporary, follow_symlinks=False).st_mode) != 0o600:
-                raise OSError("temporary file permissions are not owner-only")
-        os.replace(temporary, path)
+        guard.verify_write_target(path)
+        guard.verify_directory(parent, parent_identity)
+        if use_directory_handle:
+            opened_parent = os.fstat(directory_descriptor)
+            if _DirectoryIdentity(opened_parent.st_dev, opened_parent.st_ino) != parent_identity:
+                raise OSError("managed parent changed before atomic replacement")
+            os.replace(
+                temporary_name,
+                path.name,
+                src_dir_fd=directory_descriptor,
+                dst_dir_fd=directory_descriptor,
+            )
+        else:
+            os.replace(temporary, path)
         if os.name != "nt" and stat.S_IMODE(os.stat(path, follow_symlinks=False).st_mode) != 0o600:
             raise OSError("persisted file permissions are not owner-only")
     finally:
         if descriptor != -1:
             os.close(descriptor)
-        temporary.unlink(missing_ok=True)
+        if directory_descriptor != -1:
+            try:
+                os.unlink(temporary_name, dir_fd=directory_descriptor)
+            except FileNotFoundError:
+                pass
+            os.close(directory_descriptor)
+        else:
+            try:
+                guard.verify_directory(parent, parent_identity)
+                temporary.unlink(missing_ok=True)
+            except OSError:
+                pass
 
 
 def _read_secure_existing_file(path: Path) -> str | None:
     try:
         file_stat = path.lstat()
-        if not stat.S_ISREG(file_stat.st_mode) or path.is_symlink():
+        if not stat.S_ISREG(file_stat.st_mode) or path.is_symlink() or file_stat.st_nlink != 1:
             return None
         if os.name != "nt":
             os.chmod(path, 0o600, follow_symlinks=False)
@@ -2564,9 +4064,29 @@ def _read_secure_existing_file(path: Path) -> str | None:
         return None
 
 
-def _secure_exclusive_write(path: Path, content: str) -> _OwnedFileIdentity:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    descriptor = os.open(path, _bootstrap_open_flags(os.O_WRONLY | os.O_CREAT | os.O_EXCL), 0o600)
+def _secure_exclusive_write(
+    path: Path,
+    content: str,
+    path_guard: _ManagedPathGuard | None = None,
+) -> _OwnedFileIdentity:
+    guard = path_guard or _ManagedPathGuard(path.parent)
+    path = guard._managed_path(path)
+    parent, parent_identity = guard.verify_write_target(path)
+    flags = _bootstrap_open_flags(os.O_WRONLY | os.O_CREAT | os.O_EXCL)
+    descriptor = -1
+    directory_descriptor = -1
+    use_directory_handle = os.name != "nt" and os.open in os.supports_dir_fd
+    if use_directory_handle:
+        directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+        directory_descriptor = os.open(parent, directory_flags)
+        opened_parent = os.fstat(directory_descriptor)
+        if _DirectoryIdentity(opened_parent.st_dev, opened_parent.st_ino) != parent_identity:
+            os.close(directory_descriptor)
+            raise OSError("managed parent changed before exclusive file creation")
+        descriptor = os.open(path.name, flags, 0o600, dir_fd=directory_descriptor)
+    else:
+        guard.verify_directory(parent, parent_identity)
+        descriptor = os.open(path, flags, 0o600)
     written_identity: _OwnedFileIdentity | None = None
     encoded_content = content.encode("utf-8")
     try:
@@ -2586,20 +4106,28 @@ def _secure_exclusive_write(path: Path, content: str) -> _OwnedFileIdentity:
             raise OSError("persisted file permissions are not owner-only")
         return written_identity
     except Exception:
-        _unlink_owned_file(path, written_identity)
+        _unlink_owned_file(path, written_identity, guard)
         raise
     finally:
         if descriptor != -1:
             os.close(descriptor)
+        if directory_descriptor != -1:
+            os.close(directory_descriptor)
 
 
-def _unlink_owned_file(path: Path, identity: _OwnedFileIdentity | None) -> None:
+def _unlink_owned_file(
+    path: Path,
+    identity: _OwnedFileIdentity | None,
+    path_guard: _ManagedPathGuard | None = None,
+) -> None:
     if identity is None:
         return
     descriptor = -1
     try:
+        if path_guard is not None:
+            path_guard.verify_write_target(path)
         current = path.lstat()
-        if not stat.S_ISREG(current.st_mode) or path.is_symlink():
+        if not stat.S_ISREG(current.st_mode) or _is_reparse_entry(path, current):
             return
         if (current.st_dev, current.st_ino, current.st_size) != (
             identity.device,
@@ -2634,6 +4162,8 @@ def _unlink_owned_file(path: Path, identity: _OwnedFileIdentity | None) -> None:
             identity.size,
         ) or not stat.S_ISREG(final_stat.st_mode):
             return
+        if path_guard is not None:
+            path_guard.verify_write_target(path)
         path.unlink()
     except (OSError, NotImplementedError):
         pass
@@ -2656,7 +4186,7 @@ def _bootstrap_open_flags(access: int) -> int:
 def _read_secure_bootstrap_token(path: Path) -> str:
     try:
         file_stat = path.lstat()
-        if not stat.S_ISREG(file_stat.st_mode) or path.is_symlink():
+        if not stat.S_ISREG(file_stat.st_mode) or path.is_symlink() or file_stat.st_nlink != 1:
             return ""
         if os.name != "nt" and stat.S_IMODE(file_stat.st_mode) != 0o600:
             return ""
@@ -2679,15 +4209,42 @@ def _read_secure_bootstrap_token(path: Path) -> str:
         return ""
 
 
-def _secure_bootstrap_token_file(path: Path) -> bool:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    flags = _bootstrap_open_flags(os.O_WRONLY | os.O_CREAT | os.O_EXCL)
+def _secure_bootstrap_token_file(
+    path: Path,
+    path_guard: _ManagedPathGuard | None = None,
+) -> bool:
+    guard = path_guard or _ManagedPathGuard(path.parent)
     try:
-        descriptor = os.open(path, flags, 0o600)
+        path = guard._managed_path(path)
+        parent, parent_identity = guard.verify_write_target(path)
+    except OSError:
+        return False
+    descriptor = -1
+    directory_descriptor = -1
+    use_directory_handle = os.name != "nt" and os.open in os.supports_dir_fd
+    try:
+        flags = _bootstrap_open_flags(os.O_WRONLY | os.O_CREAT | os.O_EXCL)
+        if use_directory_handle:
+            directory_flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0) | getattr(os, "O_NOFOLLOW", 0)
+            directory_descriptor = os.open(parent, directory_flags)
+            opened_parent = os.fstat(directory_descriptor)
+            if _DirectoryIdentity(opened_parent.st_dev, opened_parent.st_ino) != parent_identity:
+                raise OSError("managed parent changed before bootstrap token creation")
+            descriptor = os.open(path.name, flags, 0o600, dir_fd=directory_descriptor)
+        else:
+            guard.verify_directory(parent, parent_identity)
+            descriptor = os.open(path, flags, 0o600)
     except FileExistsError:
+        if directory_descriptor != -1:
+            os.close(directory_descriptor)
         try:
+            guard.verify_write_target(path)
             existing_stat = path.lstat()
-            if not stat.S_ISREG(existing_stat.st_mode) or path.is_symlink():
+            if (
+                not stat.S_ISREG(existing_stat.st_mode)
+                or _is_reparse_entry(path, existing_stat)
+                or existing_stat.st_nlink != 1
+            ):
                 return False
             if os.name != "nt":
                 os.chmod(path, 0o600, follow_symlinks=False)
@@ -2695,31 +4252,36 @@ def _secure_bootstrap_token_file(path: Path) -> bool:
             return False
         return bool(_read_secure_bootstrap_token(path))
     except OSError:
+        if directory_descriptor != -1:
+            os.close(directory_descriptor)
         return False
-    if descriptor is not None:
-        try:
-            os.write(descriptor, secrets.token_urlsafe(32).encode("utf-8"))
-            os.fsync(descriptor)
-        finally:
+    try:
+        os.write(descriptor, secrets.token_urlsafe(32).encode("utf-8"))
+        os.fsync(descriptor)
+    except OSError:
+        return False
+    finally:
+        if descriptor != -1:
             os.close(descriptor)
-    if os.name != "nt":
-        try:
-            if stat.S_IMODE(path.lstat().st_mode) != 0o600:
-                path.unlink(missing_ok=True)
-                return False
-        except OSError:
-            path.unlink(missing_ok=True)
-            return False
+        if directory_descriptor != -1:
+            os.close(directory_descriptor)
     return bool(_read_secure_bootstrap_token(path))
 
 
 def _canonical_parent_path(path: Path) -> Path:
     absolute = Path(os.path.abspath(os.fspath(path)))
-    try:
-        parent = absolute.parent.resolve(strict=False)
-    except OSError:
-        parent = absolute.parent
-    return parent / absolute.name
+    return absolute.parent / absolute.name
+
+
+def _canonical_directory_path(path: Path) -> Path:
+    return Path(os.path.abspath(os.fspath(path)))
+
+
+def _nexus_owned_path(data_root: Path, path: Path, label: str) -> Path:
+    resolved = _canonical_parent_path(path)
+    if resolved == data_root or data_root not in resolved.parents:
+        raise ValueError(f"{label} must be inside the Nexus data directory")
+    return resolved
 
 
 def _path_entry_exists(path: Path) -> bool:
@@ -2741,6 +4303,7 @@ def create_app(
     upstream_url: str | None,
     upstream_token: str | None,
     storage_dir: Path,
+    data_dir: Path | None = None,
     credentials_path: Path | None = None,
     config_path: Path | None = None,
     bootstrap_token_path: Path | None = None,
@@ -2750,9 +4313,26 @@ def create_app(
     login_rate_limit: int = 5,
     login_rate_window_seconds: float = 60.0,
     transcribe_audio: Callable[[str], dict[str, Any]] | None = None,
+    synthesize_speech_audio: Callable[[str, str], bytes] | None = None,
+    speech_max_concurrency: int = SPEECH_MAX_CONCURRENCY,
+    speech_max_audio_bytes: int = SPEECH_MAX_AUDIO_BYTES,
+    cloud_asr_provider: CloudAsrProvider | None = None,
+    cloud_asr_limits: CloudAsrLimits | None = None,
 ) -> web.Application:
-    resolved_config_path = _canonical_parent_path(
-        Path(config_path or (Path(storage_dir).resolve().parent / "config.json"))
+    resolved_data_root = _canonical_directory_path(
+        Path(data_dir) if data_dir is not None else Path(storage_dir).parent
+    )
+    path_guard = _ManagedPathGuard(resolved_data_root)
+    resolved_storage_path = _canonical_directory_path(Path(storage_dir))
+    resolved_storage_path = _nexus_owned_path(
+        resolved_data_root, resolved_storage_path, "media directory"
+    )
+    path_guard.ensure_directory(resolved_storage_path, pin=True)
+    resolved_config_path = _nexus_owned_path(
+        resolved_data_root,
+        Path(config_path or (resolved_data_root / "config.json"))
+        ,
+        "configuration path",
     )
     saved_config: dict[str, Any] = {}
     config_exists = _path_entry_exists(resolved_config_path)
@@ -2774,12 +4354,24 @@ def create_app(
     upstream_url = str(saved_config.get("hermes_api_url") or upstream_url or "")
     upstream_token = str(saved_config.get("hermes_api_token") or upstream_token or "")
     profiles = _load_saved_profiles(saved_config.get("hermes_profiles"))
+    raw_openai_asr = saved_config.get("openai_asr")
+    if not isinstance(raw_openai_asr, dict):
+        raw_openai_asr = {}
+    openai_asr = OpenAiAsrConfig(
+        enabled=raw_openai_asr.get("enabled") is True,
+        base_url=normalize_openai_base_url(str(raw_openai_asr.get("base_url", ""))) or "",
+        api_key=str(raw_openai_asr.get("api_key", "")).strip(),
+        model=normalize_openai_model(str(raw_openai_asr.get("model", "whisper-1"))) or "whisper-1",
+    )
     app = web.Application(
         middlewares=[security_headers, device_auth],
         client_max_size=max_upload_bytes + 1024 * 1024,
     )
-    resolved_credentials_path = _canonical_parent_path(
-        Path(credentials_path or (Path(storage_dir).resolve().parent / "account.json"))
+    resolved_credentials_path = _nexus_owned_path(
+        resolved_data_root,
+        Path(credentials_path or (resolved_data_root / "account.json"))
+        ,
+        "credentials path",
     )
     credentials_exists = _path_entry_exists(resolved_credentials_path)
     credentials_valid = not credentials_exists
@@ -2805,7 +4397,14 @@ def create_app(
             credentials_valid = False
     elif username and password:
         password_salt, password_hash = _hash_password(password)
-        _write_credentials(resolved_credentials_path, username, password_salt, password_hash, revision)
+        _write_credentials(
+            resolved_credentials_path,
+            username,
+            password_salt,
+            password_hash,
+            revision,
+            path_guard,
+        )
         credentials_valid = True
     initialized = bool(
         config_valid
@@ -2817,17 +4416,26 @@ def create_app(
         and upstream_url.startswith(("http://", "https://"))
     )
     if initialized and not config_exists:
-        _write_config(resolved_config_path, upstream_url, upstream_token, session_secret)
+        _write_config(
+            resolved_config_path,
+            upstream_url,
+            upstream_token,
+            session_secret,
+            path_guard=path_guard,
+        )
     app[USERNAME_KEY] = username
     app[PASSWORD_KEY] = password
     app[CREDENTIALS_PATH_KEY] = resolved_credentials_path
     app[CONFIG_PATH_KEY] = resolved_config_path
-    resolved_bootstrap_token_path = Path(os.path.abspath(Path(
+    resolved_bootstrap_token_path = _nexus_owned_path(resolved_data_root, Path(
         bootstrap_token_path or (resolved_config_path.parent / "bootstrap.token")
-    )))
+    ), "bootstrap token path")
     setup_available = not initialized and config_valid and credentials_valid and not config_exists and not credentials_exists
     if setup_available:
-        setup_available = _secure_bootstrap_token_file(resolved_bootstrap_token_path)
+        setup_available = _secure_bootstrap_token_file(
+            resolved_bootstrap_token_path,
+            path_guard,
+        )
     app[BOOTSTRAP_TOKEN_PATH_KEY] = resolved_bootstrap_token_path
     app[GATEWAY_CONFIG_KEY] = GatewayConfig(
         initialized=initialized,
@@ -2836,24 +4444,35 @@ def create_app(
         upstream_url=upstream_url.rstrip("/"),
         upstream_token=upstream_token,
         profiles=profiles,
+        openai_asr=openai_asr,
     )
     app[AUTH_STATE_KEY] = AuthState(username, password_salt, password_hash, legacy_password, revision)
+    app[MANAGED_PATH_GUARD_KEY] = path_guard
     app[HERMES_PROFILE_IDENTITY_CACHE_KEY] = {}
     app[LOGIN_RATE_LIMITER_KEY] = LoginRateLimiter(login_rate_limit, login_rate_window_seconds)
     app[SETUP_LOCK_KEY] = asyncio.Lock()
     app[MEDIA_STORE_KEY] = MediaStore(
-        storage_dir,
+        resolved_storage_path,
         max_upload_bytes,
         max_total_storage_bytes,
         min_free_disk_bytes,
+        path_guard,
     )
-    app[RUN_TRACKER_KEY] = RunTracker(Path(storage_dir).resolve().parent / "run_status.json")
+    app[RUN_TRACKER_KEY] = RunTracker(
+        resolved_data_root / "run_status.json",
+        path_guard,
+    )
     app[EXTERNAL_RUN_OBSERVER_KEY] = ExternalRunObserver()
     app[EXTERNAL_RUN_OBSERVERS_KEY] = {}
     # Tests and custom deployments may inject a standalone transcriber. The
     # packaged Gateway never imports Hermes internals; without an injected
     # callback it uses only a capability-advertised original Hermes HTTP API.
     app[TRANSCRIBE_AUDIO_KEY] = transcribe_audio
+    app[SYNTHESIZE_SPEECH_KEY] = synthesize_speech_audio
+    app[SPEECH_SEMAPHORE_KEY] = asyncio.Semaphore(max(1, speech_max_concurrency))
+    app[SPEECH_MAX_AUDIO_BYTES_KEY] = max(1, speech_max_audio_bytes)
+    app[EPHEMERAL_CLEANUP_TASKS_KEY] = set()
+    configure_cloud_asr(app, cloud_asr_provider, cloud_asr_limits)
     app.on_startup.append(_create_client_session)
     app.on_cleanup.append(_close_client_session)
 
@@ -2868,12 +4487,17 @@ def create_app(
     app.router.add_get("/api/admin/overview", admin_overview)
     app.router.add_get("/api/admin/hermes-config", admin_hermes_config)
     app.router.add_put("/api/admin/hermes-config", update_hermes_config)
+    app.router.add_get("/api/admin/asr-config", admin_asr_config)
+    app.router.add_put("/api/admin/asr-config", update_asr_config)
     app.router.add_get("/api/hermes/connections", list_hermes_connections)
     app.router.add_get("/api/hermes/personas", list_hermes_profiles)
     app.router.add_get("/api/hermes/profiles", list_hermes_profiles)
     app.router.add_get("/api/admin/files", admin_files)
     app.router.add_get("/api/admin/audio", admin_audio)
+    app.router.add_get("/api/asr/capabilities", cloud_asr_capabilities)
+    app.router.add_get("/api/asr/stream", cloud_asr_stream)
     app.router.add_post("/api/audio/transcriptions", transcribe_upload)
+    app.router.add_post("/api/audio/speech", synthesize_speech)
     app.router.add_post("/api/uploads", upload)
     app.router.add_get("/api/files/{file_id}/metadata", file_metadata)
     app.router.add_get("/api/files/{file_id}", download)

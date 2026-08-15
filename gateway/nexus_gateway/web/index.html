@@ -167,6 +167,24 @@
             </div>
           </form>
         </article>
+        <article class="panel hermes-config-panel">
+          <div class="panel-head"><div><span class="eyebrow">Speech to text</span><h2>OpenAI 兼容在线 ASR</h2></div></div>
+          <form id="asrConfigForm" class="system-form">
+            <label class="field span-two checkbox-field"><input id="asrEnabled" type="checkbox"><span>启用在线语音识别</span></label>
+            <label class="field span-two"><span>API Base URL</span><input id="asrBaseUrl" type="url" placeholder="https://api.openai.com/v1" autocomplete="url"></label>
+            <label class="field"><span>API Key</span><input id="asrApiKey" type="password" autocomplete="off" placeholder="地址不变时可留空；修改地址需重填"></label>
+            <label class="field"><span>转写模型</span><input id="asrModel" value="whisper-1" maxlength="128" placeholder="whisper-1"></label>
+            <label class="field span-two"><span>当前 Nexus 密码</span><input id="asrCurrentPassword" type="password" autocomplete="current-password" required></label>
+            <div class="hermes-key-state span-two">
+              <strong id="asrKeyConfigured">正在读取 Key 状态</strong>
+              <span>Gateway 会调用 Base URL 下的 <code>/audio/transcriptions</code>，以 multipart/form-data 发送 file、model、language 和 prompt。API Key 永远不会回显。</span>
+            </div>
+            <div class="form-actions span-two">
+              <button class="button primary" id="saveAsrConfigButton" type="submit">保存在线 ASR</button>
+              <div id="asrConfigMessage" class="form-message" role="status"></div>
+            </div>
+          </form>
+        </article>
         <article class="panel proxy-panel">
           <div class="panel-head"><div><span class="eyebrow">Deployment</span><h2>反向代理说明</h2></div></div>
           <div class="proxy-content">

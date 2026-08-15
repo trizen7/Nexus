@@ -21,6 +21,13 @@ def _default_port() -> int:
     return int(value)
 
 
+def _configured_cloud_asr_provider(parser: argparse.ArgumentParser):
+    provider = os.getenv("NEXUS_CLOUD_ASR_PROVIDER", "").strip().casefold()
+    if provider:
+        parser.error("NEXUS_CLOUD_ASR_PROVIDER is not supported by this Gateway build")
+    return None
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Nexus mobile gateway (HTTP origin)")
     parser.add_argument("--host", default=os.getenv("NEXUS_GATEWAY_HOST", "127.0.0.1"))
@@ -45,21 +52,26 @@ def main() -> None:
     if args.port <= 0 or args.port > 65535:
         parser.error("--port must be between 1 and 65535")
 
+    data_dir = Path(os.getenv("NEXUS_DATA_DIR", os.getenv("NEXUS_FNOS_DATA_DIR", "./data")))
+    cloud_asr_provider = _configured_cloud_asr_provider(parser)
     app = create_app(
         username=_optional("NEXUS_USERNAME"),
         password=_optional("NEXUS_PASSWORD"),
         session_secret=_optional("NEXUS_SESSION_SECRET"),
         upstream_url=_optional("HERMES_API_URL"),
         upstream_token=_optional("HERMES_API_TOKEN"),
-        storage_dir=Path(os.getenv("NEXUS_MEDIA_DIR", "./data/media")),
-        credentials_path=Path(os.getenv("NEXUS_CREDENTIALS_FILE", "./data/account.json")),
-        config_path=Path(os.getenv("NEXUS_CONFIG_FILE", "./data/config.json")),
-        bootstrap_token_path=Path(os.getenv("NEXUS_BOOTSTRAP_TOKEN_FILE", "./data/bootstrap.token")),
+        data_dir=data_dir,
+        storage_dir=Path(os.getenv("NEXUS_MEDIA_DIR", str(data_dir / "media"))),
+        credentials_path=Path(os.getenv("NEXUS_CREDENTIALS_FILE", str(data_dir / "account.json"))),
+        config_path=Path(os.getenv("NEXUS_CONFIG_FILE", str(data_dir / "config.json"))),
+        bootstrap_token_path=Path(os.getenv("NEXUS_BOOTSTRAP_TOKEN_FILE", str(data_dir / "bootstrap.token"))),
         max_upload_bytes=int(os.getenv("NEXUS_MAX_UPLOAD_BYTES", str(50 * 1024 * 1024))),
         max_total_storage_bytes=int(os.getenv("NEXUS_MAX_TOTAL_STORAGE_BYTES", str(10 * 1024 * 1024 * 1024))),
         min_free_disk_bytes=int(os.getenv("NEXUS_MIN_FREE_DISK_BYTES", str(512 * 1024 * 1024))),
         login_rate_limit=int(os.getenv("NEXUS_LOGIN_RATE_LIMIT", "5")),
         login_rate_window_seconds=float(os.getenv("NEXUS_LOGIN_RATE_WINDOW_SECONDS", "60")),
+        cloud_asr_provider=cloud_asr_provider,
+        cloud_asr_limits=None,
     )
 
     print(f"Listening on http://{args.host}:{args.port}", flush=True)

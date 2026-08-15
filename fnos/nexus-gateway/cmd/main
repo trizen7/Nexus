@@ -162,6 +162,7 @@ start_gateway() {
   export HOME="$TRIM_PKGVAR"
   export TMPDIR="$TMP_DIR"
   export NEXUS_FNOS_DATA_DIR="$TRIM_PKGVAR"
+  export NEXUS_DATA_DIR="$TRIM_PKGVAR"
   export NEXUS_GATEWAY_HOST="0.0.0.0"
   export NEXUS_GATEWAY_PORT="8787"
   export NEXUS_CONFIG_FILE="$TRIM_PKGVAR/config.json"

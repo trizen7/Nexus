@@ -149,11 +149,11 @@ function showPage(name) {
   $('pageDesc').textContent = titles[name][1];
   if (name === 'files') loadFiles();
   if (name === 'audio') loadAudio();
-  if (name === 'system') Promise.allSettled([loadHealth(), loadHermesConfig()]);
+  if (name === 'system') Promise.allSettled([loadHealth(), loadHermesConfig(), loadAsrConfig()]);
 }
 
 async function loadAll() {
-  await Promise.allSettled([loadOverview(), loadFiles(), loadAudio(), loadHealth(), loadHermesConfig()]);
+  await Promise.allSettled([loadOverview(), loadFiles(), loadAudio(), loadHealth(), loadHermesConfig(), loadAsrConfig()]);
 }
 
 async function loadOverview() {
@@ -198,6 +198,54 @@ async function loadHermesConfig() {
   $('hermesKeyConfigured').textContent = payload.key_configured ? '当前已配置 API Server Key' : '当前未配置 API Server Key';
   hermesProfiles = Array.isArray(payload.profiles) ? payload.profiles.map(profile => ({ ...profile })) : [];
   renderHermesProfiles();
+}
+
+async function loadAsrConfig() {
+  const response = await api('/api/admin/asr-config');
+  if (!response.ok) throw new Error('在线 ASR 配置读取失败');
+  const payload = await response.json();
+  $('asrEnabled').checked = payload.enabled === true;
+  $('asrBaseUrl').value = payload.base_url || '';
+  $('asrModel').value = payload.model || 'whisper-1';
+  $('asrKeyConfigured').textContent = payload.key_configured ? '当前已配置 API Key' : '当前未配置 API Key';
+}
+
+async function saveAsrConfig(event) {
+  event.preventDefault();
+  const button = $('saveAsrConfigButton');
+  const message = $('asrConfigMessage');
+  message.textContent = '';
+  message.className = 'form-message';
+  button.disabled = true;
+  try {
+    const response = await api('/api/admin/asr-config', {
+      method: 'PUT',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        enabled: $('asrEnabled').checked,
+        base_url: $('asrBaseUrl').value.trim(),
+        api_key: $('asrApiKey').value,
+        model: $('asrModel').value.trim(),
+        current_password: $('asrCurrentPassword').value,
+      }),
+    });
+    const payload = await response.json();
+    if (!response.ok) {
+      message.textContent = payload.error?.message || '在线 ASR 配置保存失败';
+      message.className = 'form-message error';
+      return;
+    }
+    $('asrApiKey').value = '';
+    $('asrCurrentPassword').value = '';
+    message.textContent = payload.enabled ? '在线 ASR 已启用' : '在线 ASR 已停用';
+    message.className = 'form-message success';
+    await loadAsrConfig();
+  } catch (_error) {
+    message.textContent = '保存请求失败，请检查 Nexus Gateway 状态';
+    message.className = 'form-message error';
+  } finally {
+    button.disabled = false;
+  }
 }
 
 function renderHermesProfiles() {
@@ -505,6 +553,7 @@ $('loginForm').onsubmit = signIn;
 $('logoutButton').onclick = logout;
 $('accountForm').onsubmit = changeAccount;
 $('hermesConfigForm').onsubmit = saveHermesConfig;
+$('asrConfigForm').onsubmit = saveAsrConfig;
 $('addHermesProfileButton').onclick = addHermesProfile;
 $('search').oninput = renderFiles;
 $('audioSearch').oninput = renderAudio;

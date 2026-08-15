@@ -5,6 +5,7 @@ import json
 import os
 import shutil
 import stat
+import subprocess
 import threading
 import time
 from pathlib import Path
@@ -17,6 +18,7 @@ from aiohttp.test_utils import TestClient, TestServer, make_mocked_request
 from nexus_gateway.app import (
     CONFIG_PATH_KEY,
     CREDENTIALS_PATH_KEY,
+    EPHEMERAL_CLEANUP_TASKS_KEY,
     EXTERNAL_RUN_OBSERVER_KEY,
     GATEWAY_CONFIG_KEY,
     MEDIA_STORE_KEY,
@@ -24,6 +26,8 @@ from nexus_gateway.app import (
     MOBILE_CLIENT_SYSTEM_MESSAGE,
     RUN_TRACKER_KEY,
     SETUP_LOCK_KEY,
+    SYNTHESIZE_SPEECH_KEY,
+    TRANSCRIBE_AUDIO_KEY,
     MediaStore,
     RunTracker,
     StoredFile,
@@ -36,6 +40,8 @@ from nexus_gateway.app import (
 @pytest_asyncio.fixture
 async def upstream_client():
     captured_chat: dict = {}
+    chat_requests: list[dict] = []
+    captured_model_lock: dict = {}
     captured_completion: dict = {}
     captured_completion_headers: dict[str, str] = {}
     release_chat = asyncio.Event()
@@ -51,6 +57,23 @@ async def upstream_client():
     models_state = {
         "status": 200,
         "payload": {"object": "list", "data": [{"id": "test-model"}]},
+    }
+    model_options_state = {
+        "status": 200,
+        "release": None,
+        "requests": 0,
+        "timeout_requests": 0,
+        "payload": {
+            "providers": [{
+                "slug": "openai-codex",
+                "name": "OpenAI Codex",
+                "source": "built-in",
+                "authenticated": True,
+                "models": ["gpt-5.6"],
+            }],
+            "model": "gpt-5.6",
+            "provider": "openai-codex",
+        },
     }
     expected_auth = {"token": "upstream-secret"}
     session_state = {
@@ -68,7 +91,10 @@ async def upstream_client():
     chat_state = {
         "status": 200,
         "payload": None,
+        "stream": None,
+        "json_payload": None,
     }
+    model_lock_state = {"release": None}
     capabilities_state = {
         "status": 404,
         "payload": {},
@@ -101,6 +127,18 @@ async def upstream_client():
             return web.json_response({"detail": "invalid upstream credential"}, status=401)
         return web.json_response(models_state["payload"], status=int(models_state["status"]))
 
+    async def model_options(request):
+        if not authorized(request):
+            return web.json_response({"detail": "invalid upstream credential"}, status=401)
+        model_options_state["requests"] += 1
+        if model_options_state["timeout_requests"] > 0:
+            model_options_state["timeout_requests"] -= 1
+            await asyncio.Event().wait()
+        release = model_options_state.get("release")
+        if isinstance(release, asyncio.Event):
+            await release.wait()
+        return web.json_response(model_options_state["payload"], status=int(model_options_state["status"]))
+
     async def sessions(request):
         probe_counts["sessions"] += 1
         if not authorized(request):
@@ -127,10 +165,22 @@ async def upstream_client():
         assert request.headers["Authorization"] == "Bearer upstream-secret"
         captured_chat.clear()
         captured_chat.update(await request.json())
+        chat_requests.append(dict(captured_chat))
+        if chat_state.get("json_payload") is not None:
+            return web.json_response(
+                chat_state["json_payload"],
+                status=int(chat_state["status"]),
+                headers={"X-Upstream-Contract": "preserved"},
+            )
         if int(chat_state["status"]) != 200:
             return web.json_response(
                 chat_state.get("payload") or {"error": "upstream rejected request"},
                 status=int(chat_state["status"]),
+            )
+        if chat_state.get("stream") is not None:
+            return web.Response(
+                text=str(chat_state["stream"]),
+                content_type="text/event-stream",
             )
         if captured_chat.get("message") == "slow-run":
             response = web.StreamResponse(headers={"Content-Type": "text/event-stream"})
@@ -140,10 +190,51 @@ async def upstream_client():
             await release_chat.wait()
             await response.write(b"event: run.completed\ndata: {}\n\n")
             return response
+        if captured_model_lock:
+            runtime = {
+                "provider": captured_model_lock.get("provider", ""),
+                "model": captured_model_lock.get("model", ""),
+                "route_source": "session_model_lock",
+                "model_lock": "confirmed",
+                "requested": {
+                    "provider": captured_model_lock.get("provider", ""),
+                    "model": captured_model_lock.get("model", ""),
+                },
+            }
+            return web.Response(
+                text=(
+                    f"event: run.started\ndata: {json.dumps({'runtime': runtime})}\n\n"
+                    'event: assistant.delta\ndata: {"delta":"\u6a21\u578b\u56de\u590d"}\n\n'
+                    f"event: run.completed\ndata: {json.dumps({'completed': True, 'runtime': runtime})}\n\n"
+                    "event: done\ndata: {}\n\n"
+                ),
+                content_type="text/event-stream",
+            )
         return web.Response(
-            text="event: assistant.delta\ndata: {\"delta\":\"收到\"}\n\n",
+            text=(
+                "event: assistant.delta\ndata: {\"delta\":\"收到\"}\n\n"
+                "event: run.completed\ndata: {}\n\n"
+                "event: done\ndata: {}\n\n"
+            ),
             content_type="text/event-stream",
         )
+
+    async def session_model_lock(request):
+        assert request.headers["Authorization"] == "Bearer upstream-secret"
+        captured_model_lock.clear()
+        captured_model_lock.update(await request.json())
+        release = model_lock_state.get("release")
+        if isinstance(release, asyncio.Event):
+            await release.wait()
+        return web.json_response({
+            "object": "hermes.session.model_lock",
+            "session_id": request.match_info["session_id"],
+            "runtime": {
+                "provider": captured_model_lock.get("provider", ""),
+                "model": captured_model_lock.get("model", ""),
+                "model_lock": "accepted",
+            },
+        })
 
     async def chat_completions(request):
         assert request.headers["Authorization"] == "Bearer upstream-secret"
@@ -179,14 +270,18 @@ async def upstream_client():
         reader = await request.multipart()
         uploaded = b""
         filename = ""
+        fields = {}
         async for field in reader:
             if field.name == "file":
                 filename = field.filename or ""
                 uploaded = await field.read(decode=False)
+            elif field.name:
+                fields[field.name] = await field.text()
         audio_requests.append({
             "authorization": request.headers.get("Authorization", ""),
             "filename": filename,
             "content": uploaded,
+            "fields": fields,
         })
         return web.json_response(
             audio_transcription_state["payload"],
@@ -273,6 +368,7 @@ async def upstream_client():
     app.router.add_get("/health", health)
     app.router.add_get("/health/detailed", detailed_health)
     app.router.add_get("/v1/models", models)
+    app.router.add_get("/api/model/options", model_options)
     app.router.add_get("/v1/capabilities", capabilities)
     app.router.add_post("/v1/audio/transcriptions", audio_transcriptions)
     app.router.add_get("/api/sessions", sessions)
@@ -282,6 +378,7 @@ async def upstream_client():
     app.router.add_get("/api/sessions/{session_id}/messages", messages)
     app.router.add_post("/api/sessions/{session_id}/chat", chat)
     app.router.add_post("/api/sessions/{session_id}/chat/stream", chat)
+    app.router.add_post("/api/sessions/{session_id}/model", session_model_lock)
     app.router.add_post("/v1/chat/completions", chat_completions)
     app.router.add_get("/profile-a/health", profile_health)
     app.router.add_get("/profile-a/health/detailed", profile_detailed_health)
@@ -291,6 +388,8 @@ async def upstream_client():
     server = TestServer(app)
     client = TestClient(server)
     client.captured_chat = captured_chat
+    client.chat_requests = chat_requests
+    client.captured_model_lock = captured_model_lock
     client.captured_completion = captured_completion
     client.captured_completion_headers = captured_completion_headers
     client.release_chat = release_chat
@@ -298,6 +397,8 @@ async def upstream_client():
     client.health_state = health_state
     client.detailed_health_state = detailed_health_state
     client.models_state = models_state
+    client.model_options_state = model_options_state
+    client.model_lock_state = model_lock_state
     client.expected_auth = expected_auth
     client.session_state = session_state
     client.chat_state = chat_state
@@ -327,6 +428,53 @@ async def gateway_client(tmp_path: Path, upstream_client: TestClient):
         max_upload_bytes=1024 * 1024,
         transcribe_audio=lambda _path: {"success": True, "transcript": "测试语音", "provider": "test"},
     )
+    client = TestClient(TestServer(app))
+    await client.start_server()
+    try:
+        yield client
+    finally:
+        await client.close()
+
+
+@pytest_asyncio.fixture
+async def failing_transcription_gateway_client(tmp_path: Path, upstream_client: TestClient):
+    app = create_app(
+        username="nexus",
+        password="test-password",
+        session_secret="test-session-secret",
+        upstream_url=str(upstream_client.make_url("/")).rstrip("/"),
+        upstream_token="upstream-secret",
+        storage_dir=tmp_path / "media",
+        credentials_path=tmp_path / "auth.json",
+        max_upload_bytes=1024 * 1024,
+        transcribe_audio=lambda _path: {
+            "success": False,
+            "code": "transcription_failed",
+            "message": "语音转写失败",
+        },
+    )
+    client = TestClient(TestServer(app))
+    await client.start_server()
+    try:
+        yield client
+    finally:
+        await client.close()
+
+
+@pytest_asyncio.fixture
+async def speech_gateway_client(tmp_path: Path, upstream_client: TestClient):
+    app = create_app(
+        username="nexus",
+        password="test-password",
+        session_secret="test-session-secret",
+        upstream_url=str(upstream_client.make_url("/")).rstrip("/"),
+        upstream_token="upstream-secret",
+        storage_dir=tmp_path / "media",
+        credentials_path=tmp_path / "auth.json",
+        max_upload_bytes=1024 * 1024,
+        transcribe_audio=lambda _path: {"success": True, "transcript": "测试语音", "provider": "test"},
+    )
+    app[SYNTHESIZE_SPEECH_KEY] = lambda text, voice: f"{voice}:{text}".encode("utf-8")
     client = TestClient(TestServer(app))
     await client.start_server()
     try:
@@ -502,10 +650,10 @@ async def test_setup_rolls_back_when_account_commit_fails(
     token = token_path.read_text(encoding="utf-8").strip()
     original_write = gateway_app._secure_exclusive_write
 
-    def fail_account_commit(path, content):
+    def fail_account_commit(path, content, path_guard=None):
         if path == account_path:
             raise OSError("injected account commit failure")
-        return original_write(path, content)
+        return original_write(path, content, path_guard)
 
     monkeypatch.setattr(gateway_app, "_secure_exclusive_write", fail_account_commit)
     async with TestClient(TestServer(app)) as client:
@@ -594,12 +742,12 @@ async def test_setup_rollback_does_not_delete_replaced_foreign_config(
     token = token_path.read_text(encoding="utf-8").strip()
     original_write = gateway_app._secure_exclusive_write
 
-    def replace_config_before_account_failure(path, content):
+    def replace_config_before_account_failure(path, content, path_guard=None):
         if path == account_path:
             config_path.unlink()
             config_path.write_text("foreign-config", encoding="utf-8")
             raise OSError("injected account commit failure")
-        return original_write(path, content)
+        return original_write(path, content, path_guard)
 
     monkeypatch.setattr(gateway_app, "_secure_exclusive_write", replace_config_before_account_failure)
     async with TestClient(TestServer(app)) as client:
@@ -954,6 +1102,91 @@ def test_existing_config_and_account_symlinks_fail_closed(tmp_path: Path, file_n
     assert app[GATEWAY_CONFIG_KEY].setup_available is False
 
 
+@pytest.mark.parametrize("field", ["storage", "credentials", "config", "bootstrap"])
+def test_create_app_rejects_paths_outside_nexus_data_directory(tmp_path: Path, field: str):
+    data_dir = tmp_path / "nexus-data"
+    outside = tmp_path / "outside"
+    paths = {
+        "storage_dir": data_dir / "media",
+        "credentials_path": data_dir / "account.json",
+        "config_path": data_dir / "config.json",
+        "bootstrap_token_path": data_dir / "bootstrap.token",
+    }
+    argument = {
+        "storage": "storage_dir",
+        "credentials": "credentials_path",
+        "config": "config_path",
+        "bootstrap": "bootstrap_token_path",
+    }[field]
+    paths[argument] = outside
+
+    with pytest.raises(ValueError, match="inside the Nexus data directory"):
+        create_app(
+            username=None,
+            password=None,
+            session_secret=None,
+            upstream_url=None,
+            upstream_token=None,
+            data_dir=data_dir,
+            **paths,
+        )
+
+    assert not outside.exists()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="POSIX directory symlinks are unavailable on Windows CI")
+def test_create_app_rejects_media_directory_symlink_outside_data_root(tmp_path: Path):
+    data_dir = tmp_path / "nexus-data"
+    data_dir.mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    (data_dir / "media").symlink_to(outside, target_is_directory=True)
+
+    with pytest.raises(ValueError, match="inside the Nexus data directory"):
+        create_app(
+            username=None,
+            password=None,
+            session_secret=None,
+            upstream_url=None,
+            upstream_token=None,
+            data_dir=data_dir,
+            storage_dir=data_dir / "media",
+            credentials_path=data_dir / "account.json",
+            config_path=data_dir / "config.json",
+            bootstrap_token_path=data_dir / "bootstrap.token",
+        )
+
+
+@pytest.mark.parametrize("file_name", ["config.json", "account.json", "bootstrap.token"])
+def test_existing_nexus_data_hard_links_fail_closed_without_chmod(tmp_path: Path, file_name: str):
+    external = tmp_path / "external"
+    external.write_text("external-content", encoding="utf-8")
+    external.chmod(0o644)
+    original_mode = stat.S_IMODE(external.stat().st_mode)
+    data_dir = tmp_path / "data"
+    data_dir.mkdir()
+    os.link(external, data_dir / file_name)
+
+    app = create_app(
+        username=None,
+        password=None,
+        session_secret=None,
+        upstream_url=None,
+        upstream_token=None,
+        data_dir=data_dir,
+        storage_dir=data_dir / "media",
+        credentials_path=data_dir / "account.json",
+        config_path=data_dir / "config.json",
+        bootstrap_token_path=data_dir / "bootstrap.token",
+        transcribe_audio=lambda _path: {"success": False, "transcript": ""},
+    )
+
+    assert app[GATEWAY_CONFIG_KEY].initialized is False
+    assert app[GATEWAY_CONFIG_KEY].setup_available is False
+    assert stat.S_IMODE(external.stat().st_mode) == original_mode
+    assert external.read_text(encoding="utf-8") == "external-content"
+
+
 @pytest.mark.skipif(os.name == "nt", reason="POSIX permission bits are unavailable on Windows")
 def test_existing_config_and_account_permissions_are_tightened(tmp_path: Path):
     config_path = tmp_path / "config.json"
@@ -1206,6 +1439,124 @@ def test_run_tracker_persists_snapshot_and_marks_orphaned_run_interrupted(tmp_pa
 
 
 @pytest.mark.asyncio
+async def test_run_tracker_disconnects_slow_subscriber_with_bounded_queue():
+    tracker = RunTracker()
+    queue = tracker.subscribe("session-1")
+
+    for index in range(tracker.SUBSCRIBER_QUEUE_LIMIT):
+        await tracker.publish("session-1", f"event: delta\ndata: {index}\n\n".encode())
+    started_at = time.monotonic()
+    await tracker.publish("session-1", b"event: delta\ndata: overflow\n\n")
+
+    assert time.monotonic() - started_at < 0.1
+    assert queue.qsize() == 2
+    error_event = await queue.get()
+    assert b"slow_client" in error_event
+    assert await queue.get() is None
+    assert "session-1" not in tracker.subscribers
+
+
+def test_run_tracker_rejects_second_subscriber_for_same_session():
+    tracker = RunTracker()
+    first = tracker.subscribe("session-1")
+
+    with pytest.raises(RuntimeError, match="subscriber limit"):
+        tracker.subscribe("session-1")
+
+    tracker.unsubscribe("session-1", first)
+    replacement = tracker.subscribe("session-1")
+    assert replacement is not first
+
+
+@pytest.mark.asyncio
+async def test_gateway_cleanup_cancels_and_awaits_detached_runs(
+    tmp_path: Path,
+    upstream_client: TestClient,
+):
+    cancelled = asyncio.Event()
+
+    async def detached_run():
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            cancelled.set()
+            raise
+
+    app = create_app(
+        username="nexus",
+        password="test-password",
+        session_secret="test-session-secret",
+        upstream_url=str(upstream_client.make_url("/")).rstrip("/"),
+        upstream_token="upstream-secret",
+        storage_dir=tmp_path / "media",
+        credentials_path=tmp_path / "account.json",
+        min_free_disk_bytes=0,
+    )
+    tracker = app[RUN_TRACKER_KEY]
+    async with TestClient(TestServer(app)):
+        task = asyncio.create_task(detached_run())
+        tracker.start("session-cleanup", "run-cleanup")
+        tracker.tasks["session-cleanup"] = task
+        await asyncio.sleep(0)
+
+    assert cancelled.is_set()
+    assert task.done()
+    assert task.cancelled()
+    status = tracker.status("session-cleanup")
+    assert status["status"] == "interrupted"
+    assert status["active"] is False
+
+
+@pytest.mark.asyncio
+async def test_external_run_probe_timeout_returns_idle_without_hanging(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    import nexus_gateway.app as gateway_app
+    from aiohttp import ClientTimeout
+
+    release = asyncio.Event()
+
+    async def never_responds(_request):
+        await release.wait()
+        return web.json_response({"status": "ok"})
+
+    upstream = web.Application()
+    upstream.router.add_get("/health/detailed", never_responds)
+    upstream.router.add_get("/api/sessions", never_responds)
+    monkeypatch.setattr(
+        gateway_app,
+        "EXTERNAL_RUN_PROBE_TIMEOUT",
+        ClientTimeout(total=0.02),
+    )
+
+    async with TestClient(TestServer(upstream)) as upstream_client:
+        app = create_app(
+            username="nexus",
+            password="test-password",
+            session_secret="test-session-secret",
+            upstream_url=str(upstream_client.make_url("/")).rstrip("/"),
+            upstream_token="upstream-secret",
+            storage_dir=tmp_path / "media",
+            credentials_path=tmp_path / "account.json",
+            min_free_disk_bytes=0,
+        )
+        async with TestClient(TestServer(app)) as client:
+            response = await asyncio.wait_for(
+                client.get(
+                    "/api/sessions/session-1/run",
+                    headers=await auth_headers(client),
+                ),
+                timeout=0.5,
+            )
+            payload = await response.json()
+            assert response.status == 200
+            assert payload["status"] == "idle"
+            assert payload["active"] is False
+    release.set()
+
+
+@pytest.mark.asyncio
 async def test_gateway_keeps_hermes_run_alive_after_mobile_disconnect(
     gateway_client: TestClient,
     upstream_client: TestClient,
@@ -1240,8 +1591,131 @@ async def test_gateway_keeps_hermes_run_alive_after_mobile_disconnect(
     await asyncio.sleep(0)
     tracker = gateway_client.server.app[RUN_TRACKER_KEY]
     assert "session-1" not in tracker.tasks
+    assert "session-1" not in tracker.subscribers
     assert "session-1" not in tracker.buffers
     assert "session-1" not in tracker.last_persisted
+
+
+@pytest.mark.asyncio
+async def test_concurrent_stream_reserves_session_before_request_body_is_complete(
+    gateway_client: TestClient,
+    upstream_client: TestClient,
+):
+    headers = {
+        **await auth_headers(gateway_client),
+        "Content-Type": "application/json",
+    }
+    release_body = asyncio.Event()
+
+    async def delayed_body():
+        yield b'{"message":"slow-'
+        await release_body.wait()
+        yield b'run"}'
+
+    first_request = asyncio.create_task(
+        gateway_client.post(
+            "/api/sessions/session-1/chat/stream",
+            data=delayed_body(),
+            headers=headers,
+        )
+    )
+    tracker = gateway_client.server.app[RUN_TRACKER_KEY]
+    for _ in range(100):
+        if "session-1" in tracker.reservations:
+            break
+        await asyncio.sleep(0.01)
+    assert "session-1" in tracker.reservations
+
+    second = await gateway_client.post(
+        "/api/sessions/session-1/chat/stream",
+        json={"message": "second"},
+        headers=await auth_headers(gateway_client),
+    )
+    assert second.status == 409
+    assert (await second.json())["error"]["code"] == "run_active"
+
+    release_body.set()
+    first = await first_request
+    assert first.status == 200
+    await upstream_client.chat_started.wait()
+    upstream_client.release_chat.set()
+    await first.text()
+    assert upstream_client.chat_requests == [{"message": "slow-run"}]
+    assert "session-1" not in tracker.reservations
+
+
+@pytest.mark.asyncio
+async def test_chat_and_stream_share_atomic_session_admission_and_stop(
+    gateway_client: TestClient,
+    upstream_client: TestClient,
+):
+    headers = await auth_headers(gateway_client)
+    first = await gateway_client.post(
+        "/api/sessions/session-1/chat",
+        json={"message": "slow-run"},
+        headers=headers,
+    )
+    try:
+        assert first.status == 200
+        await upstream_client.chat_started.wait()
+
+        conflicting = await gateway_client.post(
+            "/api/sessions/session-1/chat/stream",
+            json={"message": "must-not-run"},
+            headers=headers,
+        )
+        assert conflicting.status == 409
+        assert (await conflicting.json())["error"]["code"] == "run_active"
+
+        status = await gateway_client.get("/api/sessions/session-1/run", headers=headers)
+        status_body = await status.json()
+        assert status_body["status"] == "running"
+        assert status_body["active"] is True
+        assert status_body["stoppable"] is True
+
+        first.close()
+        stopped = await gateway_client.post(
+            "/api/sessions/session-1/run/stop",
+            headers=headers,
+        )
+        stopped_body = await stopped.json()
+        assert stopped.status == 200
+        assert stopped_body["local_forwarding_cancelled"] is True
+        assert stopped_body["remote_status"] == "unknown"
+    finally:
+        upstream_client.release_chat.set()
+
+    tracker = gateway_client.server.app[RUN_TRACKER_KEY]
+    assert tracker.status("session-1")["status"] == "interrupted"
+    assert "session-1" not in tracker.tasks
+
+
+@pytest.mark.asyncio
+async def test_tracked_chat_preserves_json_body_status_and_headers(
+    gateway_client: TestClient,
+    upstream_client: TestClient,
+):
+    upstream_client.chat_state["json_payload"] = {
+        "object": "hermes.chat.result",
+        "answer": "preserved",
+    }
+    upstream_client.chat_state["status"] = 202
+
+    response = await gateway_client.post(
+        "/api/sessions/session-1/chat",
+        json={"message": "json-contract"},
+        headers=await auth_headers(gateway_client),
+    )
+
+    assert response.status == 202
+    assert response.headers["X-Upstream-Contract"] == "preserved"
+    assert await response.json() == {
+        "object": "hermes.chat.result",
+        "answer": "preserved",
+    }
+    tracker = gateway_client.server.app[RUN_TRACKER_KEY]
+    assert tracker.status("session-1")["status"] == "completed"
+    assert "session-1" not in tracker.buffers
 
 
 @pytest.mark.asyncio
@@ -1365,6 +1839,149 @@ async def test_local_nexus_run_status_has_priority_over_external_observer(
     assert body["source"] == "nexus_gateway"
     assert body["stoppable"] is True
     assert upstream_client.probe_counts == before
+
+
+@pytest.mark.asyncio
+async def test_stop_run_waits_for_cancelled_task_cleanup(gateway_client: TestClient):
+    tracker = gateway_client.server.app[RUN_TRACKER_KEY]
+    cleanup_finished = asyncio.Event()
+
+    async def active_run():
+        tracker.start("session-1", "run-stop-test")
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            tracker.finish(
+                "session-1",
+                "interrupted",
+                "Nexus local forwarding was cancelled; Hermes remote run status is unknown.",
+            )
+            raise
+        finally:
+            await asyncio.sleep(0.01)
+            cleanup_finished.set()
+
+    task = asyncio.create_task(active_run())
+    tracker.tasks["session-1"] = task
+    await asyncio.sleep(0)
+
+    response = await gateway_client.post(
+        "/api/sessions/session-1/run/stop",
+        headers=await auth_headers(gateway_client),
+    )
+
+    assert response.status == 200
+    body = await response.json()
+    assert body == {
+        "session_id": "session-1",
+        "stopped": True,
+        "local_forwarding_cancelled": True,
+        "remote_status": "unknown",
+        "remote_stopped": False,
+    }
+    assert cleanup_finished.is_set()
+    assert task.done()
+    status = tracker.status("session-1")
+    assert status["active"] is False
+    assert status["status"] == "interrupted"
+
+
+@pytest.mark.asyncio
+async def test_generic_stream_error_keeps_run_failed(
+    gateway_client: TestClient,
+    upstream_client: TestClient,
+):
+    upstream_client.chat_state["stream"] = (
+        'event: error\ndata: {"message":"provider failed at C:/private/upstream-secret"}\n\n'
+        "event: done\ndata: {}\n\n"
+    )
+    headers = await auth_headers(gateway_client)
+
+    response = await gateway_client.post(
+        "/api/sessions/session-1/chat/stream",
+        json={"message": "fail"},
+        headers=headers,
+    )
+    assert response.status == 200
+    stream = await response.text()
+    assert "hermes_upstream_error" in stream
+    assert "上游服务暂时不可用" in stream
+    assert "provider failed" not in stream
+    assert "C:/private" not in stream
+    assert "upstream-secret" not in stream
+
+    status = await gateway_client.get("/api/sessions/session-1/run", headers=headers)
+    payload = await status.json()
+    assert payload["status"] == "failed"
+    assert payload["active"] is False
+    assert payload["message"] == "上游服务暂时不可用"
+
+
+@pytest.mark.asyncio
+async def test_truncated_stream_reports_error_and_keeps_run_failed(
+    gateway_client: TestClient,
+    upstream_client: TestClient,
+):
+    upstream_client.chat_state["stream"] = (
+        'event: assistant.delta\ndata: {"delta":"partial"}\n\n'
+    )
+    headers = await auth_headers(gateway_client)
+
+    response = await gateway_client.post(
+        "/api/sessions/session-1/chat/stream",
+        json={"message": "truncate"},
+        headers=headers,
+    )
+    stream = await response.text()
+    assert "partial" in stream
+    assert "event: error" in stream
+    assert "Hermes 响应流意外结束" in stream
+
+    status = await gateway_client.get("/api/sessions/session-1/run", headers=headers)
+    payload = await status.json()
+    assert payload["status"] == "failed"
+    assert payload["active"] is False
+    assert payload["message"] == "Hermes 响应流意外结束"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "model_selection",
+    [
+        {},
+        {"provider": "openai-codex", "model": "gpt-5.6"},
+    ],
+)
+async def test_unseparated_oversized_sse_event_is_bounded_and_sanitized(
+    gateway_client: TestClient,
+    upstream_client: TestClient,
+    model_selection: dict,
+):
+    import nexus_gateway.app as gateway_app
+
+    secret = "C:/private/upstream-secret"
+    upstream_client.chat_state["stream"] = (
+        "event: assistant.delta\ndata: "
+        + secret
+        + ("x" * gateway_app.SSE_EVENT_BUFFER_LIMIT)
+    )
+    headers = await auth_headers(gateway_client)
+
+    response = await gateway_client.post(
+        "/api/sessions/session-1/chat/stream",
+        json={"message": "oversized", **model_selection},
+        headers=headers,
+    )
+    stream = await response.text()
+    assert "upstream_event_too_large" in stream
+    assert "Hermes 响应事件过大" in stream
+    assert secret not in stream
+    assert len(stream) < 2048
+
+    status = await gateway_client.get("/api/sessions/session-1/run", headers=headers)
+    payload = await status.json()
+    assert payload["status"] == "failed"
+    assert payload["active"] is False
 
 
 @pytest.mark.asyncio
@@ -2567,6 +3184,321 @@ async def test_audio_upload_is_transcribed_on_server(gateway_client: TestClient)
 
 
 @pytest.mark.asyncio
+async def test_ephemeral_audio_is_removed_after_transcription(gateway_client: TestClient):
+    form = FormData()
+    form.add_field("file", io.BytesIO(b"audio-bytes"), filename="call.wav", content_type="audio/wav")
+    form.add_field("ephemeral", "true")
+
+    response = await gateway_client.post(
+        "/api/audio/transcriptions",
+        data=form,
+        headers=await auth_headers(gateway_client),
+    )
+
+    assert response.status == 200
+    audio = await gateway_client.get("/api/admin/audio", headers=await auth_headers(gateway_client))
+    assert (await audio.json())["data"] == []
+
+
+@pytest.mark.asyncio
+async def test_ephemeral_audio_is_removed_when_transcription_fails(
+    failing_transcription_gateway_client: TestClient,
+):
+    form = FormData()
+    form.add_field("ephemeral", "true")
+    form.add_field("file", io.BytesIO(b"audio-bytes"), filename="call.wav", content_type="audio/wav")
+
+    response = await failing_transcription_gateway_client.post(
+        "/api/audio/transcriptions",
+        data=form,
+        headers=await auth_headers(failing_transcription_gateway_client),
+    )
+
+    assert response.status == 503
+    audio = await failing_transcription_gateway_client.get(
+        "/api/admin/audio",
+        headers=await auth_headers(failing_transcription_gateway_client),
+    )
+    assert (await audio.json())["data"] == []
+
+
+@pytest.mark.asyncio
+async def test_ephemeral_audio_is_removed_when_transcriber_raises(
+    tmp_path: Path,
+    upstream_client: TestClient,
+):
+    def failed_transcriber(_path: str):
+        raise RuntimeError("private transcriber failure")
+
+    app = create_app(
+        username="nexus",
+        password="test-password",
+        session_secret="test-session-secret",
+        upstream_url=str(upstream_client.make_url("/")).rstrip("/"),
+        upstream_token="upstream-secret",
+        storage_dir=tmp_path / "media",
+        credentials_path=tmp_path / "auth.json",
+        transcribe_audio=failed_transcriber,
+    )
+    async with TestClient(TestServer(app)) as client:
+        form = FormData()
+        form.add_field("ephemeral", "true")
+        form.add_field("file", io.BytesIO(b"audio-bytes"), filename="call.wav", content_type="audio/wav")
+        response = await client.post(
+            "/api/audio/transcriptions",
+            data=form,
+            headers=await auth_headers(client),
+        )
+
+        assert response.status == 503
+        assert (await response.json())["error"]["code"] == "transcription_failed"
+        assert client.app[MEDIA_STORE_KEY].list_files("audio") == []
+
+
+@pytest.mark.asyncio
+async def test_ephemeral_audio_is_removed_when_transcription_times_out(
+    tmp_path: Path,
+    upstream_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    import nexus_gateway.app as gateway_app
+
+    monkeypatch.setattr(gateway_app, "TRANSCRIPTION_TIMEOUT_SECONDS", 0.01)
+    app = create_app(
+        username="nexus",
+        password="test-password",
+        session_secret="test-session-secret",
+        upstream_url=str(upstream_client.make_url("/")).rstrip("/"),
+        upstream_token="upstream-secret",
+        storage_dir=tmp_path / "media",
+        credentials_path=tmp_path / "auth.json",
+        transcribe_audio=lambda _path: time.sleep(0.05) or {
+            "success": True,
+            "transcript": "late",
+        },
+    )
+    async with TestClient(TestServer(app)) as client:
+        store = client.app[MEDIA_STORE_KEY]
+        real_delete = store.delete
+        delete_attempts = 0
+
+        def delete_after_simulated_windows_lock(file_id: str) -> bool:
+            nonlocal delete_attempts
+            delete_attempts += 1
+            if delete_attempts == 1:
+                raise PermissionError("simulated open Windows file handle")
+            return real_delete(file_id)
+
+        store.delete = delete_after_simulated_windows_lock
+        form = FormData()
+        form.add_field("ephemeral", "true")
+        form.add_field("file", io.BytesIO(b"audio-bytes"), filename="call.wav", content_type="audio/wav")
+        response = await client.post(
+            "/api/audio/transcriptions",
+            data=form,
+            headers=await auth_headers(client),
+        )
+
+        assert response.status == 504
+        assert (await response.json())["error"]["code"] == "transcription_timeout"
+        cleanup_tasks = tuple(client.app[EPHEMERAL_CLEANUP_TASKS_KEY])
+        assert cleanup_tasks
+        await asyncio.wait_for(asyncio.gather(*cleanup_tasks), timeout=1)
+        assert delete_attempts >= 2
+        assert client.app[MEDIA_STORE_KEY].list_files("audio") == []
+
+
+@pytest.mark.asyncio
+async def test_ephemeral_audio_is_removed_when_transcription_is_cancelled(tmp_path: Path):
+    import nexus_gateway.app as gateway_app
+
+    store = MediaStore(tmp_path / "media", max_upload_bytes=1024, min_free_disk_bytes=0)
+    transcriber_started = threading.Event()
+    release_transcriber = threading.Event()
+
+    def blocking_transcriber(_path: str):
+        transcriber_started.set()
+        release_transcriber.wait(timeout=1)
+        return {"success": True, "transcript": "late"}
+
+    class Field:
+        def __init__(self, name: str, *, value: str = "", data: bytes = b""):
+            self.name = name
+            self.filename = "call.wav" if name == "file" else None
+            self.headers = {"Content-Type": "audio/wav"}
+            self.value = value
+            self.data = data
+            self.read = False
+
+        async def text(self) -> str:
+            return self.value
+
+        async def read_chunk(self, size: int) -> bytes:
+            if self.read:
+                return b""
+            self.read = True
+            return self.data
+
+    class Request:
+        app = {
+            MEDIA_STORE_KEY: store,
+            TRANSCRIBE_AUDIO_KEY: blocking_transcriber,
+            EPHEMERAL_CLEANUP_TASKS_KEY: set(),
+        }
+
+        async def multipart(self):
+            fields = [Field("ephemeral", value="true"), Field("file", data=b"audio")]
+
+            class Reader:
+                def __aiter__(self):
+                    return self
+
+                async def __anext__(self):
+                    if not fields:
+                        raise StopAsyncIteration
+                    return fields.pop(0)
+
+            return Reader()
+
+    task = asyncio.create_task(gateway_app.transcribe_upload(Request()))
+    try:
+        assert await asyncio.to_thread(transcriber_started.wait, 1)
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+        assert store.list_files("audio") != []
+        release_transcriber.set()
+        cleanup_tasks = tuple(Request.app[EPHEMERAL_CLEANUP_TASKS_KEY])
+        assert cleanup_tasks
+        await asyncio.wait_for(asyncio.gather(*cleanup_tasks), timeout=1)
+        assert store.list_files("audio") == []
+    finally:
+        release_transcriber.set()
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(("voice_id", "edge_voice"), [
+    ("xiaoxiao", "zh-CN-XiaoxiaoNeural"),
+    ("xiaoyi", "zh-CN-XiaoyiNeural"),
+    ("yunxi", "zh-CN-YunxiNeural"),
+    ("yunjian", "zh-CN-YunjianNeural"),
+])
+async def test_speech_endpoint_returns_selected_voice_audio(
+    speech_gateway_client: TestClient,
+    voice_id: str,
+    edge_voice: str,
+):
+    response = await speech_gateway_client.post(
+        "/api/audio/speech",
+        json={"text": "你好 Nexus", "voice": voice_id},
+        headers=await auth_headers(speech_gateway_client),
+    )
+
+    assert response.status == 200
+    assert response.content_type == "audio/mpeg"
+    assert response.headers["X-Nexus-Voice"] == voice_id
+    assert await response.read() == f"{edge_voice}:你好 Nexus".encode("utf-8")
+
+
+@pytest.mark.asyncio
+async def test_speech_endpoint_rejects_unknown_voice(gateway_client: TestClient):
+    response = await gateway_client.post(
+        "/api/audio/speech",
+        json={"text": "你好", "voice": "unknown"},
+        headers=await auth_headers(gateway_client),
+    )
+
+    assert response.status == 400
+    assert (await response.json())["error"]["code"] == "unsupported_voice"
+
+
+@pytest.mark.asyncio
+async def test_speech_endpoint_rejects_oversized_synthesizer_output(
+    tmp_path: Path,
+    upstream_client: TestClient,
+):
+    app = create_app(
+        username="nexus",
+        password="test-password",
+        session_secret="test-session-secret",
+        upstream_url=str(upstream_client.make_url("/")).rstrip("/"),
+        upstream_token="upstream-secret",
+        storage_dir=tmp_path / "media",
+        credentials_path=tmp_path / "auth.json",
+        synthesize_speech_audio=lambda _text, _voice: b"123456789",
+        speech_max_audio_bytes=8,
+    )
+    async with TestClient(TestServer(app)) as client:
+        response = await client.post(
+            "/api/audio/speech",
+            json={"text": "测试", "voice": "xiaoxiao"},
+            headers=await auth_headers(client),
+        )
+        payload = await response.json()
+
+    assert response.status == 502
+    assert payload["error"]["code"] == "speech_response_too_large"
+
+
+@pytest.mark.asyncio
+async def test_speech_endpoint_limits_concurrent_synthesis(
+    tmp_path: Path,
+    upstream_client: TestClient,
+):
+    active = 0
+    maximum_active = 0
+    started_count = 0
+    two_started = asyncio.Event()
+    release = asyncio.Event()
+
+    async def synthesize(_text: str, _voice: str) -> bytes:
+        nonlocal active, maximum_active, started_count
+        active += 1
+        started_count += 1
+        maximum_active = max(maximum_active, active)
+        if started_count >= 2:
+            two_started.set()
+        try:
+            await release.wait()
+            return b"audio"
+        finally:
+            active -= 1
+
+    app = create_app(
+        username="nexus",
+        password="test-password",
+        session_secret="test-session-secret",
+        upstream_url=str(upstream_client.make_url("/")).rstrip("/"),
+        upstream_token="upstream-secret",
+        storage_dir=tmp_path / "media",
+        credentials_path=tmp_path / "auth.json",
+        synthesize_speech_audio=synthesize,
+        speech_max_concurrency=2,
+    )
+    async with TestClient(TestServer(app)) as client:
+        headers = await auth_headers(client)
+        requests = [
+            asyncio.create_task(client.post(
+                "/api/audio/speech",
+                json={"text": f"测试 {index}", "voice": "xiaoxiao"},
+                headers=headers,
+            ))
+            for index in range(3)
+        ]
+        try:
+            await asyncio.wait_for(two_started.wait(), timeout=1)
+            await asyncio.sleep(0.05)
+            assert started_count == 2
+            assert maximum_active == 2
+        finally:
+            release.set()
+        responses = await asyncio.gather(*requests)
+        assert [response.status for response in responses] == [200, 200, 200]
+        assert [await response.read() for response in responses] == [b"audio"] * 3
+        assert maximum_active == 2
+
+
+@pytest.mark.asyncio
 async def test_packaged_gateway_reports_transcription_unavailable_without_http_capability(
     tmp_path: Path,
     upstream_client: TestClient,
@@ -2642,6 +3574,14 @@ async def test_packaged_gateway_uses_only_capability_advertised_http_transcripti
             "authorization": "Bearer upstream-secret",
             "filename": "voice.m4a",
             "content": b"audio-bytes",
+            "fields": {
+                "language": "zh",
+                "prompt": (
+                    "普通话对话，请使用简体中文，并根据语义添加逗号、句号和问号。"
+                    "专有名词：Nexus、Hermes、Android、Gateway、API、模型、会话、定时任务。"
+                ),
+                "temperature": "0",
+            },
         }]
 
 
@@ -2733,7 +3673,7 @@ async def test_non_mobile_chat_proxy_keeps_the_existing_request_body(
 
 
 @pytest.mark.asyncio
-async def test_mobile_client_context_becomes_system_role_on_inference_route(
+async def test_mobile_client_context_is_forwarded_on_selected_native_model_route(
     gateway_client: TestClient,
     upstream_client: TestClient,
 ):
@@ -2741,7 +3681,8 @@ async def test_mobile_client_context_becomes_system_role_on_inference_route(
         "/api/sessions/session-1/chat/stream",
         json={
             "message": "选择模型",
-            "inference_model": "route-fast",
+            "provider": "openai-codex",
+            "model": "gpt-5.6",
             "client_context": mobile_client_context(),
         },
         headers=await auth_headers(gateway_client),
@@ -2749,11 +3690,16 @@ async def test_mobile_client_context_becomes_system_role_on_inference_route(
 
     assert response.status == 200
     await response.text()
-    assert upstream_client.captured_completion["messages"] == [
-        {"role": "system", "content": MOBILE_CLIENT_SYSTEM_MESSAGE},
-        {"role": "user", "content": "选择模型"},
-    ]
-    assert "client_context" not in upstream_client.captured_completion
+    assert upstream_client.captured_model_lock == {
+        "provider": "openai-codex",
+        "model": "gpt-5.6",
+        "require_model_lock": False,
+    }
+    assert upstream_client.captured_chat == {
+        "message": "选择模型",
+        "system_message": MOBILE_CLIENT_SYSTEM_MESSAGE,
+    }
+    assert upstream_client.captured_completion == {}
 
 
 @pytest.mark.asyncio
@@ -2789,50 +3735,500 @@ async def test_mobile_file_attachment_is_labeled_as_phone_origin(
 
 
 @pytest.mark.asyncio
-async def test_inference_model_uses_openai_route_and_adapts_stream(
+async def test_selected_provider_and_model_use_native_hermes_session_route(
     gateway_client: TestClient,
     upstream_client: TestClient,
 ):
     response = await gateway_client.post(
         "/api/sessions/session-1/chat/stream",
-        json={"message": "hello", "persona_model": "profile-a", "inference_model": "route-fast"},
+        json={
+            "message": "hello",
+            "persona_model": "profile-a",
+            "provider": "openai-codex",
+            "model": "gpt-5.6",
+            "model_options": {"reasoning_effort": "medium"},
+        },
         headers=await auth_headers(gateway_client),
     )
 
     assert response.status == 200
     stream = await response.text()
-    assert "event: run.started" in stream
-    assert "event: tool.started" in stream
-    assert "event: tool.completed" in stream
     assert "event: assistant.delta" in stream
     assert "\u6a21\u578b\u56de\u590d" in stream
-    assert "event: run.completed" in stream
-    assert stream.count("event: run.completed") == 1
+    assert '"route_source": "session_model_lock"' in stream
+    completed_block = next(
+        block for block in stream.split("\n\n")
+        if block.startswith("event: run.completed")
+    )
+    assert '"model": "gpt-5.6"' in completed_block
     assert stream.rstrip().endswith("event: done\ndata: {}")
-
-    captured = upstream_client.captured_completion
-    assert captured == {
-        "model": "route-fast",
-        "stream": True,
-        "messages": [{"role": "user", "content": "hello"}],
+    assert upstream_client.captured_model_lock == {
+        "provider": "openai-codex",
+        "model": "gpt-5.6",
+        "require_model_lock": False,
+        "model_options": {
+            "reasoning_effort": "medium",
+        },
     }
-    assert upstream_client.captured_completion_headers["X-Hermes-Session-Id"] == "session-1"
+    assert upstream_client.captured_chat == {
+        "message": "hello",
+        "model_options": {"reasoning_effort": "medium"},
+    }
+    assert upstream_client.captured_completion == {}
 
 
 @pytest.mark.asyncio
-async def test_reasoning_effort_is_forwarded_to_selected_inference_model(
+async def test_selected_model_catalog_timeout_is_first_safe_sse_error(
+    gateway_client: TestClient,
+    upstream_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    import nexus_gateway.app as gateway_app
+
+    release = asyncio.Event()
+    upstream_client.model_options_state["release"] = release
+    monkeypatch.setattr(
+        gateway_app,
+        "MODEL_CATALOG_TIMEOUT",
+        gateway_app.ClientTimeout(total=0.05, connect=0.02, sock_read=0.02),
+    )
+    try:
+        response = await gateway_client.post(
+            "/api/sessions/session-1/chat/stream",
+            json={"message": "timeout", "provider": "openai-codex", "model": "gpt-5.6"},
+            headers=await auth_headers(gateway_client),
+        )
+        first_event = (await asyncio.wait_for(
+            response.content.readuntil(b"\n\n"),
+            timeout=1,
+        )).decode("utf-8")
+        stream = first_event + await response.text()
+    finally:
+        release.set()
+
+    assert response.status == 200
+    assert first_event.startswith("event: error\n")
+    assert "model_catalog_timeout" in first_event
+    assert "读取 Hermes 模型列表超时" in first_event
+    assert "upstream-secret" not in stream
+    assert upstream_client.captured_model_lock == {}
+    assert upstream_client.captured_chat == {}
+    status = gateway_client.server.app[RUN_TRACKER_KEY].status("session-1")
+    assert status["status"] == "failed"
+    assert status["active"] is False
+    assert upstream_client.model_options_state["requests"] == 2
+
+
+@pytest.mark.asyncio
+async def test_selected_model_catalog_retries_one_cold_start_timeout(
+    gateway_client: TestClient,
+    upstream_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    import nexus_gateway.app as gateway_app
+
+    upstream_client.model_options_state["timeout_requests"] = 1
+    monkeypatch.setattr(
+        gateway_app,
+        "MODEL_CATALOG_TIMEOUT",
+        gateway_app.ClientTimeout(total=0.05, connect=0.02, sock_read=0.02),
+    )
+
+    response = await gateway_client.post(
+        "/api/sessions/session-1/chat/stream",
+        json={"message": "retry", "provider": "openai-codex", "model": "gpt-5.6"},
+        headers=await auth_headers(gateway_client),
+    )
+    stream = await response.text()
+
+    assert response.status == 200
+    assert "event: assistant.delta" in stream
+    assert "model_catalog_timeout" not in stream
+    assert upstream_client.model_options_state["requests"] == 2
+    assert upstream_client.captured_model_lock["model"] == "gpt-5.6"
+    assert upstream_client.captured_chat == {"message": "retry"}
+
+
+@pytest.mark.asyncio
+async def test_selected_model_lock_timeout_is_first_safe_sse_error(
+    gateway_client: TestClient,
+    upstream_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    import nexus_gateway.app as gateway_app
+
+    release = asyncio.Event()
+    upstream_client.model_lock_state["release"] = release
+    monkeypatch.setattr(
+        gateway_app,
+        "MODEL_LOCK_TIMEOUT",
+        gateway_app.ClientTimeout(total=0.05, connect=0.02, sock_read=0.02),
+    )
+    try:
+        response = await gateway_client.post(
+            "/api/sessions/session-1/chat/stream",
+            json={"message": "timeout", "provider": "openai-codex", "model": "gpt-5.6"},
+            headers=await auth_headers(gateway_client),
+        )
+        first_event = (await asyncio.wait_for(
+            response.content.readuntil(b"\n\n"),
+            timeout=1,
+        )).decode("utf-8")
+        stream = first_event + await response.text()
+    finally:
+        release.set()
+
+    assert response.status == 200
+    assert first_event.startswith("event: error\n")
+    assert "model_lock_timeout" in first_event
+    assert "Hermes 应用所选模型超时" in first_event
+    assert "upstream-secret" not in stream
+    assert upstream_client.captured_model_lock["model"] == "gpt-5.6"
+    assert upstream_client.captured_chat == {}
+    status = gateway_client.server.app[RUN_TRACKER_KEY].status("session-1")
+    assert status["status"] == "failed"
+    assert status["active"] is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "actual_runtime",
+    [
+        {},
+        {"provider": "openai-codex", "model": "wrong-model"},
+        {"provider": "wrong-provider", "model": "gpt-5.6"},
+    ],
+)
+async def test_selected_model_stream_rejects_missing_or_mismatched_actual_runtime(
+    gateway_client: TestClient,
+    upstream_client: TestClient,
+    actual_runtime: dict,
+):
+    runtime = {
+        "route_source": "session_model_lock",
+        "model_lock": "confirmed",
+        "requested": {"provider": "openai-codex", "model": "gpt-5.6"},
+        **actual_runtime,
+    }
+    upstream_client.chat_state["stream"] = (
+        f"event: run.started\ndata: {json.dumps({'runtime': runtime})}\n\n"
+        'event: assistant.delta\ndata: {"delta":"must not escape"}\n\n'
+        'event: run.completed\ndata: {"completed":true}\n\n'
+        'event: done\ndata: {}\n\n'
+    )
+
+    response = await gateway_client.post(
+        "/api/sessions/session-1/chat/stream",
+        json={"message": "verify", "provider": "openai-codex", "model": "gpt-5.6"},
+        headers=await auth_headers(gateway_client),
+    )
+    stream = await response.text()
+
+    assert response.status == 200
+    assert stream.split("\n\n", 1)[0].startswith("event: error\n")
+    assert "model_lock_failed" in stream
+    assert "must not escape" not in stream
+    assert "run.completed" not in stream
+    status = gateway_client.server.app[RUN_TRACKER_KEY].status("session-1")
+    assert status["status"] == "failed"
+    assert status["active"] is False
+
+
+@pytest.mark.asyncio
+async def test_selected_model_stream_rechecks_completed_runtime(
+    gateway_client: TestClient,
+    upstream_client: TestClient,
+):
+    started_runtime = {
+        "provider": "openai-codex",
+        "model": "gpt-5.6",
+        "route_source": "session_model_lock",
+        "model_lock": "confirmed",
+        "requested": {"provider": "openai-codex", "model": "gpt-5.6"},
+    }
+    completed_runtime = {**started_runtime, "model": "wrong-model"}
+    upstream_client.chat_state["stream"] = (
+        f"event: run.started\ndata: {json.dumps({'runtime': started_runtime})}\n\n"
+        'event: assistant.delta\ndata: {"delta":"partial"}\n\n'
+        f"event: run.completed\ndata: {json.dumps({'runtime': completed_runtime})}\n\n"
+        'event: done\ndata: {}\n\n'
+    )
+
+    response = await gateway_client.post(
+        "/api/sessions/session-1/chat/stream",
+        json={"message": "verify", "provider": "openai-codex", "model": "gpt-5.6"},
+        headers=await auth_headers(gateway_client),
+    )
+    stream = await response.text()
+
+    assert "partial" in stream
+    assert "model_lock_failed" in stream
+    assert "event: run.completed" not in stream
+    assert gateway_client.server.app[RUN_TRACKER_KEY].status("session-1")["status"] == "failed"
+
+
+@pytest.mark.asyncio
+async def test_selected_model_accepts_hermes_pending_actual_runtime_after_lock_confirmation(
+    gateway_client: TestClient,
+    upstream_client: TestClient,
+):
+    pending_runtime = {
+        "provider": "",
+        "model": "",
+        "route_source": "session_model_lock",
+        "model_lock": "accepted",
+        "requested": {"provider": "openai-codex", "model": "gpt-5.6"},
+    }
+    upstream_client.chat_state["stream"] = (
+        f"event: run.started\ndata: {json.dumps({'runtime': pending_runtime})}\n\n"
+        'event: assistant.delta\ndata: {"delta":"confirmed reply"}\n\n'
+        'event: assistant.completed\ndata: {"content":"confirmed reply"}\n\n'
+        'event: run.completed\ndata: {"completed":true}\n\n'
+        'event: done\ndata: {}\n\n'
+    )
+
+    response = await gateway_client.post(
+        "/api/sessions/session-1/chat/stream",
+        json={"message": "verify", "provider": "openai-codex", "model": "gpt-5.6"},
+        headers=await auth_headers(gateway_client),
+    )
+    stream = await response.text()
+
+    assert response.status == 200
+    assert "confirmed reply" in stream
+    assert "model_lock_failed" not in stream
+    assert gateway_client.server.app[RUN_TRACKER_KEY].status("session-1")["status"] == "completed"
+
+
+@pytest.mark.asyncio
+async def test_selected_model_pending_runtime_still_requires_exact_requested_model(
+    gateway_client: TestClient,
+    upstream_client: TestClient,
+):
+    pending_runtime = {
+        "provider": "",
+        "model": "",
+        "route_source": "session_model_lock",
+        "model_lock": "accepted",
+        "requested": {"provider": "openai-codex", "model": "wrong-model"},
+    }
+    upstream_client.chat_state["stream"] = (
+        f"event: run.started\ndata: {json.dumps({'runtime': pending_runtime})}\n\n"
+        'event: assistant.delta\ndata: {"delta":"must not escape"}\n\n'
+        'event: done\ndata: {}\n\n'
+    )
+
+    response = await gateway_client.post(
+        "/api/sessions/session-1/chat/stream",
+        json={"message": "verify", "provider": "openai-codex", "model": "gpt-5.6"},
+        headers=await auth_headers(gateway_client),
+    )
+    stream = await response.text()
+
+    assert "model_lock_failed" in stream
+    assert "must not escape" not in stream
+    assert gateway_client.server.app[RUN_TRACKER_KEY].status("session-1")["status"] == "failed"
+
+
+@pytest.mark.asyncio
+async def test_user_config_provider_alias_is_completed_after_real_model_output(
+    gateway_client: TestClient,
+    upstream_client: TestClient,
+):
+    upstream_client.model_options_state["payload"] = {
+        "providers": [{
+            "slug": "alight",
+            "name": "Alight",
+            "source": "user-config",
+            "is_user_defined": True,
+            "authenticated": True,
+            "models": ["gpt-5.6-terra", "gpt-5.6-sol"],
+        }],
+        "model": "gpt-5.6-sol",
+        "provider": "custom:alight",
+    }
+    upstream_client.chat_state["stream"] = (
+        'event: run.started\ndata: {"runtime":{"route_source":"session_model_lock",'
+        '"model_lock":"accepted","provider":"custom","model":"gpt-5.6-terra",'
+        '"requested":{"provider":"alight",'
+        '"model":"gpt-5.6-terra"}}}\n\n'
+        'event: assistant.delta\ndata: {"delta":"terra reply"}\n\n'
+        'event: error\ndata: {"message":"confirmed model lock runtime mismatch: '
+        'expected provider=alight model=gpt-5.6-terra; actual provider=custom '
+        'model=gpt-5.6-terra"}\n\n'
+        'event: done\ndata: {}\n\n'
+    )
+
+    response = await gateway_client.post(
+        "/api/sessions/session-1/chat/stream",
+        json={"message": "hello", "provider": "alight", "model": "gpt-5.6-terra"},
+        headers=await auth_headers(gateway_client),
+    )
+
+    assert response.status == 200
+    stream = await response.text()
+    assert "event: error" not in stream
+    assert "terra reply" in stream
+    assert stream.count("event: run.completed") == 1
+    assert '"provider":"custom"' in stream
+    assert '"model":"gpt-5.6-terra"' in stream
+    assert '"requested":{"provider":"alight","model":"gpt-5.6-terra"}' in stream
+    assert upstream_client.captured_model_lock == {
+        "provider": "alight",
+        "model": "gpt-5.6-terra",
+        "require_model_lock": False,
+    }
+    assert upstream_client.captured_chat == {"message": "hello"}
+    assert upstream_client.captured_completion == {}
+
+
+@pytest.mark.asyncio
+async def test_user_config_runtime_model_mismatch_remains_an_error(
+    gateway_client: TestClient,
+    upstream_client: TestClient,
+):
+    upstream_client.model_options_state["payload"] = {
+        "providers": [{
+            "slug": "alight",
+            "source": "user-config",
+            "authenticated": True,
+            "models": ["gpt-5.6-terra", "gpt-5.6-sol"],
+        }],
+        "model": "gpt-5.6-sol",
+        "provider": "custom:alight",
+    }
+    upstream_client.chat_state["stream"] = (
+        'event: run.started\ndata: {"runtime":{"route_source":"session_model_lock",'
+        '"model_lock":"accepted","provider":"custom","model":"gpt-5.6-sol",'
+        '"requested":{"provider":"alight",'
+        '"model":"gpt-5.6-terra"}}}\n\n'
+        'event: assistant.delta\ndata: {"delta":"wrong model reply"}\n\n'
+        'event: error\ndata: {"message":"confirmed model lock runtime mismatch: '
+        'expected provider=alight model=gpt-5.6-terra; actual provider=custom '
+        'model=gpt-5.6-sol"}\n\n'
+        'event: done\ndata: {}\n\n'
+    )
+
+    response = await gateway_client.post(
+        "/api/sessions/session-1/chat/stream",
+        json={"message": "hello", "provider": "alight", "model": "gpt-5.6-terra"},
+        headers=await auth_headers(gateway_client),
+    )
+
+    stream = await response.text()
+    assert "event: error" in stream
+    assert "model_lock_failed" in stream
+    assert "Hermes 未确认所选模型" in stream
+    assert "actual provider=custom model=gpt-5.6-sol" not in stream
+    assert "event: run.completed" not in stream
+
+
+@pytest.mark.asyncio
+async def test_unknown_selected_model_is_rejected_before_lock_or_chat(
+    gateway_client: TestClient,
+    upstream_client: TestClient,
+):
+    upstream_client.model_options_state["payload"] = {
+        "providers": [{
+            "slug": "alight",
+            "source": "user-config",
+            "authenticated": True,
+            "models": ["gpt-5.6-terra"],
+        }],
+        "model": "gpt-5.6-terra",
+        "provider": "custom:alight",
+    }
+
+    response = await gateway_client.post(
+        "/api/sessions/session-1/chat/stream",
+        json={"message": "hello", "provider": "alight", "model": "invalid-model"},
+        headers=await auth_headers(gateway_client),
+    )
+
+    stream = await response.text()
+    assert "event: error" in stream
+    assert '"code": "model_not_available"' in stream
+    assert "event: run.completed" not in stream
+    assert upstream_client.captured_model_lock == {}
+    assert upstream_client.captured_chat == {}
+    assert upstream_client.captured_completion == {}
+
+
+@pytest.mark.asyncio
+async def test_non_streaming_unknown_model_is_rejected_before_lock_or_chat(
+    gateway_client: TestClient,
+    upstream_client: TestClient,
+):
+    upstream_client.model_options_state["payload"] = {
+        "providers": [{
+            "slug": "alight",
+            "source": "user-config",
+            "authenticated": True,
+            "models": ["gpt-5.6-terra"],
+        }],
+        "model": "gpt-5.6-terra",
+        "provider": "custom:alight",
+    }
+
+    response = await gateway_client.post(
+        "/api/sessions/session-1/chat",
+        json={"message": "hello", "provider": "alight", "model": "invalid-model"},
+        headers=await auth_headers(gateway_client),
+    )
+
+    assert response.status == 400
+    assert (await response.json())["error"]["code"] == "model_not_available"
+    assert upstream_client.captured_model_lock == {}
+    assert upstream_client.captured_chat == {}
+
+
+@pytest.mark.asyncio
+async def test_session_model_lock_is_forwarded_and_acknowledged(
+    gateway_client: TestClient,
+    upstream_client: TestClient,
+):
+    selection = {
+        "provider": "openai-codex",
+        "model": "gpt-5.6",
+        "require_model_lock": True,
+        "model_options": {"reasoning_effort": "high"},
+    }
+    response = await gateway_client.post(
+        "/api/sessions/session-1/model",
+        json=selection,
+        headers=await auth_headers(gateway_client),
+    )
+
+    assert response.status == 200
+    payload = await response.json()
+    assert upstream_client.captured_model_lock == selection
+    assert payload["runtime"]["provider"] == "openai-codex"
+    assert payload["runtime"]["model"] == "gpt-5.6"
+
+
+@pytest.mark.asyncio
+async def test_reasoning_effort_is_applied_to_selected_session_model(
     gateway_client: TestClient,
     upstream_client: TestClient,
 ):
     response = await gateway_client.post(
         "/api/sessions/session-1/chat/stream",
-        json={"message": "reason", "inference_model": "route-reason", "reasoning_effort": "HIGH"},
+        json={
+            "message": "reason",
+            "provider": "openai-codex",
+            "model": "gpt-5.6",
+            "model_options": {"reasoning_effort": "HIGH"},
+        },
         headers=await auth_headers(gateway_client),
     )
 
     assert response.status == 200
     await response.text()
-    assert upstream_client.captured_completion["reasoning_effort"] == "high"
+    assert upstream_client.captured_model_lock["model_options"] == {
+        "reasoning_effort": "high",
+    }
+    assert upstream_client.captured_chat["model_options"] == {"reasoning_effort": "high"}
+    assert upstream_client.captured_completion == {}
 
 
 @pytest.mark.asyncio
@@ -2848,7 +4244,10 @@ async def test_reasoning_effort_is_forwarded_to_native_session_route(
 
     assert response.status == 200
     await response.text()
-    assert upstream_client.captured_chat == {"message": "native reason", "reasoning_effort": "minimal"}
+    assert upstream_client.captured_chat == {
+        "message": "native reason",
+        "model_options": {"reasoning_effort": "minimal"},
+    }
 
 
 @pytest.mark.asyncio
@@ -2860,7 +4259,7 @@ async def test_invalid_reasoning_effort_returns_400_without_contacting_upstream(
 ):
     response = await gateway_client.post(
         "/api/sessions/session-1/chat/stream",
-        json={"message": "invalid reason", "inference_model": "route", "reasoning_effort": value},
+        json={"message": "invalid reason", "model_options": {"reasoning_effort": value}},
         headers=await auth_headers(gateway_client),
     )
 
@@ -2871,7 +4270,143 @@ async def test_invalid_reasoning_effort_returns_400_without_contacting_upstream(
 
 
 @pytest.mark.asyncio
-async def test_legacy_model_field_remains_an_inference_route(
+@pytest.mark.parametrize(
+    ("body", "code"),
+    [
+        ({"message": "provider only", "provider": "openai-codex"}, "invalid_model_selection"),
+        (
+            {
+                "message": "bad lock",
+                "provider": "openai-codex",
+                "model": "gpt-5.6",
+                "require_model_lock": "true",
+            },
+            "invalid_model_selection",
+        ),
+        ({"message": "bad options", "model_options": ["medium"]}, "invalid_model_options"),
+    ],
+)
+async def test_invalid_native_model_config_returns_400_without_upstream_request(
+    gateway_client: TestClient,
+    upstream_client: TestClient,
+    body,
+    code,
+):
+    response = await gateway_client.post(
+        "/api/sessions/session-1/chat/stream",
+        json=body,
+        headers=await auth_headers(gateway_client),
+    )
+
+    assert response.status == 400
+    assert (await response.json())["error"]["code"] == code
+    assert upstream_client.captured_chat == {}
+
+
+@pytest.mark.asyncio
+async def test_non_streaming_chat_forwards_native_model_selection(
+    gateway_client: TestClient,
+    upstream_client: TestClient,
+):
+    response = await gateway_client.post(
+        "/api/sessions/session-1/chat",
+        json={
+            "message": "non-streaming",
+            "provider": "openai-codex",
+            "model": "gpt-5.6",
+            "model_options": {"reasoning_effort": "medium"},
+        },
+        headers=await auth_headers(gateway_client),
+    )
+
+    assert response.status == 200
+    await response.text()
+    assert upstream_client.captured_model_lock == {
+        "provider": "openai-codex",
+        "model": "gpt-5.6",
+        "model_options": {"reasoning_effort": "medium"},
+        "require_model_lock": False,
+    }
+    assert upstream_client.captured_chat == {
+        "message": "non-streaming",
+        "model_options": {"reasoning_effort": "medium"},
+    }
+
+
+@pytest.mark.asyncio
+async def test_selected_model_chat_preserves_verified_json_response(
+    gateway_client: TestClient,
+    upstream_client: TestClient,
+):
+    runtime = {
+        "provider": "openai-codex",
+        "model": "gpt-5.6",
+        "route_source": "session_model_lock",
+        "model_lock": "confirmed",
+        "requested": {"provider": "openai-codex", "model": "gpt-5.6"},
+    }
+    upstream_client.chat_state.update({
+        "status": 202,
+        "json_payload": {"answer": "verified", "runtime": runtime},
+    })
+
+    response = await gateway_client.post(
+        "/api/sessions/session-1/chat",
+        json={"message": "json", "provider": "openai-codex", "model": "gpt-5.6"},
+        headers=await auth_headers(gateway_client),
+    )
+
+    assert response.status == 202
+    assert response.headers["X-Upstream-Contract"] == "preserved"
+    assert await response.json() == {"answer": "verified", "runtime": runtime}
+    assert gateway_client.server.app[RUN_TRACKER_KEY].status("session-1")["status"] == "completed"
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "runtime",
+    [
+        None,
+        {
+            "provider": "openai-codex",
+            "model": "wrong-model",
+            "route_source": "session_model_lock",
+            "model_lock": "confirmed",
+            "requested": {"provider": "openai-codex", "model": "gpt-5.6"},
+        },
+    ],
+)
+async def test_selected_model_chat_rejects_unverified_json_runtime(
+    gateway_client: TestClient,
+    upstream_client: TestClient,
+    runtime,
+):
+    upstream_client.chat_state["json_payload"] = {
+        "answer": "must-not-escape",
+        "runtime": runtime,
+        "debug": "upstream-secret at C:/private",
+    }
+
+    response = await gateway_client.post(
+        "/api/sessions/session-1/chat",
+        json={"message": "json", "provider": "openai-codex", "model": "gpt-5.6"},
+        headers=await auth_headers(gateway_client),
+    )
+    payload = await response.json()
+
+    assert response.status == 502
+    assert payload["error"]["code"] == "model_lock_failed"
+    serialized = json.dumps(payload, ensure_ascii=False)
+    assert "must-not-escape" not in serialized
+    assert "upstream-secret" not in serialized
+    assert "C:/private" not in serialized
+    status = gateway_client.server.app[RUN_TRACKER_KEY].status("session-1")
+    assert status["status"] == "failed"
+    assert status["active"] is False
+
+
+@pytest.mark.asyncio
+async def test_model_only_legacy_request_stays_on_native_session_route(
     gateway_client: TestClient,
     upstream_client: TestClient,
 ):
@@ -2883,8 +4418,8 @@ async def test_legacy_model_field_remains_an_inference_route(
 
     assert response.status == 200
     await response.text()
-    assert upstream_client.captured_completion["model"] == "route-legacy"
-    assert upstream_client.captured_chat == {}
+    assert upstream_client.captured_chat == {"message": "legacy", "model": "route-legacy"}
+    assert upstream_client.captured_completion == {}
 
 
 @pytest.mark.asyncio
@@ -2901,6 +4436,69 @@ async def test_chat_without_model_keeps_native_session_route(
     assert response.status == 200
     assert "\u6536\u5230" in await response.text()
     assert upstream_client.captured_chat == {"message": "native"}
+    assert upstream_client.captured_completion == {}
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "model_selection",
+    [
+        {},
+        {"provider": "openai-codex", "model": "gpt-5.6"},
+    ],
+)
+async def test_provider_setup_cli_error_is_translated_for_mobile(
+    gateway_client: TestClient,
+    upstream_client: TestClient,
+    model_selection: dict,
+):
+    upstream_client.chat_state["stream"] = (
+        "event: error\n"
+        "data: {\"message\":\"No LLM provider configured. Run 'hermes model' to select a provider, "
+        "or run 'hermes setup' for first-time configuration.\"}\n\n"
+        "event: done\ndata: {}\n\n"
+    )
+
+    response = await gateway_client.post(
+        "/api/sessions/session-1/chat/stream",
+        json={"message": "hello", **model_selection},
+        headers=await auth_headers(gateway_client),
+    )
+
+    assert response.status == 200
+    stream = await response.text()
+    assert "Hermes 尚未配置可用的调用模型，请先在 Hermes 中完成模型配置" in stream
+    assert '"code":"model_not_configured"' in stream
+    assert "hermes model" not in stream
+    assert "hermes setup" not in stream
+
+
+@pytest.mark.asyncio
+async def test_chat_without_model_does_not_guess_or_override_hermes_default(
+    gateway_client: TestClient,
+    upstream_client: TestClient,
+):
+    upstream_client.model_options_state["payload"] = {
+        "providers": [{
+            "slug": "cpa",
+            "is_current": True,
+            "is_user_defined": True,
+            "authenticated": True,
+            "models": ["gpt-5.6-terra", "gpt-5.6-sol"],
+        }],
+        "model": "gpt-5.6-terra",
+        "provider": "custom:cpa",
+    }
+
+    response = await gateway_client.post(
+        "/api/sessions/session-1/chat/stream",
+        json={"message": "default model"},
+        headers=await auth_headers(gateway_client),
+    )
+
+    assert response.status == 200
+    assert "收到" in await response.text()
+    assert upstream_client.captured_chat == {"message": "default model"}
     assert upstream_client.captured_completion == {}
 
 
@@ -2952,6 +4550,141 @@ async def test_chat_attachment_ids_become_hermes_readable_content(
     assert parts[1]["image_url"]["url"].startswith("data:image/png;base64,")
     assert "服务器路径" not in parts[2]["text"]
     assert str(gateway_client.server.app[MEDIA_STORE_KEY].root) not in parts[2]["text"]
+    assert "资料内容" in parts[2]["text"]
+    assert "下载地址：http://" in parts[2]["text"]
+    assert "signature=" in parts[2]["text"]
+
+
+@pytest.mark.asyncio
+async def test_binary_attachment_gives_hermes_a_signed_read_only_download(
+    gateway_client: TestClient,
+    upstream_client: TestClient,
+):
+    form = FormData()
+    form.add_field(
+        "file",
+        io.BytesIO(b"nexus-binary-content"),
+        filename="archive.bin",
+        content_type="application/octet-stream",
+    )
+    upload = await gateway_client.post(
+        "/api/uploads",
+        data=form,
+        headers=await auth_headers(gateway_client),
+    )
+    file_id = (await upload.json())["file"]["id"]
+
+    response = await gateway_client.post(
+        "/api/sessions/session-1/chat/stream",
+        json={"message": "检查二进制附件", "attachment_ids": [file_id]},
+        headers=await auth_headers(gateway_client),
+    )
+    assert response.status == 200
+    await response.text()
+
+    attachment_text = upstream_client.captured_chat["message"][1]["text"]
+    download_url = next(
+        line.removeprefix("下载地址：")
+        for line in attachment_text.splitlines()
+        if line.startswith("下载地址：")
+    )
+    assert file_id in download_url
+    assert "读取说明：这是短时有效的只读附件地址" in attachment_text
+
+    signed_path = download_url[download_url.index("/api/files/"):]
+    download = await gateway_client.get(signed_path)
+    assert download.status == 200
+    assert await download.read() == b"nexus-binary-content"
+    assert download.headers["Content-Type"] == "application/octet-stream"
+
+    tampered_path = signed_path.replace("signature=", "signature=0")
+    rejected = await gateway_client.get(tampered_path)
+    assert rejected.status == 401
+
+
+@pytest.mark.asyncio
+async def test_chat_rejects_too_many_attachments_before_lookup(gateway_client: TestClient):
+    response = await gateway_client.post(
+        "/api/sessions/session-1/chat/stream",
+        json={
+            "message": "too many",
+            "attachment_ids": [f"{index:032x}" for index in range(17)],
+        },
+        headers=await auth_headers(gateway_client),
+    )
+
+    assert response.status == 400
+    assert (await response.json())["error"]["code"] == "too_many_attachments"
+
+
+@pytest.mark.asyncio
+async def test_chat_rejects_duplicate_attachment_before_reading_image(
+    gateway_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    form = FormData()
+    form.add_field("file", io.BytesIO(b"image"), filename="duplicate.png", content_type="image/png")
+    upload = await gateway_client.post(
+        "/api/uploads",
+        data=form,
+        headers=await auth_headers(gateway_client),
+    )
+    file_id = (await upload.json())["file"]["id"]
+    original_read_bytes = Path.read_bytes
+    image_reads = 0
+
+    def guarded_read_bytes(path: Path):
+        nonlocal image_reads
+        if path.suffix == ".png":
+            image_reads += 1
+        return original_read_bytes(path)
+
+    monkeypatch.setattr(Path, "read_bytes", guarded_read_bytes)
+    response = await gateway_client.post(
+        "/api/sessions/session-1/chat/stream",
+        json={"message": "duplicate", "attachment_ids": [file_id, file_id]},
+        headers=await auth_headers(gateway_client),
+    )
+
+    assert response.status == 400
+    assert (await response.json())["error"]["code"] == "duplicate_attachment_id"
+    assert image_reads == 0
+
+
+@pytest.mark.asyncio
+async def test_chat_rejects_aggregate_attachment_size_before_reading_images(
+    gateway_client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+):
+    import nexus_gateway.app as gateway_app
+
+    headers = await auth_headers(gateway_client)
+    file_ids = []
+    for name in ("one.png", "two.png"):
+        form = FormData()
+        form.add_field("file", io.BytesIO(b"1234"), filename=name, content_type="image/png")
+        upload = await gateway_client.post("/api/uploads", data=form, headers=headers)
+        file_ids.append((await upload.json())["file"]["id"])
+    monkeypatch.setattr(gateway_app, "MAX_CHAT_ATTACHMENT_BYTES", 6)
+    original_read_bytes = Path.read_bytes
+    image_reads = 0
+
+    def guarded_read_bytes(path: Path):
+        nonlocal image_reads
+        if path.suffix == ".png":
+            image_reads += 1
+        return original_read_bytes(path)
+
+    monkeypatch.setattr(Path, "read_bytes", guarded_read_bytes)
+    response = await gateway_client.post(
+        "/api/sessions/session-1/chat/stream",
+        json={"message": "large", "attachment_ids": file_ids},
+        headers=headers,
+    )
+
+    assert response.status == 413
+    assert (await response.json())["error"]["code"] == "attachments_too_large"
+    assert image_reads == 0
 
 
 @pytest.mark.asyncio
@@ -3032,6 +4765,153 @@ def test_failed_chat_can_discard_the_pending_media_index(tmp_path: Path):
     assert json.loads(index.read_text(encoding="utf-8")) == {
         "session-1": [{"marker": "first", "file_ids": ["one"]}]
     }
+
+
+def test_session_media_index_rejects_hardlink_without_touching_external_file(tmp_path: Path):
+    store = MediaStore(tmp_path / "media", 1024, min_free_disk_bytes=0)
+    payload = store.root / "payload.txt"
+    payload.write_text("payload", encoding="utf-8")
+    item = StoredFile(
+        id="a" * 32,
+        name="payload.txt",
+        mime_type="text/plain",
+        size=7,
+        sha256="0" * 64,
+        created_at=time.time(),
+        server_path=str(payload),
+    )
+    (store.root / f"{item.id}.json").write_text(
+        json.dumps(item.__dict__), encoding="utf-8"
+    )
+    external = tmp_path / "outside.json"
+    external.write_text("{}", encoding="utf-8")
+    os.link(external, store.root / "session_media.json")
+
+    with pytest.raises(OSError, match="single-link"):
+        store.record_session_media("session-1", [item.id])
+
+    assert external.read_text(encoding="utf-8") == "{}"
+
+
+def test_media_store_rejects_hardlinked_payload(tmp_path: Path):
+    store = MediaStore(tmp_path / "media", 1024, min_free_disk_bytes=0)
+    external = tmp_path / "outside.txt"
+    external.write_text("outside", encoding="utf-8")
+    payload = store.root / "payload.txt"
+    os.link(external, payload)
+    item = StoredFile(
+        id="b" * 32,
+        name="payload.txt",
+        mime_type="text/plain",
+        size=7,
+        sha256="0" * 64,
+        created_at=time.time(),
+        server_path=str(payload),
+    )
+    (store.root / f"{item.id}.json").write_text(
+        json.dumps(item.__dict__), encoding="utf-8"
+    )
+
+    assert store.get(item.id) is None
+
+
+def test_run_status_atomic_write_does_not_follow_hardlink(tmp_path: Path):
+    external = tmp_path / "outside.json"
+    external.write_text("{}", encoding="utf-8")
+    state_file = tmp_path / "run_status.json"
+    os.link(external, state_file)
+    tracker = RunTracker(state_file)
+
+    with pytest.raises(OSError, match="hard-linked"):
+        tracker.start("session-1", "run-1")
+
+    assert external.read_text(encoding="utf-8") == "{}"
+    assert state_file.read_text(encoding="utf-8") == "{}"
+
+
+def test_atomic_write_rejects_runtime_data_root_replacement(tmp_path: Path):
+    import nexus_gateway.app as gateway_app
+
+    data_root = tmp_path / "nexus-data"
+    original_root = tmp_path / "nexus-data.original"
+    app = create_app(
+        username="nexus",
+        password="test-password",
+        session_secret="test-session-secret",
+        upstream_url="http://127.0.0.1:9",
+        upstream_token="upstream-secret",
+        data_dir=data_root,
+        storage_dir=data_root / "media",
+    )
+    data_root.rename(original_root)
+    data_root.mkdir()
+    try:
+        with pytest.raises(OSError, match="identity changed"):
+            gateway_app._secure_atomic_write(
+                data_root / "run_status.json",
+                "{}",
+                app[gateway_app.MANAGED_PATH_GUARD_KEY],
+            )
+        assert not (data_root / "run_status.json").exists()
+    finally:
+        data_root.rmdir()
+        original_root.rename(data_root)
+
+
+def test_atomic_write_rejects_runtime_media_junction_replacement(tmp_path: Path):
+    import nexus_gateway.app as gateway_app
+
+    data_root = tmp_path / "nexus-data"
+    media_root = data_root / "media"
+    original_media = data_root / "media.original"
+    outside = tmp_path / "outside-media"
+    outside.mkdir()
+    app = create_app(
+        username="nexus",
+        password="test-password",
+        session_secret="test-session-secret",
+        upstream_url="http://127.0.0.1:9",
+        upstream_token="upstream-secret",
+        data_dir=data_root,
+        storage_dir=media_root,
+    )
+    media_root.rename(original_media)
+    if os.name == "nt":
+        result = subprocess.run(
+            [
+                "powershell",
+                "-NoProfile",
+                "-NonInteractive",
+                "-Command",
+                "$null = New-Item -ItemType Junction -Path $env:NEXUS_TEST_LINK -Target $env:NEXUS_TEST_TARGET",
+            ],
+            env={
+                **os.environ,
+                "NEXUS_TEST_LINK": str(media_root),
+                "NEXUS_TEST_TARGET": str(outside),
+            },
+            capture_output=True,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+        assert result.returncode == 0, result.stderr
+    else:
+        media_root.symlink_to(outside, target_is_directory=True)
+    try:
+        with pytest.raises(OSError, match="redirected|identity changed"):
+            gateway_app._secure_atomic_write(
+                media_root / "session_media.json",
+                "{}",
+                app[gateway_app.MANAGED_PATH_GUARD_KEY],
+            )
+        assert list(outside.iterdir()) == []
+    finally:
+        if os.name == "nt":
+            os.rmdir(media_root)
+        else:
+            media_root.unlink()
+        original_media.rename(media_root)
 
 
 @pytest.mark.asyncio
@@ -3326,6 +5206,38 @@ async def test_proxy_maps_hermes_auth_failure_without_invalidating_device_token(
     })
     still_authorized = await gateway_client.get("/api/sessions", headers=headers)
     assert still_authorized.status == 200
+
+
+@pytest.mark.asyncio
+async def test_proxy_sanitizes_hermes_5xx_body(
+    gateway_client: TestClient,
+    upstream_client: TestClient,
+):
+    upstream_client.session_state.update({
+        "status": 500,
+        "payload": {
+            "error": {
+                "message": "failed at C:/private with bearer upstream-secret",
+            }
+        },
+    })
+
+    response = await gateway_client.get(
+        "/api/sessions",
+        headers=await auth_headers(gateway_client),
+    )
+
+    assert response.status == 502
+    body = await response.json()
+    assert body == {
+        "error": {
+            "code": "hermes_upstream_error",
+            "message": "上游服务暂时不可用",
+        }
+    }
+    serialized = json.dumps(body, ensure_ascii=False)
+    assert "C:/private" not in serialized
+    assert "upstream-secret" not in serialized
 
 
 @pytest.mark.asyncio

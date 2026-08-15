@@ -148,6 +148,9 @@ tbody tr:last-child td { border-bottom: 0; }
 .system-form { display: grid; grid-template-columns: minmax(0, 1fr) minmax(0, 1fr); gap: 0 16px; padding: 20px; }
 .system-form .form-actions { display: flex; align-items: center; gap: 14px; }
 .system-form .form-message { margin: 0; }
+.checkbox-field { grid-template-columns: auto 1fr; align-items: center; gap: 9px; }
+.checkbox-field input { width: 18px; height: 18px; margin: 0; accent-color: var(--primary); }
+.hermes-key-state code { font: 11px Consolas, monospace; }
 .profile-config { display: grid; gap: 12px; margin: 4px 0 18px; padding: 15px; border: 1px solid var(--line); border-radius: 16px; background: #fafbff; }
 .profile-config-head { display: flex; align-items: center; justify-content: space-between; gap: 16px; }
 .profile-config-head > div { display: grid; gap: 3px; }

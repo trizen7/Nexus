@@ -308,11 +308,14 @@ def apply_pending_setup() -> None:
         session_secret = secrets.token_urlsafe(48)
         config_changed = True
 
-    new_config = {
+    # Preserve Nexus-managed optional settings (profiles and online ASR) when
+    # the fnOS configuration wizard changes only its account/Hermes fields.
+    new_config = dict(existing_config)
+    new_config.update({
         "hermes_api_url": hermes_api_url,
         "hermes_api_token": hermes_api_token,
         "session_secret": session_secret,
-    }
+    })
     new_account = {
         "username": username,
         "password_scheme": "scrypt",
