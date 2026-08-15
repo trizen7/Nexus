@@ -32,6 +32,8 @@ GATEWAY_FILES = (
     "gateway/requirements.txt",
     "gateway/start_gateway.py",
     "gateway/nexus_gateway/app.py",
+    "gateway/nexus_gateway/cloud_asr.py",
+    "gateway/nexus_gateway/openai_asr.py",
     "gateway/nexus_gateway/__init__.py",
     "gateway/nexus_gateway/__main__.py",
     "gateway/nexus_gateway/web/app.js",
@@ -215,6 +217,8 @@ def copy_required(source: str | None, target: Path, label: str) -> Path:
     path = Path(source).resolve()
     if not path.is_file() or path.is_symlink():
         raise RuntimeError(f"{label} does not exist or is unsafe: {path}")
+    if path == target.resolve():
+        return target
     shutil.copy2(path, target)
     return target
 
@@ -270,11 +274,13 @@ def main() -> int:
     output = safe_output_path(args.output)
     output.mkdir(parents=True, exist_ok=True)
     preserved_fnos = set(expected_fnos_artifact_names(version)) if args.require_fnos else set()
+    apk_target = output / f"Nexus-Android-{version}-release.apk"
+    if args.apk and Path(args.apk).resolve() == apk_target.resolve():
+        preserved_fnos.add(apk_target.name)
     clean_generated_release_files(output, preserved_fnos)
 
     fnos_artifacts = collect_required_fnos_artifacts(output, version) if args.require_fnos else []
     gateway_zip = output / f"Nexus-Gateway-{version}.zip"
-    apk_target = output / f"Nexus-Android-{version}-release.apk"
     checksums = output / "SHA256SUMS.txt"
 
     deterministic_zip(gateway_zip)

@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 import math
 import re
 import subprocess
@@ -15,6 +16,10 @@ from typing import Iterable, Iterator
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 MAX_BLOB_BYTES = 5_000_000
+VERIFIED_LARGE_DEPENDENCIES = {
+    "android/app/libs/sherpa-onnx-1.13.5.aar":
+        "6419cd8bc983e0c4fab06067f0fe0313fdc0f7103818ac1e7a08d50787b7a82b",
+}
 
 SUSPICIOUS_PATHS = (
     re.compile(r"(^|/)(\.env($|\.)|account\.json$|config\.json$|process\.json$|deployment\.json$)", re.I),
@@ -96,7 +101,11 @@ def scan_blob(source: str, path: str, data: bytes) -> list[Finding]:
                 break
 
     if len(data) > MAX_BLOB_BYTES:
-        findings.append(Finding(source, normalized_path, "large-repository-blob"))
+        expected_digest = VERIFIED_LARGE_DEPENDENCIES.get(normalized_path)
+        if expected_digest is None:
+            findings.append(Finding(source, normalized_path, "large-repository-blob"))
+        elif hashlib.sha256(data).hexdigest() != expected_digest:
+            findings.append(Finding(source, normalized_path, "verified-dependency-digest-mismatch"))
         return findings
     if b"\x00" in data[:8192]:
         return findings
@@ -149,7 +158,9 @@ def history_blobs() -> Iterator[tuple[str, str, bytes]]:
 
 def worktree_blobs() -> Iterator[tuple[str, str, bytes]]:
     raw = run_git("ls-files", "-co", "--exclude-standard")
+    scanned_paths: set[str] = set()
     for relative in str(raw).splitlines():
+        scanned_paths.add(relative.replace("\\", "/"))
         path = REPO_ROOT / relative
         if not path.is_file():
             continue
@@ -158,6 +169,18 @@ def worktree_blobs() -> Iterator[tuple[str, str, bytes]]:
         except OSError:
             continue
         yield "worktree", relative, data
+
+    # Verified binary build inputs are ignored to prevent accidental commits,
+    # but still participate in the digest-based repository scan.
+    for relative in VERIFIED_LARGE_DEPENDENCIES:
+        if relative in scanned_paths:
+            continue
+        path = REPO_ROOT / relative
+        if path.is_file():
+            try:
+                yield "worktree", relative, path.read_bytes()
+            except OSError:
+                continue
 
 
 def main() -> int:

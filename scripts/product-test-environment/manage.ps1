@@ -35,13 +35,134 @@ function Assert-ManagedPath([string]$Path) {
     if (-not $full.StartsWith($Root + "\", [System.StringComparison]::OrdinalIgnoreCase)) {
         throw "Refusing to modify a path outside the deployed test environment: $full"
     }
+    $current = $full
+    while ($true) {
+        if (Test-Path -LiteralPath $current) {
+            $item = Get-Item -LiteralPath $current -Force
+            if (($item.Attributes -band [System.IO.FileAttributes]::ReparsePoint) -ne 0) {
+                throw "Refusing to modify a path through a reparse point: $current"
+            }
+            $linkTypeProperty = $item.PSObject.Properties['LinkType']
+            if ($current.Equals($full, [System.StringComparison]::OrdinalIgnoreCase) -and
+                -not $item.PSIsContainer -and
+                $null -ne $linkTypeProperty -and
+                [string]$linkTypeProperty.Value -eq 'HardLink') {
+                throw "Refusing to modify a hard-linked managed file: $current"
+            }
+        }
+        if ($current.Equals($Root, [System.StringComparison]::OrdinalIgnoreCase)) { break }
+        $parent = [System.IO.Directory]::GetParent($current)
+        if ($null -eq $parent) {
+            throw "Refusing to modify a path whose ancestry cannot be verified: $full"
+        }
+        $current = $parent.FullName.TrimEnd("\")
+    }
     return $full
+}
+
+function New-ManagedDirectory([string]$Path) {
+    $safe = Assert-ManagedPath $Path
+    if (-not (Test-Path -LiteralPath $safe)) {
+        $parent = Split-Path -Parent $safe
+        if (-not [string]::IsNullOrWhiteSpace($parent) -and
+            -not $parent.Equals($Root, [System.StringComparison]::OrdinalIgnoreCase)) {
+            $null = New-ManagedDirectory $parent
+        }
+        $safe = Assert-ManagedPath $safe
+        $null = New-Item -ItemType Directory -Path $safe
+    }
+    $safe = Assert-ManagedPath $safe
+    if (-not (Test-Path -LiteralPath $safe -PathType Container)) {
+        throw "Managed directory is not a directory: $safe"
+    }
+    return $safe
 }
 
 function Remove-ManagedTree([string]$Path) {
     $safe = Assert-ManagedPath $Path
     if (Test-Path -LiteralPath $safe) {
+        $safe = Assert-ManagedPath $safe
         Remove-Item -LiteralPath $safe -Recurse -Force
+    }
+}
+
+function Remove-ManagedItem([string]$Path) {
+    $safe = Assert-ManagedPath $Path
+    if (Test-Path -LiteralPath $safe) {
+        $safe = Assert-ManagedPath $safe
+        Remove-Item -LiteralPath $safe -Recurse -Force
+    }
+}
+
+function Move-ManagedItem([string]$Source, [string]$Destination) {
+    $safeSource = Assert-ManagedPath $Source
+    $safeDestination = Assert-ManagedPath $Destination
+    $safeSource = Assert-ManagedPath $safeSource
+    $safeDestination = Assert-ManagedPath $safeDestination
+    Move-Item -LiteralPath $safeSource -Destination $safeDestination
+}
+
+function Copy-ManagedItem([string]$Source, [string]$Destination) {
+    $safeSource = Assert-ManagedPath $Source
+    $safeDestination = Assert-ManagedPath $Destination
+    $safeSource = Assert-ManagedPath $safeSource
+    $safeDestination = Assert-ManagedPath $safeDestination
+    Copy-Item -LiteralPath $safeSource -Destination $safeDestination -Recurse -Force
+}
+
+function Copy-ToManagedItem([string]$Source, [string]$Destination) {
+    $safeDestination = Assert-ManagedPath $Destination
+    $safeDestination = Assert-ManagedPath $safeDestination
+    Copy-Item -LiteralPath $Source -Destination $safeDestination -Recurse -Force
+}
+
+function Write-ManagedTextFile([string]$Path, [string]$Content) {
+    $safe = Assert-ManagedPath $Path
+    $parent = New-ManagedDirectory (Split-Path -Parent $safe)
+    $safe = Assert-ManagedPath $safe
+    $temporary = Assert-ManagedPath (Join-Path $parent ('.' + [System.IO.Path]::GetFileName($safe) + '.' + [Guid]::NewGuid().ToString('N') + '.tmp'))
+    $backup = Assert-ManagedPath (Join-Path $parent ('.' + [System.IO.Path]::GetFileName($safe) + '.' + [Guid]::NewGuid().ToString('N') + '.bak'))
+    $stream = $null
+    $writer = $null
+    try {
+        $temporary = Assert-ManagedPath $temporary
+        $stream = New-Object System.IO.FileStream(
+            $temporary,
+            [System.IO.FileMode]::CreateNew,
+            [System.IO.FileAccess]::Write,
+            [System.IO.FileShare]::None
+        )
+        $writer = New-Object System.IO.StreamWriter(
+            $stream,
+            (New-Object System.Text.UTF8Encoding($true))
+        )
+        $writer.Write($Content)
+        $writer.Flush()
+        $stream.Flush($true)
+        $writer.Dispose()
+        $writer = $null
+        $stream = $null
+
+        $temporary = Assert-ManagedPath $temporary
+        $safe = Assert-ManagedPath $safe
+        if (Test-Path -LiteralPath $safe) {
+            $safe = Assert-ManagedPath $safe
+            $backup = Assert-ManagedPath $backup
+            [System.IO.File]::Replace($temporary, $safe, $backup, $true)
+            Remove-ManagedItem $backup
+        } else {
+            $safe = Assert-ManagedPath $safe
+            [System.IO.File]::Move($temporary, $safe)
+        }
+    } finally {
+        if ($null -ne $writer) { $writer.Dispose() }
+        elseif ($null -ne $stream) { $stream.Dispose() }
+        if (Test-Path -LiteralPath $temporary) {
+            try { Remove-ManagedItem $temporary } catch {}
+        }
+        if (Test-Path -LiteralPath $backup) {
+            try { Remove-ManagedItem $backup } catch {}
+        }
     }
 }
 
@@ -104,9 +225,8 @@ function Read-JsonFile([string]$Path) {
 }
 
 function Write-JsonFile([string]$Path, $Value) {
-    $parent = Split-Path -Parent $Path
-    $null = New-Item -ItemType Directory -Path $parent -Force
-    $Value | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $Path -Encoding UTF8
+    $content = ($Value | ConvertTo-Json -Depth 8) + [Environment]::NewLine
+    Write-ManagedTextFile $Path $content
 }
 
 function Get-ProcessStartTicks($Process) {
@@ -203,7 +323,7 @@ function Adopt-GatewayProcess($Record, $Candidate) {
 function Get-OwnedProcess {
     $record = Read-JsonFile $ProcessFile
     if ($null -eq $record -or $null -eq $record.pid -or $null -eq $record.start_ticks) {
-        Remove-Item -LiteralPath $ProcessFile -Force -ErrorAction SilentlyContinue
+        Remove-ManagedItem $ProcessFile
         return $null
     }
 
@@ -211,7 +331,7 @@ function Get-OwnedProcess {
     $recordTicks = [Int64]0
     if (-not [int]::TryParse([string]$record.pid, [ref]$recordPid) -or
         -not [Int64]::TryParse([string]$record.start_ticks, [ref]$recordTicks)) {
-        Remove-Item -LiteralPath $ProcessFile -Force -ErrorAction SilentlyContinue
+        Remove-ManagedItem $ProcessFile
         return $null
     }
 
@@ -246,7 +366,7 @@ function Get-OwnedProcess {
         return $null
     }
 
-    Remove-Item -LiteralPath $ProcessFile -Force -ErrorAction SilentlyContinue
+    Remove-ManagedItem $ProcessFile
     return $null
 }
 
@@ -369,7 +489,7 @@ function Stop-Gateway([switch]$Quiet) {
     if (-not (Wait-ForProcessExit $pidValue 5)) {
         throw "Could not stop the owned Gateway process. No other process was touched."
     }
-    Remove-Item -LiteralPath $ProcessFile -Force -ErrorAction SilentlyContinue
+    Remove-ManagedItem $ProcessFile
     if (-not (Wait-ForManagedPortsClosed 5)) {
         throw 'The owned Gateway process exited, but a managed port (18787 or 18788) is still listening; no unrelated process was touched.'
     }
@@ -446,18 +566,33 @@ function Get-LatestArtifact {
     return $candidates[0].Artifact
 }
 
-function Verify-Artifact($Artifact) {
+function Verify-Artifact($Artifact, [string]$ChecksumFile = "", [string]$ExpectedName = "") {
     $actual = (Get-FileHash -LiteralPath $Artifact.FullName -Algorithm SHA256).Hash.ToLowerInvariant()
-    $sumFile = Join-Path $Artifact.DirectoryName "SHA256SUMS.txt"
-    if (Test-Path -LiteralPath $sumFile) {
-        $escapedName = [regex]::Escape($Artifact.Name)
-        $line = Get-Content -LiteralPath $sumFile -Encoding UTF8 |
-            Where-Object { $_ -match "^([0-9a-fA-F]{64})\s+\*?$escapedName$" } |
-            Select-Object -First 1
-        if ($null -ne $line) {
-            $expected = ([regex]::Match($line, "^[0-9a-fA-F]{64}").Value).ToLowerInvariant()
-            if ($actual -ne $expected) { throw "Artifact checksum does not match SHA256SUMS.txt" }
+    $sumFile = $ChecksumFile
+    if ([string]::IsNullOrWhiteSpace($sumFile)) {
+        $sumFile = Join-Path $Artifact.DirectoryName "SHA256SUMS.txt"
+    }
+    if ([string]::IsNullOrWhiteSpace($ExpectedName)) { $ExpectedName = $Artifact.Name }
+    if (-not (Test-Path -LiteralPath $sumFile -PathType Leaf)) {
+        throw "SHA256SUMS.txt is required beside the selected Gateway artifact."
+    }
+
+    $matchingEntries = @()
+    foreach ($line in @(Get-Content -LiteralPath $sumFile -Encoding UTF8)) {
+        if ([string]::IsNullOrWhiteSpace($line)) { continue }
+        $match = [regex]::Match($line, '^(?<hash>[0-9a-fA-F]{64})[ \t]+\*?(?<name>[^\r\n]+)$')
+        if (-not $match.Success) {
+            throw "SHA256SUMS.txt contains a malformed entry."
         }
+        if ($match.Groups['name'].Value -ceq $ExpectedName) {
+            $matchingEntries += $match.Groups['hash'].Value.ToLowerInvariant()
+        }
+    }
+    if ($matchingEntries.Count -ne 1) {
+        throw "SHA256SUMS.txt must contain exactly one entry for the selected Gateway artifact."
+    }
+    if ($actual -ne [string]$matchingEntries[0]) {
+        throw "Artifact checksum does not match SHA256SUMS.txt"
     }
     return $actual
 }
@@ -465,7 +600,9 @@ function Verify-Artifact($Artifact) {
 function Ensure-Dependencies([string]$RequirementsPath) {
     $python = Get-VenvPython
     $requirementsHash = (Get-FileHash -LiteralPath $RequirementsPath -Algorithm SHA256).Hash.ToLowerInvariant()
-    $dependencyStateFile = Join-Path $StateDir "dependencies.json"
+    $managedVenvDir = Assert-ManagedPath $VenvDir
+    $managedStateDir = Assert-ManagedPath $StateDir
+    $dependencyStateFile = Assert-ManagedPath (Join-Path $StateDir "dependencies.json")
     $dependencyState = Read-JsonFile $dependencyStateFile
     $importsWork = $false
     if (Test-Path -LiteralPath $python -PathType Leaf) {
@@ -477,11 +614,11 @@ function Ensure-Dependencies([string]$RequirementsPath) {
     }
 
     $bootstrapPython = Find-NexusBootstrapPython
-    Remove-ManagedTree $VenvDir
+    Remove-ManagedTree $managedVenvDir
     $pipCacheDir = Assert-ManagedPath (Join-Path $Root "cache\pip")
-    $null = New-Item -ItemType Directory -Path $pipCacheDir -Force
-    $null = New-Item -ItemType Directory -Path $StateDir -Force
-    $lockFile = Join-Path $StateDir "requirements.lock.txt"
+    $pipCacheDir = New-ManagedDirectory $pipCacheDir
+    $managedStateDir = New-ManagedDirectory $managedStateDir
+    $lockFile = Assert-ManagedPath (Join-Path $StateDir "requirements.lock.txt")
     $previousCache = [Environment]::GetEnvironmentVariable("PIP_CACHE_DIR", "Process")
     $previousVersionCheck = [Environment]::GetEnvironmentVariable("PIP_DISABLE_PIP_VERSION_CHECK", "Process")
     $previousNoInput = [Environment]::GetEnvironmentVariable("PIP_NO_INPUT", "Process")
@@ -490,7 +627,8 @@ function Ensure-Dependencies([string]$RequirementsPath) {
     [Environment]::SetEnvironmentVariable("PIP_NO_INPUT", "1", "Process")
     try {
         Write-Host "Creating isolated Python environment..."
-        & $bootstrapPython -m venv $VenvDir
+        $managedVenvDir = Assert-ManagedPath $managedVenvDir
+        & $bootstrapPython -m venv $managedVenvDir
         if ($LASTEXITCODE -ne 0 -or -not (Test-Path -LiteralPath $python -PathType Leaf)) {
             throw "Could not create the isolated Python environment."
         }
@@ -501,7 +639,7 @@ function Ensure-Dependencies([string]$RequirementsPath) {
         if ($LASTEXITCODE -ne 0) { throw "The installed runtime dependencies cannot be imported." }
         $freeze = & $python -m pip freeze --all
         if ($LASTEXITCODE -ne 0) { throw "Could not record installed dependency versions." }
-        ($freeze -join "`n") + "`n" | Set-Content -LiteralPath $lockFile -Encoding UTF8
+        Write-ManagedTextFile $lockFile (($freeze -join "`n") + "`n")
         Write-JsonFile $dependencyStateFile ([ordered]@{
             schema_version = 1
             requirements_sha256 = $requirementsHash
@@ -515,42 +653,143 @@ function Ensure-Dependencies([string]$RequirementsPath) {
 }
 
 
-function Deploy-LatestArtifact {
+function Prepare-LatestArtifact {
     $artifact = Get-LatestArtifact
-    $artifactHash = Verify-Artifact $artifact
+    $sumFile = Join-Path $artifact.DirectoryName "SHA256SUMS.txt"
+    $artifactWork = Assert-ManagedPath (Join-Path $Root "artifact.next")
+    $artifactCopy = Assert-ManagedPath (Join-Path $artifactWork $artifact.Name)
     $staging = Assert-ManagedPath (Join-Path $Root "app.next")
-    $previous = Assert-ManagedPath (Join-Path $Root "app.previous")
+    Remove-ManagedTree $artifactWork
     Remove-ManagedTree $staging
-    Remove-ManagedTree $previous
-    $null = New-Item -ItemType Directory -Path $staging
-    Write-Host ("Extracting release artifact: " + $artifact.Name)
-    Expand-Archive -LiteralPath $artifact.FullName -DestinationPath $staging -Force
-    $requirements = Join-Path $staging "gateway\requirements.txt"
-    $entryPoint = Join-Path $staging "gateway\nexus_gateway\__main__.py"
-    if (-not (Test-Path -LiteralPath $requirements) -or -not (Test-Path -LiteralPath $entryPoint)) {
-        Remove-ManagedTree $staging
-        throw "The release artifact is incomplete."
-    }
-    Ensure-Dependencies $requirements
-    if (Test-Path -LiteralPath $AppDir) { Move-Item -LiteralPath $AppDir -Destination $previous }
     try {
-        Move-Item -LiteralPath $staging -Destination $AppDir
-        Remove-ManagedTree $previous
+        $artifactWork = New-ManagedDirectory $artifactWork
+        $staging = New-ManagedDirectory $staging
+        Copy-ToManagedItem $artifact.FullName $artifactCopy
+        $copiedArtifact = Get-Item -LiteralPath $artifactCopy
+        $artifactHash = Verify-Artifact $copiedArtifact $sumFile $artifact.Name
+        Write-Host ("Extracting release artifact: " + $artifact.Name)
+        $staging = Assert-ManagedPath $staging
+        Expand-Archive -LiteralPath $artifactCopy -DestinationPath $staging -Force
+        $requirements = Assert-ManagedPath (Join-Path $staging "gateway\requirements.txt")
+        $entryPoint = Assert-ManagedPath (Join-Path $staging "gateway\nexus_gateway\__main__.py")
+        if (-not (Test-Path -LiteralPath $requirements -PathType Leaf) -or
+            -not (Test-Path -LiteralPath $entryPoint -PathType Leaf)) {
+            throw "The release artifact is incomplete."
+        }
+        return [pscustomobject]@{
+            Artifact = $artifact
+            ArtifactHash = $artifactHash
+            Staging = $staging
+            Requirements = $requirements
+        }
     } catch {
-        if (Test-Path -LiteralPath $AppDir) { Remove-ManagedTree $AppDir }
-        if (Test-Path -LiteralPath $previous) { Move-Item -LiteralPath $previous -Destination $AppDir }
+        Remove-ManagedTree $staging
         throw
+    } finally {
+        Remove-ManagedTree $artifactWork
     }
-    Write-JsonFile $DeploymentFile ([ordered]@{
+}
+
+function Write-DeploymentState($Prepared) {
+    $deploymentFile = Assert-ManagedPath $DeploymentFile
+    Write-JsonFile $deploymentFile ([ordered]@{
         schema_version = 1
-        artifact = $artifact.Name
-        artifact_sha256 = $artifactHash
+        artifact = $Prepared.Artifact.Name
+        artifact_sha256 = $Prepared.ArtifactHash
         deployed_at = (Get-Date).ToUniversalTime().ToString("yyyy-MM-ddTHH:mm:ssZ")
         gateway_url = $BaseUrl
         lan_gateway_url = Get-LanUrl
         bind_address = $BindAddress
     })
+}
+
+function Deploy-LatestArtifact {
+    if (Test-Path -LiteralPath $AppDir) {
+        throw "An application is already deployed; use the transactional upgrade command."
+    }
+    $prepared = Prepare-LatestArtifact
+    $installed = $false
+    try {
+        Ensure-Dependencies $prepared.Requirements
+        Move-ManagedItem $prepared.Staging $AppDir
+        $installed = $true
+        Write-DeploymentState $prepared
+    } catch {
+        Remove-ManagedTree $prepared.Staging
+        if ($installed) { Remove-ManagedTree $AppDir }
+        throw
+    }
     Write-Host "Release artifact deployed independently from source."
+}
+
+function Get-UpgradeTransaction {
+    $transactionRoot = Assert-ManagedPath (Join-Path $Root "upgrade.previous")
+    $transactionState = Assert-ManagedPath (Join-Path $transactionRoot "state")
+    return [pscustomobject]@{
+        Root = $transactionRoot
+        State = $transactionState
+        App = (Assert-ManagedPath (Join-Path $transactionRoot "app"))
+        Venv = (Assert-ManagedPath (Join-Path $transactionRoot "venv"))
+        Dependencies = (Assert-ManagedPath (Join-Path $transactionState "dependencies.json"))
+        Lock = (Assert-ManagedPath (Join-Path $transactionState "requirements.lock.txt"))
+        Deployment = (Assert-ManagedPath (Join-Path $transactionState "deployment.json"))
+    }
+}
+
+function Get-UpgradeTransactionItems($Transaction) {
+    return @(
+        [pscustomobject]@{ Current = (Assert-ManagedPath $AppDir); Backup = $Transaction.App },
+        [pscustomobject]@{ Current = (Assert-ManagedPath $VenvDir); Backup = $Transaction.Venv },
+        [pscustomobject]@{ Current = (Assert-ManagedPath (Join-Path $StateDir "dependencies.json")); Backup = $Transaction.Dependencies },
+        [pscustomobject]@{ Current = (Assert-ManagedPath (Join-Path $StateDir "requirements.lock.txt")); Backup = $Transaction.Lock },
+        [pscustomobject]@{ Current = (Assert-ManagedPath $DeploymentFile); Backup = $Transaction.Deployment }
+    )
+}
+
+function Begin-UpgradeTransaction($Transaction) {
+    if (Test-Path -LiteralPath $Transaction.Root) {
+        throw "An unfinished upgrade transaction already exists; its backups were preserved."
+    }
+    $null = New-ManagedDirectory $Transaction.Root
+    $null = New-ManagedDirectory $Transaction.State
+    $moved = New-Object System.Collections.Generic.List[object]
+    try {
+        foreach ($item in @(Get-UpgradeTransactionItems $Transaction)) {
+            if (Test-Path -LiteralPath $item.Current) {
+                Move-ManagedItem $item.Current $item.Backup
+                $moved.Add($item)
+            }
+        }
+    } catch {
+        $restoreErrors = New-Object System.Collections.Generic.List[string]
+        for ($index = $moved.Count - 1; $index -ge 0; $index--) {
+            $item = $moved[$index]
+            try {
+                Move-ManagedItem $item.Backup $item.Current
+            } catch {
+                $restoreErrors.Add($_.Exception.Message)
+            }
+        }
+        if ($restoreErrors.Count -eq 0) { Remove-ManagedTree $Transaction.Root }
+        if ($restoreErrors.Count -gt 0) {
+            throw ("Could not begin the upgrade transaction and could not fully restore it: " + ($restoreErrors -join "; "))
+        }
+        throw
+    }
+}
+
+function Restore-UpgradeTransaction($Transaction) {
+    foreach ($item in @(Get-UpgradeTransactionItems $Transaction)) {
+        Remove-ManagedItem $item.Current
+        if (Test-Path -LiteralPath $item.Backup) {
+            Copy-ManagedItem $item.Backup $item.Current
+        }
+    }
+    Remove-ManagedTree $Transaction.Root
+}
+
+function Commit-UpgradeTransaction($Transaction) {
+    Remove-ManagedTree (Assert-ManagedPath $Transaction.Root)
 }
 
 function Get-SetupStatus {
@@ -588,11 +827,11 @@ function Archive-ExistingLog([string]$Path) {
     $extension = [System.IO.Path]::GetExtension($item.Name)
     $archiveName = "{0}.{1}.{2}{3}" -f $baseName, $timestamp, [Guid]::NewGuid().ToString("N"), $extension
     $archivePath = Join-Path $LogDir $archiveName
-    Move-Item -LiteralPath $fullPath -Destination $archivePath
+    Move-ManagedItem $fullPath $archivePath
 }
 
 
-function Start-Gateway {
+function Start-Gateway([switch]$RequireExistingDeployment) {
     $owned = Get-OwnedProcess
     if ($null -ne $owned) {
         $httpReady = Test-PortOpen -TargetPort $Port
@@ -607,15 +846,18 @@ function Start-Gateway {
         Stop-Gateway -Quiet
     }
     if (-not (Test-Path -LiteralPath (Join-Path $AppDir "gateway\nexus_gateway\__main__.py"))) {
+        if ($RequireExistingDeployment) {
+            throw "The expected deployed Gateway application is missing."
+        }
         Deploy-LatestArtifact
     }
     Ensure-Dependencies (Join-Path $AppDir "gateway\requirements.txt")
     if (Test-PortOpen -TargetPort $Port) { throw "HTTP port $Port is already used by another process; it was not stopped." }
     if (Test-PortOpen -TargetPort 18788) { throw "Legacy HTTPS port 18788 is still used by another process; HTTP-origin startup was refused." }
-    $null = New-Item -ItemType Directory -Path $DataDir -Force
-    $null = New-Item -ItemType Directory -Path (Join-Path $DataDir "media") -Force
-    $null = New-Item -ItemType Directory -Path $LogDir -Force
-    $null = New-Item -ItemType Directory -Path $StateDir -Force
+    $null = New-ManagedDirectory $DataDir
+    $null = New-ManagedDirectory (Join-Path $DataDir "media")
+    $null = New-ManagedDirectory $LogDir
+    $null = New-ManagedDirectory $StateDir
     Ensure-FirewallRule
     $python = Get-VenvPython
     $workingDirectory = Join-Path $AppDir "gateway"
@@ -623,12 +865,15 @@ function Start-Gateway {
     $stderrLog = Join-Path $LogDir "gateway.stderr.log"
     Archive-ExistingLog $stdoutLog
     Archive-ExistingLog $stderrLog
+    Write-ManagedTextFile $stdoutLog ""
+    Write-ManagedTextFile $stderrLog ""
     $launchEnvironment = [ordered]@{
         PYTHONUTF8 = "1"
         PYTHONUNBUFFERED = "1"
         PYTHONNOUSERSITE = "1"
         NEXUS_GATEWAY_HOST = $BindAddress
         NEXUS_GATEWAY_PORT = $Port.ToString()
+        NEXUS_DATA_DIR = $DataDir
         NEXUS_CREDENTIALS_FILE = (Join-Path $DataDir "account.json")
         NEXUS_CONFIG_FILE = (Join-Path $DataDir "config.json")
         NEXUS_BOOTSTRAP_TOKEN_FILE = (Join-Path $DataDir "bootstrap.token")
@@ -650,6 +895,8 @@ function Start-Gateway {
         }
     }
     try {
+        $stdoutLog = Assert-ManagedPath $stdoutLog
+        $stderrLog = Assert-ManagedPath $stderrLog
         $process = Start-Process -FilePath $python `
             -ArgumentList @("-m", "nexus_gateway", "--host", $BindAddress, "--port", $Port.ToString()) `
             -WorkingDirectory $workingDirectory `
@@ -663,7 +910,10 @@ function Start-Gateway {
         }
     }
     $launcherTicks = Get-ProcessStartTicks $process
-    if ($null -eq $launcherTicks) { throw "Gateway launcher metadata could not be read. Check the files in $LogDir" }
+    if ($null -eq $launcherTicks) {
+        try { $null = Invoke-HiddenTaskkill -ProcessId ([int]$process.Id) -Force } catch {}
+        throw "Gateway launcher metadata could not be read. Check the files in $LogDir"
+    }
     Write-JsonFile $ProcessFile ([ordered]@{
         schema_version = 2
         pid = [int]$process.Id
@@ -698,6 +948,48 @@ function Start-Gateway {
     }
 }
 
+function Invoke-TransactionalUpgrade {
+    $prepared = Prepare-LatestArtifact
+    $transaction = Get-UpgradeTransaction
+    if (Test-Path -LiteralPath $transaction.Root) {
+        Remove-ManagedTree $prepared.Staging
+        throw "An unfinished upgrade transaction already exists; its backups were preserved."
+    }
+
+    $transactionStarted = $false
+    try {
+        Stop-Gateway -Quiet
+        Begin-UpgradeTransaction $transaction
+        $transactionStarted = $true
+        Move-ManagedItem $prepared.Staging $AppDir
+        Ensure-Dependencies (Assert-ManagedPath (Join-Path $AppDir "gateway\requirements.txt"))
+        Write-DeploymentState $prepared
+        Start-Gateway -RequireExistingDeployment
+    } catch {
+        $originalFailure = $_.Exception.Message
+        $rollbackErrors = New-Object System.Collections.Generic.List[string]
+        try { Stop-Gateway -Quiet } catch { $rollbackErrors.Add("stop: " + $_.Exception.Message) }
+        Remove-ManagedTree $prepared.Staging
+        if ($transactionStarted) {
+            try { Restore-UpgradeTransaction $transaction } catch { $rollbackErrors.Add("restore: " + $_.Exception.Message) }
+        }
+        $oldEntryPoint = Assert-ManagedPath (Join-Path $AppDir "gateway\nexus_gateway\__main__.py")
+        if (Test-Path -LiteralPath $oldEntryPoint -PathType Leaf) {
+            try { Start-Gateway -RequireExistingDeployment } catch { $rollbackErrors.Add("restart: " + $_.Exception.Message) }
+        }
+        if ($rollbackErrors.Count -gt 0) {
+            throw ("Upgrade failed: " + $originalFailure + ". Rollback encountered errors: " + ($rollbackErrors -join "; "))
+        }
+        throw ("Upgrade failed and the previous deployment was restored: " + $originalFailure)
+    }
+    try {
+        Commit-UpgradeTransaction $transaction
+    } catch {
+        throw ("The new Gateway passed readiness verification, but old backup cleanup failed: " + $_.Exception.Message)
+    }
+    Write-Host "Release artifact upgrade committed after readiness verification."
+}
+
 function Show-Status {
     $deployment = Read-JsonFile $DeploymentFile
     $owned = Get-OwnedProcess
@@ -726,7 +1018,7 @@ function Reset-Environment {
     Stop-Gateway -Quiet
     Remove-ManagedTree $DataDir
     Remove-ManagedTree $LogDir
-    Remove-Item -LiteralPath $ProcessFile -Force -ErrorAction SilentlyContinue
+    Remove-ManagedItem $ProcessFile
     Write-Host "Runtime data, account, password, configuration, media, historical TLS files and logs were cleared."
     Start-Gateway
 }
@@ -741,11 +1033,7 @@ try {
         "stop" { Stop-Gateway }
         "status" { Show-Status }
         "reset" { Reset-Environment }
-        "upgrade" {
-            Stop-Gateway -Quiet
-            Deploy-LatestArtifact
-            Start-Gateway
-        }
+        "upgrade" { Invoke-TransactionalUpgrade }
     }
 } catch {
     Write-Error ("Local product test environment failed: " + $_.Exception.Message)

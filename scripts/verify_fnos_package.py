@@ -53,6 +53,10 @@ RUNTIME_WEB_FILES = {
     "runtime/nexus-gateway/_internal/nexus_gateway/web/app.js",
     "runtime/nexus-gateway/_internal/nexus_gateway/web/styles.css",
 }
+RUNTIME_EDGE_TTS_SOURCE = "runtime/nexus-gateway/_internal/edge_tts/communicate.py"
+RUNTIME_EDGE_TTS_LICENSE = (
+    "runtime/nexus-gateway/_internal/edge_tts-7.2.7.dist-info/licenses/LICENSE"
+)
 FORBIDDEN_NAMES = {".ds_store", "account.json", "config.json", "bootstrap.token", ".env"}
 TEXT_SUFFIXES = {"", ".json", ".py", ".sh", ".yaml", ".yml", ".txt", ".sha256", ".platform"}
 ARCHITECTURES = {
@@ -243,6 +247,8 @@ def _verify_runtime(app: dict[str, ArchiveEntry], architecture_metadata: dict[st
         RUNTIME_EXECUTABLE_PATH,
         RUNTIME_CA_BUNDLE_PATH,
         *RUNTIME_WEB_FILES,
+        RUNTIME_EDGE_TTS_SOURCE,
+        RUNTIME_EDGE_TTS_LICENSE,
     }
     missing = sorted(required - runtime_names)
     if missing:
@@ -290,6 +296,14 @@ def _verify_runtime(app: dict[str, ArchiveEntry], architecture_metadata: dict[st
     ca_bundle = app[RUNTIME_CA_BUNDLE_PATH].data
     if len(ca_bundle) < 1024 or b"-----BEGIN CERTIFICATE-----" not in ca_bundle:
         _fail("native runtime CA bundle is invalid")
+
+    edge_license = _assert_clean_text(
+        f"app.tgz/{RUNTIME_EDGE_TTS_LICENSE}",
+        app[RUNTIME_EDGE_TTS_LICENSE].data,
+        allow_crlf=True,
+    )
+    if "GNU LESSER GENERAL PUBLIC LICENSE" not in edge_license or "The MIT License" not in edge_license:
+        _fail("native runtime edge-tts license metadata is incomplete")
 
 
 def verify_package(fpk_path: Path, sha256_path: Path | None = None) -> str:
@@ -469,6 +483,8 @@ def verify_package(fpk_path: Path, sha256_path: Path | None = None) -> str:
     license_text = combined_text["FPK/LICENSE"]
     if "Apache License" not in license_text or (ROOT / "NOTICE").read_text(encoding="utf-8").strip() not in license_text:
         _fail("FPK LICENSE does not include the repository license and NOTICE")
+    if "edge-tts 7.2.7" not in license_text or "GNU Lesser General Public License" not in license_text:
+        _fail("FPK LICENSE does not include the edge-tts runtime notice")
 
     digest = hashlib.sha256(fpk_path.read_bytes()).hexdigest()
     checksum_file = _resolve_checksum_file(fpk_path, sha256_path)

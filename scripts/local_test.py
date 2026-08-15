@@ -32,6 +32,8 @@ RUNTIME_FILE = LOCAL_DIR / "runtime.json"
 DEPENDENCY_STATE_FILE = LOCAL_DIR / "dependency-state.json"
 DEPENDENCY_LOCK_FILE = LOCAL_DIR / "requirements.lock.txt"
 PIP_CACHE_DIR = LOCAL_DIR / "cache" / "pip"
+DEBUG_APK_SOURCE = ROOT / "android" / "app" / "build" / "outputs" / "apk" / "debug" / "app-debug.apk"
+DEBUG_APK_DELIVERY = ROOT / "成品" / "test" / "app-debug.apk"
 GATEWAY_LOG_FILE = LOG_DIR / "gateway.log"
 REQUIREMENTS_FILES = (
     GATEWAY_DIR / "requirements.txt",
@@ -940,6 +942,7 @@ def start_gateway(connection: HermesConnection, *, force_restart: bool = False) 
         "PYTHONUNBUFFERED": "1",
         "NEXUS_GATEWAY_HOST": host,
         "NEXUS_GATEWAY_PORT": str(port),
+        "NEXUS_DATA_DIR": str(DATA_DIR),
         "NEXUS_CREDENTIALS_FILE": str(DATA_DIR / "account.json"),
         "NEXUS_CONFIG_FILE": str(DATA_DIR / "config.json"),
         "NEXUS_BOOTSTRAP_TOKEN_FILE": str(DATA_DIR / "bootstrap.token"),
@@ -1126,10 +1129,9 @@ def command_credentials() -> int:
     password = str(access.get("password") or "")
     if not username or not password:
         raise LocalTestError("本地测试账号尚未创建，请先运行 setup")
-    print("警告：以下仅为本机测试账号，请勿复制到 Issue、日志或提交中。")
     print(f"地址: {gateway_url()}")
     print(f"账号: {username}")
-    print(f"密码: {password}")
+    print("密码: 已保存在 Nexus 本地测试凭据文件中，不在终端输出")
     return 0
 
 
@@ -1138,6 +1140,20 @@ def _run_gate(label: str, command: Sequence[str], cwd: Path) -> None:
     result = subprocess.run(list(command), cwd=cwd, check=False)
     if result.returncode != 0:
         raise LocalTestError(f"{label}失败（退出码 {result.returncode}）")
+
+
+def _deliver_debug_apk(source: Path | None = None, destination: Path | None = None) -> None:
+    source = source or DEBUG_APK_SOURCE
+    destination = destination or DEBUG_APK_DELIVERY
+    if not source.is_file() or source.stat().st_size <= 0:
+        raise LocalTestError(f"Android Debug APK 不存在或为空：{source}")
+    destination.parent.mkdir(parents=True, exist_ok=True)
+    temporary = destination.with_name(f".{destination.name}.{os.getpid()}.tmp")
+    try:
+        shutil.copyfile(source, temporary)
+        os.replace(temporary, destination)
+    finally:
+        temporary.unlink(missing_ok=True)
 
 
 def command_verify() -> int:
@@ -1161,6 +1177,8 @@ def command_verify() -> int:
         [str(gradle), "testDebugUnitTest", "lintDebug", "assembleDebug", "--no-daemon"],
         ROOT / "android",
     )
+    _deliver_debug_apk()
+    print(f"[local-test] Debug APK 已覆盖：{DEBUG_APK_DELIVERY}", flush=True)
     print("[local-test] 完整非 Docker 回归门禁通过", flush=True)
     return 0
 
