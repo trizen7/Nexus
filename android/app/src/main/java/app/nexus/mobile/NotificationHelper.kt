@@ -19,10 +19,12 @@ import androidx.core.app.NotificationManagerCompat
 object NotificationHelper {
     private const val TRANSFER_CHANNEL = "nexus_transfers"
     private const val ANSWER_CHANNEL = "nexus_answers_v2"
+    private const val VOICE_CALL_CHANNEL = "nexus_voice_call"
     private const val HASH_MASK = 0x1fffffff
     private const val ANSWER_NOTIFICATION_TYPE = 0x20000000
     private const val TRANSFER_NOTIFICATION_TYPE = 0x40000000
     private const val FOREGROUND_NOTIFICATION_ID = 0x60000000
+    private const val VOICE_CALL_NOTIFICATION_ID = 0x60000001
 
     fun ensureChannels(context: Context) {
         val manager = context.getSystemService(NotificationManager::class.java)
@@ -36,6 +38,13 @@ object NotificationHelper {
             NotificationChannel(ANSWER_CHANNEL, "回答提醒", NotificationManager.IMPORTANCE_DEFAULT).apply {
                 description = "Nexus完成回答或执行失败时提醒"
                 lockscreenVisibility = android.app.Notification.VISIBILITY_PRIVATE
+            }
+        )
+        manager.createNotificationChannel(
+            NotificationChannel(VOICE_CALL_CHANNEL, "语音通话", NotificationManager.IMPORTANCE_LOW).apply {
+                description = "保持Nexus语音通话在锁屏或后台继续运行"
+                lockscreenVisibility = android.app.Notification.VISIBILITY_PRIVATE
+                setSound(null, null)
             }
         )
     }
@@ -204,6 +213,20 @@ object NotificationHelper {
 
     fun answerForegroundNotificationId(): Int = FOREGROUND_NOTIFICATION_ID
 
+    fun voiceCallForegroundNotificationId(): Int = VOICE_CALL_NOTIFICATION_ID
+
+    fun voiceCallNotification(context: Context): android.app.Notification =
+        NotificationCompat.Builder(context, VOICE_CALL_CHANNEL)
+            .setSmallIcon(android.R.drawable.stat_notify_chat)
+            .setContentTitle("Nexus 语音通话")
+            .setContentText("通话进行中")
+            .setCategory(NotificationCompat.CATEGORY_CALL)
+            .setOngoing(true)
+            .setOnlyAlertOnce(true)
+            .setVisibility(NotificationCompat.VISIBILITY_PRIVATE)
+            .setContentIntent(openAppIntent(context, type = PendingIntentType.VOICE_CALL))
+            .build()
+
     fun transferNotificationId(sessionId: String?, key: String, profileId: String? = null): Int {
         val normalizedProfileId = profileId?.takeUnless { it.isBlank() || it == "default" }
         val seed = if (normalizedProfileId == null) {
@@ -219,7 +242,8 @@ object NotificationHelper {
 
     enum class PendingIntentType(val prefix: Int) {
         ANSWER(1),
-        TRANSFER(2);
+        TRANSFER(2),
+        VOICE_CALL(3);
 
         companion object {
             fun fromPrefix(prefix: Int): PendingIntentType = entries.firstOrNull { it.prefix == prefix } ?: ANSWER
@@ -276,6 +300,7 @@ object NotificationHelper {
             sessionId?.let { putExtra(EXTRA_SESSION_ID, it) }
             profileId?.let { putExtra(EXTRA_PROFILE_ID, it) }
             fileKey?.let { putExtra(EXTRA_FILE_KEY, it) }
+            if (type == PendingIntentType.VOICE_CALL) putExtra(EXTRA_VOICE_CALL, true)
         }
         return PendingIntent.getActivity(
             context,
@@ -299,4 +324,5 @@ object NotificationHelper {
     const val EXTRA_SESSION_ID = "nexus_notification_session_id"
     const val EXTRA_PROFILE_ID = "nexus_notification_profile_id"
     const val EXTRA_FILE_KEY = "nexus_notification_file_key"
+    const val EXTRA_VOICE_CALL = "nexus_notification_voice_call"
 }

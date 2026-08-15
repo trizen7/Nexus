@@ -130,6 +130,10 @@ data class HermesProfileDirectory(
 
 data class HermesModel(
     val id: String,
+    val providerId: String = "",
+    val providerName: String = "",
+    val isCurrent: Boolean = false,
+    val available: Boolean = true,
     val root: String? = null,
     val ownedBy: String? = null,
     val parent: String? = null,
@@ -153,6 +157,14 @@ data class HermesModel(
     val isInferenceModel: Boolean
         get() = !isPersona && !parent.isNullOrBlank()
 }
+
+data class HermesModelDirectory(
+    val models: List<HermesModel>,
+    val currentModelId: String? = null,
+    val currentProviderId: String? = null,
+    val configuredProviderCount: Int = 0,
+    val authenticatedProviderCount: Int = 0
+)
 
 data class HermesCronSchedule(
     val kind: String = "",

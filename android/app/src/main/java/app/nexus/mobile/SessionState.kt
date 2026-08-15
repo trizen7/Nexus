@@ -5,10 +5,12 @@ import app.nexus.mobile.network.ChatImage
 import app.nexus.mobile.network.ChatMessage
 import app.nexus.mobile.network.ChatRole
 import app.nexus.mobile.network.HermesCronJob
+import app.nexus.mobile.network.HermesHttpException
 import app.nexus.mobile.network.HermesModel
 import app.nexus.mobile.network.HermesProfile
 import app.nexus.mobile.network.HermesSession
 import app.nexus.mobile.network.SessionChannel
+import kotlinx.coroutines.delay
 
 data class SessionGroup(val channel: SessionChannel, val sessions: List<HermesSession>)
 
@@ -16,6 +18,147 @@ data class VoiceTranscriptState(val text: String, val uploading: Boolean)
 
 fun voiceTranscriptState(transcript: String): VoiceTranscriptState =
     VoiceTranscriptState(text = transcript.trim(), uploading = false)
+
+data class VoiceSendPayload(
+    val profileId: String,
+    val sessionId: String?,
+    val text: String,
+) {
+    fun matches(profileId: String, sessionId: String?): Boolean =
+        this.profileId == profileId && this.sessionId == sessionId
+}
+
+fun mergeVoiceSendPayload(current: VoiceSendPayload?, incoming: VoiceSendPayload): VoiceSendPayload? {
+    val normalized = incoming.copy(text = incoming.text.trim())
+    if (normalized.text.isEmpty()) return current
+    if (current == null) return normalized
+    if (!current.matches(normalized.profileId, normalized.sessionId)) return current
+    return current.copy(text = listOf(current.text.trim(), normalized.text).filter(String::isNotEmpty).joinToString("\n"))
+}
+
+data class VoicePayloadRelease(
+    val pending: VoiceSendPayload?,
+    val outgoing: VoiceSendPayload?,
+)
+
+fun releaseVoiceSendPayload(pending: VoiceSendPayload?, runInactive: Boolean): VoicePayloadRelease =
+    if (runInactive) VoicePayloadRelease(pending = null, outgoing = pending)
+    else VoicePayloadRelease(pending = pending, outgoing = null)
+
+data class VoiceSendSlots(
+    val pending: VoiceSendPayload? = null,
+    val deferred: VoiceSendPayload? = null,
+    val owned: VoiceSendPayload? = null,
+) {
+    fun recoverablePayloads(): List<VoiceSendPayload> = listOfNotNull(pending, deferred)
+}
+
+data class VoiceDraftIdentity(val profileId: String, val sessionId: String?)
+
+data class PostLogoutVoiceRecoverySlot(
+    val serverUrl: String,
+    val username: String,
+    val payloads: List<VoiceSendPayload>,
+) {
+    fun matchesAccount(serverUrl: String, username: String): Boolean =
+        this.serverUrl == serverUrl && this.username == username
+
+    fun preferredProfileId(serverUrl: String, username: String): String? =
+        payloads.firstOrNull()?.profileId?.takeIf { matchesAccount(serverUrl, username) }
+
+    fun preferredSessionId(
+        serverUrl: String,
+        username: String,
+        profileId: String,
+        availableSessionIds: Set<String>,
+    ): String? = payloads.firstOrNull { payload ->
+        matchesAccount(serverUrl, username) &&
+            payload.profileId == profileId &&
+            payload.sessionId != null &&
+            payload.sessionId in availableSessionIds
+    }?.sessionId
+
+    fun needsNewSession(
+        serverUrl: String,
+        username: String,
+        profileId: String,
+        availableSessionIds: Set<String>,
+    ): Boolean = matchesAccount(serverUrl, username) && payloads.any { payload ->
+        payload.profileId == profileId &&
+            (payload.sessionId == null || payload.sessionId !in availableSessionIds)
+    }
+}
+
+data class PostLogoutVoiceRecoveryConsumption(
+    val slot: PostLogoutVoiceRecoverySlot?,
+    val restoredText: String,
+    val consumed: Boolean,
+)
+
+fun consumePostLogoutVoiceRecovery(
+    slot: PostLogoutVoiceRecoverySlot?,
+    serverUrl: String,
+    username: String,
+    profileId: String,
+    sessionId: String?,
+    restoredText: String,
+    allowMissingSessionRetarget: Boolean = false,
+): PostLogoutVoiceRecoveryConsumption {
+    if (slot == null || !slot.matchesAccount(serverUrl, username)) {
+        return PostLogoutVoiceRecoveryConsumption(slot, restoredText, consumed = false)
+    }
+    val (eligible, remaining) = slot.payloads.partition { payload ->
+        payload.profileId == profileId &&
+            (payload.sessionId == sessionId || allowMissingSessionRetarget)
+    }
+    if (eligible.isEmpty()) {
+        return PostLogoutVoiceRecoveryConsumption(slot, restoredText, consumed = false)
+    }
+    val recoveredText = eligible.fold(restoredText) { text, payload ->
+        appendRecoverableVoiceText(text, payload.text)
+    }
+    return PostLogoutVoiceRecoveryConsumption(
+        slot = slot.copy(payloads = remaining).takeIf { it.payloads.isNotEmpty() },
+        restoredText = recoveredText,
+        consumed = true,
+    )
+}
+
+fun recoverVoiceDraftTexts(
+    existing: Map<VoiceDraftIdentity, String>,
+    payloads: List<VoiceSendPayload>,
+): Map<VoiceDraftIdentity, String> = payloads.fold(existing) { recovered, payload ->
+    val identity = VoiceDraftIdentity(payload.profileId, payload.sessionId)
+    recovered + (identity to appendRecoverableVoiceText(recovered[identity].orEmpty(), payload.text))
+}
+
+suspend fun stopThenConfirmInactive(
+    stopRequest: suspend () -> Boolean,
+    awaitInactive: suspend () -> Boolean,
+): Boolean {
+    if (!stopRequest()) return false
+    return awaitInactive()
+}
+
+fun appendRecoverableVoiceText(current: String, pending: String): String =
+    listOf(current.trim(), pending.trim()).filter(String::isNotEmpty).joinToString("\n")
+
+data class RunActivityState(val active: Boolean, val status: String)
+
+suspend fun awaitInactiveRun(
+    maxAttempts: Int = 20,
+    statusProvider: suspend () -> RunActivityState?,
+): Boolean {
+    require(maxAttempts > 0)
+    repeat(maxAttempts) { attempt ->
+        val status = statusProvider()
+        if (status != null && !status.active && status.status !in setOf("queued", "running", "stopping")) {
+            return true
+        }
+        if (attempt + 1 < maxAttempts) delay(if (attempt < 5) 100L else 200L)
+    }
+    return false
+}
 
 fun visibleSessions(sessions: List<HermesSession>): List<HermesSession> =
     sessions.filterNot { it.channel == SessionChannel.CRON }
@@ -31,7 +174,7 @@ fun resolveVisibleActiveSessionId(
 }
 
 fun inferenceModels(models: List<HermesModel>): List<HermesModel> =
-    models.filter(HermesModel::isInferenceModel)
+    models.filter(HermesModel::available).distinctBy { model -> model.providerId to model.id }
 
 fun resolveSelectedProfileId(profiles: List<HermesProfile>, preferredProfileId: String?): String =
     preferredProfileId?.takeIf { id -> profiles.any { it.id == id } }
@@ -42,8 +185,19 @@ fun resolveSelectedProfileId(profiles: List<HermesProfile>, preferredProfileId: 
 fun profileScopedStorageKey(profileId: String?, value: String): String =
     if (profileId.isNullOrBlank() || profileId == "default") value else "profile:$profileId:$value"
 
-fun resolveSelectedInferenceModelId(models: List<HermesModel>, preferredModelId: String?): String? =
-    preferredModelId?.takeIf { id -> models.any { it.id == id } }
+fun resolveSelectedInferenceModel(
+    models: List<HermesModel>,
+    preferredModelId: String?,
+    preferredProviderId: String?,
+    currentModelId: String? = null,
+    currentProviderId: String? = null
+): HermesModel? = models.firstOrNull { model ->
+    model.id == preferredModelId && model.providerId == preferredProviderId
+} ?: models.firstOrNull { model ->
+    preferredProviderId.isNullOrBlank() && model.id == preferredModelId
+} ?: models.firstOrNull { model ->
+    model.id == currentModelId && model.providerId == currentProviderId
+} ?: models.firstOrNull(HermesModel::isCurrent) ?: models.firstOrNull()
 
 fun isValidRepeatInput(value: String): Boolean =
     value.isBlank() || (value.toIntOrNull()?.let { it > 0 } == true)
@@ -72,7 +226,8 @@ fun defaultServerUrl(): String = ""
 
 data class ConversationRuntimeConfig(
     val inferenceModelId: String? = null,
-    val reasoningEffort: ReasoningEffort = ReasoningEffort.DEFAULT
+    val reasoningEffort: ReasoningEffort = ReasoningEffort.DEFAULT,
+    val inferenceProviderId: String? = null
 ) {
     val isDefault: Boolean
         get() = inferenceModelId.isNullOrBlank() && reasoningEffort == ReasoningEffort.DEFAULT
@@ -81,7 +236,7 @@ data class ConversationRuntimeConfig(
 enum class ModelPickerKind { PROFILE, INFERENCE, REASONING }
 
 enum class ReasoningEffort(val wireValue: String?, val label: String) {
-    DEFAULT(null, "Hermes 默认"),
+    DEFAULT(null, "自动"),
     NONE("none", "关闭"),
     MINIMAL("minimal", "极低（minimal）"),
     LOW("low", "低（low）"),
@@ -355,6 +510,41 @@ fun friendlySpeechError(code: Int): String = when (code) {
 
 fun shouldFallbackToSystemSpeech(code: Int): Boolean = code in setOf(4, 5, 8, 10, 11, 12, 13)
 
+fun shouldAutoRetrySpeech(code: Int, microphonePermissionGranted: Boolean): Boolean =
+    code in setOf(1, 2, 3, 5, 6, 7, 8, 10, 11) || (code == 9 && microphonePermissionGranted)
+
+internal const val LOCAL_SPEECH_ERROR_INITIALIZATION = 1_001
+
+internal fun shouldAutoRetryPhoneSpeech(
+    code: Int,
+    microphonePermissionGranted: Boolean,
+): Boolean = code != LOCAL_SPEECH_ERROR_INITIALIZATION && (
+    code == SPEECH_RECOGNIZER_CALLBACK_TIMEOUT ||
+        shouldAutoRetrySpeech(code, microphonePermissionGranted)
+)
+
+internal fun shouldStopSpeechWatchdogRetries(consecutiveTimeouts: Int): Boolean =
+    consecutiveTimeouts >= 3
+
+internal fun shouldFinishInlineSpeechOnRelease(started: Boolean, stillListening: Boolean): Boolean =
+    started && stillListening
+
+fun speechRetryPrompt(code: Int, speechDetected: Boolean = true): String? =
+    if (code == 7 && speechDetected) "没有听清，请再说一次" else null
+
+fun voiceListenRestartDelayMillis(errorCode: Int): Long = when (errorCode) {
+    6, 7 -> 120L
+    1, 2, 10 -> 1_000L
+    3, 5, 8, 9, 11 -> 500L
+    else -> 250L
+}
+
+fun shouldFallbackToLegacySpeechVoice(error: Throwable, requestedVoice: String): Boolean {
+    if (requestedVoice == "xiaoxiao" || error !is HermesHttpException) return false
+    return error.serverCode == "unsupported_voice" ||
+        (error.statusCode == 400 && error.serverMessage?.contains("不支持") == true)
+}
+
 fun restoreDraftText(current: String, original: String): String = current.ifBlank { original }
 
 fun restoreDraftForSession(
@@ -408,6 +598,7 @@ enum class DownloadStatus { NOT_DOWNLOADED, DOWNLOADING, PAUSED, COMPLETED, FAIL
 
 enum class AnswerStatus(val label: String?) {
     IDLE(null),
+    STOPPING("正在停止上一条回答…"),
     THINKING("思考中…"),
     TOOL("正在使用工具…"),
     GENERATING("正在生成回答…"),

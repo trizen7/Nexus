@@ -1,5 +1,6 @@
 package app.nexus.mobile
 
+import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
@@ -26,6 +27,10 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.Edit
+import androidx.compose.material.icons.filled.Pause
+import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
@@ -48,6 +53,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
@@ -79,8 +85,8 @@ private fun ModelPickerDialog(kind: ModelPickerKind, state: MainUiState, viewMod
     }
     val description = when (kind) {
         ModelPickerKind.PROFILE -> "人格名称从原版 Hermes Profile API 动态读取；不同人格的会话、记忆、工具和定时任务相互独立。"
-        ModelPickerKind.INFERENCE -> "仅为当前对话选择实际调用的模型，新对话使用 Hermes 默认值。"
-        ModelPickerKind.REASONING -> "仅为当前对话设置推理量；是否生效由 Hermes 和当前调用模型决定。"
+        ModelPickerKind.INFERENCE -> "这里只显示 Hermes 当前提供的实际调用模型；Agent/人格路由不会出现在这里。"
+        ModelPickerKind.REASONING -> "新对话默认使用自动；Nexus 不发送推理深度，由 Hermes 和实际模型决定。"
     }
     AlertDialog(
         onDismissRequest = viewModel::closeModelPicker,
@@ -178,27 +184,33 @@ private fun ProfileOptions(state: MainUiState, viewModel: MainViewModel) {
 
 @Composable
 private fun InferenceModelOptions(state: MainUiState, viewModel: MainViewModel) {
-    ModelOptionRow(
-        selected = state.selectedInferenceModelId == null,
-        title = "Hermes 默认",
-        subtitle = null,
-        onClick = { viewModel.selectInferenceModel(null) }
-    )
     if (state.inferenceModels.isEmpty()) {
         Text(
-            "服务器还没有配置其他可切换的调用模型。",
+            state.modelNotice ?: "Hermes 没有返回可选择的已认证模型。",
             color = MaterialTheme.colorScheme.onSurfaceVariant,
             fontSize = 12.sp
         )
     } else {
-        state.inferenceModels.forEach { model ->
-            ModelOptionRow(
-                selected = state.selectedInferenceModelId == model.id,
-                title = model.displayName,
-                subtitle = null,
-                onClick = { viewModel.selectInferenceModel(model.id) }
-            )
-        }
+        state.inferenceModels
+            .groupBy { model -> model.providerId to model.providerName }
+            .forEach { (provider, models) ->
+                Text(
+                    provider.second.ifBlank { provider.first },
+                    modifier = Modifier.padding(top = 6.dp, start = 4.dp),
+                    color = MaterialTheme.colorScheme.onSurfaceVariant,
+                    fontSize = 12.sp,
+                    fontWeight = FontWeight.SemiBold
+                )
+                models.forEach { model ->
+                    ModelOptionRow(
+                        selected = state.selectedInferenceModelId == model.id &&
+                            state.selectedInferenceProviderId == model.providerId,
+                        title = model.displayName,
+                        subtitle = null,
+                        onClick = { viewModel.selectInferenceModel(model.providerId, model.id) }
+                    )
+                }
+            }
     }
 }
 
@@ -209,7 +221,7 @@ private fun ReasoningOptions(state: MainUiState, viewModel: MainViewModel) {
             selected = state.selectedReasoningEffort == effort,
             title = effort.label,
             subtitle = if (effort == ReasoningEffort.DEFAULT) {
-                "不发送 reasoning_effort，由 Hermes 使用默认行为"
+                "Nexus 新对话默认值；不发送 reasoning_effort，由 Hermes 决定"
             } else {
                 null
             },
@@ -229,7 +241,11 @@ private fun ModelOptionRow(
         modifier = Modifier
             .fillMaxWidth()
             .clickable(onClick = onClick)
-            .padding(vertical = 6.dp),
+            .background(
+                if (selected) MaterialTheme.colorScheme.primaryContainer else Color.Transparent,
+                RoundedCornerShape(6.dp)
+            )
+            .padding(horizontal = 6.dp, vertical = 5.dp),
         verticalAlignment = Alignment.CenterVertically
     ) {
         RadioButton(selected = selected, onClick = onClick)
@@ -282,7 +298,7 @@ private fun CronManagerDialog(state: MainUiState, viewModel: MainViewModel) {
                 state.cronNotice?.let { notice ->
                     Text(
                         notice,
-                        color = Color(0xFF3B8A68),
+                        color = MaterialTheme.colorScheme.primary,
                         modifier = Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 8.dp),
                         fontSize = 13.sp
                     )
@@ -319,25 +335,30 @@ private fun CronManagerDialog(state: MainUiState, viewModel: MainViewModel) {
                     }
                     state.cronJobs.isEmpty() -> {
                         Column(
-                            Modifier.fillMaxSize().padding(32.dp),
+                            Modifier.fillMaxSize().padding(horizontal = 32.dp, vertical = 48.dp),
                             horizontalAlignment = Alignment.CenterHorizontally,
                             verticalArrangement = Arrangement.Center
                         ) {
-                            Text("还没有定时任务", fontWeight = FontWeight.SemiBold, fontSize = 18.sp)
+                            Text("暂无定时任务", fontWeight = FontWeight.SemiBold, fontSize = 17.sp)
                             Spacer(Modifier.height(8.dp))
                             Text(
-                                "可以在手机上新建任务，并设置 Cron、固定间隔或单次执行时间。",
-                                color = MaterialTheme.colorScheme.onSurfaceVariant
+                                "创建任务后会显示在这里",
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                                fontSize = 13.sp
                             )
-                            Spacer(Modifier.height(18.dp))
-                            Button(onClick = viewModel::createCronJob) { Text("新建定时任务") }
+                            Spacer(Modifier.height(16.dp))
+                            Button(onClick = viewModel::createCronJob) {
+                                Icon(Icons.Filled.Add, contentDescription = null, modifier = Modifier.size(18.dp))
+                                Spacer(Modifier.size(7.dp))
+                                Text("新建任务")
+                            }
                         }
                     }
                     else -> {
                         LazyColumn(
                             modifier = Modifier.fillMaxSize(),
                             contentPadding = PaddingValues(12.dp),
-                            verticalArrangement = Arrangement.spacedBy(10.dp)
+                            verticalArrangement = Arrangement.spacedBy(8.dp)
                         ) {
                             if (state.cronJobsLoading) {
                                 item("loading") {
@@ -380,15 +401,25 @@ private fun CronJobCard(
 ) {
     Card(
         modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(8.dp),
         colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-        elevation = CardDefaults.cardElevation(defaultElevation = 1.dp)
+        border = BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+        elevation = CardDefaults.cardElevation(defaultElevation = 0.dp)
     ) {
-        Column(Modifier.fillMaxWidth().padding(14.dp), verticalArrangement = Arrangement.spacedBy(8.dp)) {
+        Column(Modifier.fillMaxWidth().padding(13.dp), verticalArrangement = Arrangement.spacedBy(7.dp)) {
             Row(verticalAlignment = Alignment.CenterVertically) {
-                Text(job.name, modifier = Modifier.weight(1f), fontWeight = FontWeight.SemiBold, fontSize = 16.sp)
+                Text(
+                    job.name,
+                    modifier = Modifier.weight(1f),
+                    fontWeight = FontWeight.SemiBold,
+                    fontSize = 15.sp,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis
+                )
+                Spacer(Modifier.size(8.dp))
                 CronStateBadge(job)
             }
-            Text(job.schedule.displayValue, color = MaterialTheme.colorScheme.primary, fontSize = 13.sp)
+            Text(job.schedule.displayValue, color = MaterialTheme.colorScheme.primary, fontSize = 12.sp, fontWeight = FontWeight.Medium)
             Text(
                 job.prompt.ifBlank { "未填写任务内容" },
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
@@ -410,15 +441,28 @@ private fun CronJobCard(
             job.lastError?.takeIf { it.isNotBlank() }?.let {
                 Text("最近错误：$it", color = MaterialTheme.colorScheme.error, fontSize = 12.sp, maxLines = 3)
             }
-            HorizontalDivider(color = MaterialTheme.colorScheme.outline.copy(alpha = 0.45f))
-            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.SpaceBetween) {
-                TextButton(onClick = onEdit, enabled = actionsEnabled) { Text("编辑") }
-                TextButton(onClick = onRun, enabled = actionsEnabled) { Text("立即运行") }
-                TextButton(onClick = onToggle, enabled = actionsEnabled) {
-                    Text(if (job.isPaused) "恢复" else "暂停")
+            HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
+            Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.End) {
+                IconButton(onClick = onEdit, enabled = actionsEnabled, modifier = Modifier.size(40.dp)) {
+                    Icon(Icons.Filled.Edit, contentDescription = "编辑任务", modifier = Modifier.size(19.dp))
                 }
-                TextButton(onClick = onDelete, enabled = actionsEnabled) {
-                    Text("删除", color = if (actionsEnabled) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant)
+                IconButton(onClick = onRun, enabled = actionsEnabled, modifier = Modifier.size(40.dp)) {
+                    Icon(Icons.Filled.PlayArrow, contentDescription = "立即运行", modifier = Modifier.size(21.dp))
+                }
+                IconButton(onClick = onToggle, enabled = actionsEnabled, modifier = Modifier.size(40.dp)) {
+                    Icon(
+                        if (job.isPaused) Icons.Filled.PlayArrow else Icons.Filled.Pause,
+                        contentDescription = if (job.isPaused) "恢复任务" else "暂停任务",
+                        modifier = Modifier.size(20.dp)
+                    )
+                }
+                IconButton(onClick = onDelete, enabled = actionsEnabled, modifier = Modifier.size(40.dp)) {
+                    Icon(
+                        Icons.Filled.Delete,
+                        contentDescription = "删除任务",
+                        tint = if (actionsEnabled) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant,
+                        modifier = Modifier.size(19.dp)
+                    )
                 }
             }
             if (busy) {

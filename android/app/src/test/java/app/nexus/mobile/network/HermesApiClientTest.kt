@@ -1,17 +1,33 @@
 package app.nexus.mobile.network
 
 import app.nexus.mobile.prependMessagePage
+import kotlinx.coroutines.CompletableDeferred
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.ExperimentalCoroutinesApi
+import kotlinx.coroutines.async
+import kotlinx.coroutines.cancelAndJoin
+import kotlinx.coroutines.launch
+import kotlinx.coroutines.runBlocking
+import kotlinx.coroutines.test.runCurrent
 import kotlinx.coroutines.test.runTest
+import kotlinx.coroutines.withTimeout
+import okhttp3.Call
+import okhttp3.EventListener
 import okhttp3.OkHttpClient
 import okhttp3.mockwebserver.MockResponse
 import okhttp3.mockwebserver.MockWebServer
 import okhttp3.mockwebserver.SocketPolicy
+import okio.Buffer
 import java.io.ByteArrayInputStream
 import java.io.IOException
+import java.io.InputStream
 import java.net.SocketException
+import java.util.concurrent.CountDownLatch
+import java.util.concurrent.TimeUnit
 import org.junit.After
 import org.junit.Assert.assertEquals
 import org.junit.Assert.assertFalse
+import org.junit.Assert.assertThrows
 import org.junit.Assert.assertTrue
 import org.junit.Before
 import org.junit.Test
@@ -104,6 +120,50 @@ class HermesApiClientTest {
     }
 
     @Test
+    fun `createSession persists the selected Hermes model lock`() = runTest {
+        server.enqueue(
+            MockResponse()
+                .setResponseCode(201)
+                .setHeader("Content-Type", "application/json")
+                .setBody("{\"object\":\"hermes.session\",\"session\":{\"id\":\"mobile-locked\",\"title\":null,\"source\":\"api_server\",\"message_count\":0}}")
+        )
+        val client = HermesApiClient(server.url("/").toString(), "test-token")
+
+        client.createSession(
+            inferenceProvider = "openai-codex",
+            inferenceModel = "gpt-5.6",
+            reasoningEffort = "medium"
+        )
+
+        val request = server.takeRequest()
+        val body = com.google.gson.JsonParser.parseString(request.body.readUtf8()).asJsonObject
+        assertEquals("openai-codex", body.get("provider").asString)
+        assertEquals("gpt-5.6", body.get("model").asString)
+        assertTrue(body.get("require_model_lock").asBoolean)
+        assertEquals("medium", body.getAsJsonObject("model_options").get("reasoning_effort").asString)
+    }
+
+    @Test
+    fun `lockSessionModel requires Hermes to acknowledge the selected runtime`() = runTest {
+        server.enqueue(
+            MockResponse()
+                .setResponseCode(200)
+                .setHeader("Content-Type", "application/json")
+                .setBody("{\"object\":\"hermes.session.model_lock\",\"runtime\":{\"provider\":\"openai-codex\",\"model\":\"gpt-5.6\"}}")
+        )
+        val client = HermesApiClient(server.url("/").toString(), "test-token")
+
+        client.lockSessionModel("mobile/session", "openai-codex", "gpt-5.6", "high")
+
+        val request = server.takeRequest()
+        val body = com.google.gson.JsonParser.parseString(request.body.readUtf8()).asJsonObject
+        assertEquals("/api/sessions/mobile%2Fsession/model", request.path)
+        assertEquals("openai-codex", body.get("provider").asString)
+        assertEquals("gpt-5.6", body.get("model").asString)
+        assertEquals("high", body.getAsJsonObject("model_options").get("reasoning_effort").asString)
+    }
+
+    @Test
     fun `loadMessagePage requests latest slice and parses pagination`() = runTest {
         server.enqueue(
             MockResponse()
@@ -178,6 +238,38 @@ class HermesApiClientTest {
 
         assertEquals("nexus_gateway", status.source)
         assertTrue(status.stoppable)
+    }
+
+    @Test
+    fun `stopSessionRun posts to the public run endpoint and parses stopped`() = runTest {
+        server.enqueue(
+            MockResponse()
+                .setResponseCode(200)
+                .setHeader("Content-Type", "application/json")
+                .setBody("{\"stopped\":true}")
+        )
+        val client = HermesApiClient(server.url("/").toString(), "test-token")
+
+        assertTrue(client.stopSessionRun("session/1"))
+
+        val request = server.takeRequest()
+        assertEquals("POST", request.method)
+        assertEquals("/api/sessions/session%2F1/run/stop", request.path)
+        assertEquals("Bearer test-token", request.getHeader("Authorization"))
+    }
+
+    @Test
+    fun `cancelling stopSessionRun cancels a stalled HTTP call`() = runBlocking {
+        server.enqueue(MockResponse().setSocketPolicy(SocketPolicy.NO_RESPONSE))
+        val client = HermesApiClient(server.url("/").toString(), "test-token")
+        val request = launch(Dispatchers.Default) {
+            client.stopSessionRun("stalled-session")
+        }
+        assertEquals("/api/sessions/stalled-session/run/stop", server.takeRequest().path)
+
+        withTimeout(2_000L) { request.cancelAndJoin() }
+
+        assertTrue(request.isCancelled)
     }
 
     @Test
@@ -454,6 +546,73 @@ class HermesApiClientTest {
     }
 
     @Test
+    fun `transcribeAudio labels wav recordings correctly`() = runTest {
+        server.enqueue(
+            MockResponse()
+                .setResponseCode(200)
+                .setHeader("Content-Type", "application/json")
+                .setBody("{\"transcript\":\"你好\",\"file\":{\"id\":\"voice-wav\",\"name\":\"voice.wav\",\"mime_type\":\"audio/wav\",\"size\":3,\"download_url\":\"/api/files/voice-wav\"}}")
+        )
+        val client = HermesApiClient(server.url("/").toString(), "test-token")
+
+        client.transcribeAudio("voice.wav", byteArrayOf(1, 2, 3))
+
+        val request = server.takeRequest()
+        assertEquals(true, request.body.readUtf8().contains("Content-Type: audio/wav"))
+    }
+
+    @Test
+    fun `transcribeAudio marks call recordings as ephemeral`() = runTest {
+        server.enqueue(
+            MockResponse()
+                .setResponseCode(200)
+                .setHeader("Content-Type", "application/json")
+                .setBody("{\"transcript\":\"你好\",\"file\":{\"id\":\"voice-call\",\"name\":\"voice.wav\",\"mime_type\":\"audio/wav\",\"size\":3,\"download_url\":\"/api/files/voice-call\"}}")
+        )
+        val client = HermesApiClient(server.url("/").toString(), "test-token")
+
+        client.transcribeAudio("voice.wav", byteArrayOf(1, 2, 3), ephemeral = true)
+
+        val body = server.takeRequest().body.readUtf8()
+        assertEquals(true, body.contains("name=\"ephemeral\""))
+        assertEquals(true, body.contains("true"))
+    }
+
+    @Test
+    fun `synthesizeSpeech returns gateway audio`() = runTest {
+        server.enqueue(
+            MockResponse()
+                .setResponseCode(200)
+                .setHeader("Content-Type", "audio/mpeg")
+                .setBody("audio-bytes")
+        )
+        val client = HermesApiClient(server.url("/").toString(), "test-token")
+
+        val audio = client.synthesizeSpeech("你好", "xiaoxiao")
+
+        assertEquals("audio-bytes", audio.toString(Charsets.UTF_8))
+        val request = server.takeRequest()
+        assertEquals("/api/audio/speech", request.path)
+        assertEquals("Bearer test-token", request.getHeader("Authorization"))
+    }
+
+    @Test
+    fun `cancelling synthesizeSpeech cancels a stalled HTTP call`() = runBlocking {
+        server.enqueue(MockResponse().setSocketPolicy(SocketPolicy.NO_RESPONSE))
+        val client = HermesApiClient(server.url("/").toString(), "test-token")
+        val request = launch(Dispatchers.Default) {
+            client.synthesizeSpeech("这段请求不会返回", "xiaoxiao")
+        }
+        assertEquals("/api/audio/speech", server.takeRequest().path)
+
+        withTimeout(2_000L) {
+            request.cancelAndJoin()
+        }
+
+        assertTrue(request.isCancelled)
+    }
+
+    @Test
     fun `uploadStream throttles progress callbacks for large files`() = runTest {
         server.enqueue(
             MockResponse()
@@ -495,6 +654,42 @@ class HermesApiClientTest {
     }
 
     @Test
+    fun `unknown length upload body uses chunked transfer and aborts at the hard limit`() {
+        val body = boundedUploadRequestBody(
+            mimeType = "application/octet-stream",
+            declaredSize = 0L,
+            openStream = { GeneratedInputStream(5L) },
+            maxBytes = 4L,
+        )
+        val sink = Buffer()
+
+        assertEquals(-1L, body.contentLength())
+        val error = assertThrows(IOException::class.java) { body.writeTo(sink) }
+
+        assertTrue(error.message.orEmpty().contains("50MB"))
+        assertEquals(0L, sink.size)
+    }
+
+    @Test
+    fun `cancelling uploadStream cancels a stalled HTTP call`() = runBlocking {
+        server.enqueue(MockResponse().setSocketPolicy(SocketPolicy.NO_RESPONSE))
+        val client = HermesApiClient(server.url("/").toString(), "test-token")
+        val request = launch(Dispatchers.Default) {
+            client.uploadStream(
+                name = "stalled.bin",
+                mimeType = "application/octet-stream",
+                size = 3L,
+                openStream = { ByteArrayInputStream(byteArrayOf(1, 2, 3)) },
+            )
+        }
+        assertEquals("/api/uploads", server.takeRequest().path)
+
+        withTimeout(2_000L) { request.cancelAndJoin() }
+
+        assertTrue(request.isCancelled)
+    }
+
+    @Test
     fun `uploadFile sends multipart content and parses gateway file id`() = runTest {
         server.enqueue(
             MockResponse()
@@ -518,6 +713,59 @@ class HermesApiClientTest {
     }
 
     @Test
+    fun `cancelling uploadFile cancels a stalled HTTP call`() = runBlocking {
+        server.enqueue(MockResponse().setSocketPolicy(SocketPolicy.NO_RESPONSE))
+        val client = HermesApiClient(server.url("/").toString(), "test-token")
+        val request = launch(Dispatchers.Default) {
+            client.uploadFile("stalled.jpg", "image/jpeg", byteArrayOf(1, 2, 3))
+        }
+        assertEquals("/api/uploads", server.takeRequest().path)
+
+        withTimeout(2_000L) { request.cancelAndJoin() }
+
+        assertTrue(request.isCancelled)
+    }
+
+    @Test
+    @OptIn(ExperimentalCoroutinesApi::class)
+    fun `cancelling after upload response deletes the orphaned gateway file`() = runTest {
+        server.enqueue(
+            MockResponse()
+                .setResponseCode(201)
+                .setHeader("Content-Type", "application/json")
+                .setBody("{\"file\":{\"id\":\"orphan-file\",\"name\":\"race.bin\",\"mime_type\":\"application/octet-stream\",\"size\":3,\"download_url\":\"/api/files/orphan-file\"}}")
+        )
+        server.enqueue(
+            MockResponse()
+                .setResponseCode(200)
+                .setHeader("Content-Type", "application/json")
+                .setBody("{\"deleted\":true}")
+        )
+        val responseBodyRead = CountDownLatch(1)
+        val httpClient = OkHttpClient.Builder()
+            .eventListener(object : EventListener() {
+                override fun responseBodyEnd(call: Call, byteCount: Long) {
+                    responseBodyRead.countDown()
+                }
+            })
+            .build()
+        val client = HermesApiClient(server.url("/").toString(), "test-token", httpClient)
+        val upload = async { client.uploadFile("race.bin", "application/octet-stream", byteArrayOf(1, 2, 3)) }
+        runCurrent()
+
+        val uploadRequest = server.takeRequest(2, TimeUnit.SECONDS)
+        assertEquals("/api/uploads", uploadRequest?.path)
+        assertTrue(responseBodyRead.await(2, TimeUnit.SECONDS))
+        upload.cancel()
+        runCurrent()
+
+        assertTrue(upload.isCancelled)
+        val cleanupRequest = server.takeRequest(2, TimeUnit.SECONDS)
+        assertEquals("DELETE", cleanupRequest?.method)
+        assertEquals("/api/files/orphan-file", cleanupRequest?.path)
+    }
+
+    @Test
     fun `streamChat treats a successful response body disconnect as detached without retrying`() = runTest {
         val partialStream = buildString {
             append("event: assistant.delta\n")
@@ -536,6 +784,39 @@ class HermesApiClientTest {
         val error = runCatching { client.streamChat("mobile-session", "lock screen test") }.exceptionOrNull()
 
         assertTrue(error is HermesStreamDetachedException)
+        assertEquals(1, server.requestCount)
+    }
+
+    @Test
+    fun `cancelling streamChat closes a delayed SSE call after an old partial event`() = runBlocking {
+        val firstEvent = buildString {
+            append("event: assistant.delta\n")
+            append("data: {\"delta\":\"old partial\"}\n\n")
+        }
+        val responseBody = firstEvent + buildString {
+            repeat(256) { append(": delayed keepalive padding\n") }
+            append("event: run.completed\n")
+            append("data: {\"completed\":true}\n\n")
+        }
+        server.enqueue(
+            MockResponse()
+                .setResponseCode(200)
+                .setHeader("Content-Type", "text/event-stream")
+                .setBody(responseBody)
+                .throttleBody(firstEvent.toByteArray().size.toLong(), 100, TimeUnit.MILLISECONDS)
+        )
+        val client = HermesApiClient(server.url("/").toString(), "test-token")
+        val partialReceived = CompletableDeferred<Unit>()
+        val request = launch(Dispatchers.Default) {
+            client.streamChat("mobile-session", "replacement test") { event ->
+                if (event == HermesStreamEvent.TextDelta("old partial")) partialReceived.complete(Unit)
+            }
+        }
+
+        withTimeout(2_000L) { partialReceived.await() }
+        withTimeout(2_000L) { request.cancelAndJoin() }
+
+        assertTrue(request.isCancelled)
         assertEquals(1, server.requestCount)
     }
 
@@ -639,7 +920,7 @@ class HermesApiClientTest {
             listOf(
                 HermesStreamEvent.TextDelta("连接"),
                 HermesStreamEvent.TextDelta("成功"),
-                HermesStreamEvent.Completed
+                HermesStreamEvent.Completed()
             ),
             events
         )
@@ -704,30 +985,27 @@ class HermesApiClientTest {
     }
 
     @Test
-    fun `listModels parses selectable model ids`() = runTest {
+    fun `listModelDirectory parses authenticated selectable models`() = runTest {
         server.enqueue(
             MockResponse()
                 .setResponseCode(200)
                 .setHeader("Content-Type", "application/json")
-                .setBody("""{"object":"list","data":[{"id":"primary-model","object":"model","root":"primary-model","owned_by":"local","parent":null},{"id":"gpt-5.6-sol","object":"model","root":"gpt-5.6-sol","owned_by":"remote","parent":"primary-model"},{"id":"assistant-profile","object":"hermes.persona","kind":"persona","root":"assistant-profile","owned_by":"local","parent":null}]}""")
+                .setBody("""{"model":"gpt-5.6","provider":"custom:openai-codex","providers":[{"slug":"openai-codex","name":"OpenAI Codex","authenticated":true,"models":["gpt-5.6","gpt-5.5-codex"],"unavailable_models":["gpt-5.5-codex"]},{"slug":"disabled","name":"Disabled","authenticated":false,"models":["hidden-model"]}]}""")
         )
         val client = HermesApiClient(server.url("/").toString(), "test-token")
 
-        val models = client.listModels()
+        val directory = client.listModelDirectory(refresh = true)
 
-        assertEquals(listOf("primary-model", "gpt-5.6-sol", "assistant-profile"), models.map { it.id })
-        assertEquals("primary-model", models.first().root)
-        assertEquals("local", models.first().ownedBy)
-        assertEquals(null, models.first().parent)
-        assertEquals(false, models.first().isPersona)
-        assertEquals(false, models.first().isInferenceModel)
-        assertEquals("primary-model", models[1].parent)
-        assertEquals(true, models[1].isInferenceModel)
-        assertEquals("persona", models.last().kind)
-        assertEquals("hermes.persona", models.last().objectType)
-        assertEquals(true, models.last().isPersona)
-        assertEquals(false, models.last().isInferenceModel)
-        assertEquals("/v1/models", server.takeRequest().path)
+        assertEquals(listOf("gpt-5.6", "gpt-5.5-codex"), directory.models.map { it.id })
+        assertEquals(listOf("openai-codex", "openai-codex"), directory.models.map { it.providerId })
+        assertEquals("OpenAI Codex", directory.models.first().providerName)
+        assertEquals(true, directory.models.first().isCurrent)
+        assertEquals(false, directory.models.last().available)
+        assertEquals("gpt-5.6", directory.currentModelId)
+        assertEquals("openai-codex", directory.currentProviderId)
+        assertEquals(2, directory.configuredProviderCount)
+        assertEquals(1, directory.authenticatedProviderCount)
+        assertEquals("/api/model/options?explicit_only=true&refresh=1", server.takeRequest().path)
     }
 
     @Test
@@ -802,7 +1080,7 @@ class HermesApiClientTest {
     }
 
     @Test
-    fun `streamChat sends selected profile header and inference model independently`() = runTest {
+    fun `streamChat sends native Hermes provider model lock and reasoning options`() = runTest {
         server.enqueue(
             MockResponse()
                 .setResponseCode(200)
@@ -815,7 +1093,8 @@ class HermesApiClientTest {
         client.streamChat(
             "mobile-session",
             "hello",
-            inferenceModel = "gpt-5.6-sol",
+            inferenceProvider = "openai-codex",
+            inferenceModel = "gpt-5.6",
             reasoningEffort = "high"
         )
 
@@ -823,10 +1102,73 @@ class HermesApiClientTest {
         val body = com.google.gson.JsonParser.parseString(request.body.readUtf8()).asJsonObject
         assertEquals("profile-a", request.getHeader("X-Nexus-Hermes-Profile"))
         assertFalse(body.has("persona_model"))
-        assertEquals("gpt-5.6-sol", body.get("inference_model").asString)
+        assertEquals("openai-codex", body.get("inference_provider").asString)
+        assertEquals("gpt-5.6", body.get("inference_model").asString)
         assertEquals("high", body.get("reasoning_effort").asString)
-        assertEquals(false, body.has("model"))
+        assertEquals("openai-codex", body.get("provider").asString)
+        assertEquals("gpt-5.6", body.get("model").asString)
+        assertEquals(true, body.get("require_model_lock").asBoolean)
+        assertEquals("high", body.getAsJsonObject("model_options").get("reasoning_effort").asString)
+        assertEquals(
+            "high",
+            body.getAsJsonObject("model_options").getAsJsonObject("reasoning").get("effort").asString
+        )
         assertAndroidPhoneContext(body)
+    }
+
+    @Test
+    fun `streamChat accepts confirmed custom provider alias for the selected model`() = runTest {
+        server.enqueue(
+            MockResponse()
+                .setResponseCode(200)
+                .setHeader("Content-Type", "text/event-stream")
+                .setBody(
+                    "event: run.completed\n" +
+                        "data: {\"completed\":true,\"runtime\":{" +
+                        "\"provider\":\"custom\",\"model\":\"gpt-5.6-sol\"," +
+                        "\"route_source\":\"session_model_lock\"," +
+                        "\"model_lock\":\"confirmed\"}}\n\n"
+                )
+        )
+        val client = HermesApiClient(server.url("/").toString(), "test-token")
+
+        val events = client.streamChat(
+            "mobile-session",
+            "hello",
+            inferenceProvider = "alight",
+            inferenceModel = "gpt-5.6-sol",
+        )
+
+        assertTrue(events.any { it is HermesStreamEvent.Completed })
+    }
+
+    @Test
+    fun `streamChat rejects a silently different completed runtime`() = runTest {
+        server.enqueue(
+            MockResponse()
+                .setResponseCode(200)
+                .setHeader("Content-Type", "text/event-stream")
+                .setBody(
+                    "event: run.completed\n" +
+                        "data: {\"completed\":true,\"runtime\":{" +
+                        "\"provider\":\"openai-codex\",\"model\":\"gpt-5.6-terra\"," +
+                        "\"route_source\":\"global\"}}\n\n"
+                )
+        )
+        val client = HermesApiClient(server.url("/").toString(), "test-token")
+
+        val error = runCatching {
+            client.streamChat(
+                "mobile-session",
+                "hello",
+                inferenceProvider = "openai-codex",
+                inferenceModel = "gpt-5.6-sol",
+            )
+        }.exceptionOrNull()
+
+        assertTrue(error is HermesModelMismatchException)
+        assertTrue(error?.message.orEmpty().contains("gpt-5.6-sol"))
+        assertTrue(error?.message.orEmpty().contains("gpt-5.6-terra"))
     }
 
     @Test
@@ -844,6 +1186,7 @@ class HermesApiClientTest {
         val body = com.google.gson.JsonParser.parseString(server.takeRequest().body.readUtf8()).asJsonObject
         assertFalse(body.has("persona_model"))
         assertFalse(body.has("reasoning_effort"))
+        assertFalse(body.has("model_options"))
         assertAndroidPhoneContext(body)
     }
 
@@ -857,5 +1200,16 @@ class HermesApiClientTest {
 
     private fun requestSignature(request: okhttp3.mockwebserver.RecordedRequest): String =
         "${request.method} ${request.path}"
+}
 
+private class GeneratedInputStream(private var remaining: Long) : InputStream() {
+    override fun read(): Int = if (remaining-- > 0L) 0 else -1
+
+    override fun read(buffer: ByteArray, offset: Int, length: Int): Int {
+        if (remaining <= 0L) return -1
+        val count = minOf(length.toLong(), remaining).toInt()
+        java.util.Arrays.fill(buffer, offset, offset + count, 0)
+        remaining -= count
+        return count
+    }
 }

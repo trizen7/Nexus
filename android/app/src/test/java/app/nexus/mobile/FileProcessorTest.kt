@@ -43,4 +43,17 @@ class FileProcessorTest {
             directory.deleteRecursively()
         }
     }
+
+    @Test
+    fun `persisted uri with unknown or nonpositive size is copied to bounded cache`() {
+        assertEquals(true, shouldCopySelectedUriToCache(SelectedUriStorage.PERSISTED_URI, null))
+        assertEquals(true, shouldCopySelectedUriToCache(SelectedUriStorage.PERSISTED_URI, -1L))
+        assertEquals(true, shouldCopySelectedUriToCache(SelectedUriStorage.PERSISTED_URI, 0L))
+        assertEquals(false, shouldCopySelectedUriToCache(SelectedUriStorage.PERSISTED_URI, 1L))
+    }
+
+    @Test
+    fun `explicit private copy never trusts provider size`() {
+        assertEquals(true, shouldCopySelectedUriToCache(SelectedUriStorage.PRIVATE_COPY, 1024L))
+    }
 }

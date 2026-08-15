@@ -1,10 +1,13 @@
 <?xml version="1.0" encoding="utf-8"?>
 <manifest xmlns:android="http://schemas.android.com/apk/res/android">
     <uses-permission android:name="android.permission.INTERNET" />
+    <uses-permission android:name="android.permission.MODIFY_AUDIO_SETTINGS" />
     <uses-permission android:name="android.permission.RECORD_AUDIO" />
     <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
     <uses-permission android:name="android.permission.FOREGROUND_SERVICE_DATA_SYNC" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_MICROPHONE" />
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
     <queries>
         <intent>
             <action android:name="android.speech.RecognitionService" />
@@ -19,13 +22,17 @@
         android:networkSecurityConfig="@xml/network_security_config"
         android:roundIcon="@mipmap/ic_launcher_round"
         android:usesCleartextTraffic="true"
-        android:label="Nexus"
+        android:label="${appLabel}"
         android:supportsRtl="true"
         android:theme="@style/Theme.Nexus">
         <service
             android:name=".RunMonitorService"
             android:exported="false"
             android:foregroundServiceType="dataSync" />
+        <service
+            android:name=".VoiceCallService"
+            android:exported="false"
+            android:foregroundServiceType="microphone" />
         <provider
             android:name="androidx.core.content.FileProvider"
             android:authorities="${applicationId}.fileprovider"

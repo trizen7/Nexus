@@ -49,12 +49,14 @@ class NotificationHelperTest {
     fun `notification ids use explicit stable positive type ranges`() {
         val answer = NotificationHelper.answerNotificationId("session-x")
         val foreground = NotificationHelper.answerForegroundNotificationId()
+        val voiceCallForeground = NotificationHelper.voiceCallForegroundNotificationId()
         val transfer = NotificationHelper.transferNotificationId("session-x", "file-y")
 
         assertTrue(answer in 0x20000000..0x3fffffff)
         assertTrue(transfer in 0x40000000..0x5fffffff)
         assertEquals(0x60000000, foreground)
-        assertTrue(answer > 0 && transfer > 0 && foreground > 0)
+        assertEquals(0x60000001, voiceCallForeground)
+        assertTrue(answer > 0 && transfer > 0 && foreground > 0 && voiceCallForeground > 0)
     }
 
     @Test
@@ -92,8 +94,15 @@ class NotificationHelperTest {
             sessionId = "session-abc",
             fileKey = "file-xyz"
         )
+        val voiceCallCode = NotificationHelper.pendingIntentRequestCode(
+            type = NotificationHelper.PendingIntentType.VOICE_CALL,
+            sessionId = null,
+            fileKey = null,
+        )
 
         assertNotEquals(answerCode, transferCode)
+        assertNotEquals(answerCode, voiceCallCode)
+        assertNotEquals(transferCode, voiceCallCode)
         assertEquals(
             answerCode,
             NotificationHelper.pendingIntentRequestCode(

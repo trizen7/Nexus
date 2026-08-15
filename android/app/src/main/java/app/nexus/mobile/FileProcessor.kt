@@ -22,18 +22,19 @@ object FileProcessor {
     ): ChatFile = withContext(Dispatchers.IO) {
         val resolver = context.contentResolver
         var name = "附件"
-        var size = 0L
+        var reportedSize: Long? = null
         resolver.query(uri, arrayOf(OpenableColumns.DISPLAY_NAME, OpenableColumns.SIZE), null, null, null)?.use { cursor ->
             if (cursor.moveToFirst()) {
                 val nameIndex = cursor.getColumnIndex(OpenableColumns.DISPLAY_NAME)
                 val sizeIndex = cursor.getColumnIndex(OpenableColumns.SIZE)
                 if (nameIndex >= 0) name = cursor.getString(nameIndex) ?: name
-                if (sizeIndex >= 0 && !cursor.isNull(sizeIndex)) size = cursor.getLong(sizeIndex)
+                if (sizeIndex >= 0 && !cursor.isNull(sizeIndex)) reportedSize = cursor.getLong(sizeIndex)
             }
         }
-        require(size <= MAX_FILE_BYTES) { "文件不能超过 50MB" }
+        reportedSize?.let { size -> require(size <= MAX_FILE_BYTES) { "文件不能超过 50MB" } }
         val mime = resolver.getType(uri)
-        val stableUri = if (storage == SelectedUriStorage.PRIVATE_COPY) {
+        var size = reportedSize?.takeIf { it >= 0 } ?: 0L
+        val stableUri = if (shouldCopySelectedUriToCache(storage, reportedSize)) {
             val directory = File(context.cacheDir, "selected-files").apply { mkdirs() }
             val safeName = name.replace(Regex("[^A-Za-z0-9._-]"), "_")
             val target = File(directory, "${UUID.randomUUID()}-$safeName")
@@ -90,6 +91,9 @@ internal fun copyToFileWithByteLimit(input: InputStream, target: File, maxBytes:
         target.delete()
         throw error
     }
+
+internal fun shouldCopySelectedUriToCache(storage: SelectedUriStorage, reportedSize: Long?): Boolean =
+    storage == SelectedUriStorage.PRIVATE_COPY || reportedSize == null || reportedSize <= 0L
 
 enum class SelectedUriStorage { PERSISTED_URI, PRIVATE_COPY }
 

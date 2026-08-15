@@ -17,13 +17,15 @@ import androidx.core.content.ContextCompat
 import androidx.core.view.WindowInsetsCompat
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
+import androidx.lifecycle.lifecycleScope
 import androidx.lifecycle.compose.LocalLifecycleOwner
-import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
+import androidx.compose.foundation.gestures.awaitEachGesture
+import androidx.compose.foundation.gestures.awaitFirstDown
+import androidx.compose.foundation.gestures.waitForUpOrCancellation
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.border
-import androidx.compose.foundation.gestures.detectTapGestures
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -53,11 +55,14 @@ import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.foundation.interaction.MutableInteractionSource
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
-import androidx.compose.material3.Card
-import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.DropdownMenu
+import androidx.compose.material3.DropdownMenuItem
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
+import androidx.compose.material.icons.filled.ChatBubbleOutline
+import androidx.compose.material.icons.filled.Code
+import androidx.compose.material.icons.filled.EditNote
 import androidx.compose.material.icons.filled.AttachFile
 import androidx.compose.material.icons.filled.CameraAlt
 import androidx.compose.material.icons.filled.Image
@@ -65,12 +70,17 @@ import androidx.compose.material.icons.filled.Keyboard
 import androidx.compose.material.icons.filled.Mic
 import androidx.compose.material.icons.filled.Menu
 import androidx.compose.material.icons.filled.Settings
+import androidx.compose.material.icons.filled.Lightbulb
 import androidx.compose.material.icons.filled.Psychology
-import androidx.compose.material.icons.filled.Tune
+import androidx.compose.material.icons.filled.Phone
+import androidx.compose.material.icons.filled.SmartToy
 import androidx.compose.material.icons.automirrored.filled.Send
 import androidx.compose.material.icons.filled.StopCircle
 import androidx.compose.material.icons.filled.Close
+import androidx.compose.material.icons.filled.ChevronRight
+import androidx.compose.material.icons.filled.MoreVert
 import androidx.compose.material.icons.filled.Refresh
+import androidx.compose.material.icons.filled.Search
 import androidx.compose.material.icons.filled.KeyboardArrowDown
 import androidx.compose.material.icons.filled.Visibility
 import androidx.compose.material.icons.filled.VisibilityOff
@@ -85,6 +95,7 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.Typography
+import androidx.compose.material3.Shapes
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
@@ -97,12 +108,13 @@ import androidx.compose.runtime.key
 import androidx.compose.runtime.mutableIntStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.rememberCoroutineScope
+import androidx.compose.runtime.rememberUpdatedState
 import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.runtime.snapshotFlow
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.clip
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
 import androidx.compose.ui.focus.onFocusChanged
@@ -111,7 +123,6 @@ import androidx.compose.ui.text.input.ImeAction
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
-import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.graphics.vector.ImageVector
@@ -121,7 +132,6 @@ import androidx.compose.ui.platform.LocalConfiguration
 import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.platform.LocalFocusManager
 import androidx.compose.ui.platform.LocalSoftwareKeyboardController
-import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
@@ -132,70 +142,78 @@ import app.nexus.mobile.network.ChatMessage
 import app.nexus.mobile.network.ChatRole
 import app.nexus.mobile.network.HermesSession
 import kotlinx.coroutines.flow.StateFlow
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.launch
 
 
 private val LightScheme = lightColorScheme(
-    primary = Color(0xFF4F46E5),
+    primary = Color(0xFF0F766E),
     onPrimary = Color.White,
-    primaryContainer = Color(0xFFE8E7FF),
-    onPrimaryContainer = Color(0xFF24205F),
-    secondary = Color(0xFF0F766E),
+    primaryContainer = Color(0xFFCCFBF1),
+    onPrimaryContainer = Color(0xFF134E4A),
+    secondary = Color(0xFF2563EB),
     onSecondary = Color.White,
-    secondaryContainer = Color(0xFFD8F4EF),
-    onSecondaryContainer = Color(0xFF0C4A45),
-    tertiary = Color(0xFF2563EB),
-    background = Color(0xFFF7F7FC),
-    onBackground = Color(0xFF1A1A28),
+    secondaryContainer = Color(0xFFDBEAFE),
+    onSecondaryContainer = Color(0xFF1E3A8A),
+    tertiary = Color(0xFFB45309),
+    background = Color(0xFFF5F7F8),
+    onBackground = Color(0xFF202326),
     surface = Color(0xFFFFFFFF),
-    onSurface = Color(0xFF1C1C29),
-    surfaceVariant = Color(0xFFF0F1F8),
-    onSurfaceVariant = Color(0xFF626575),
-    outline = Color(0xFFD5D7E3),
-    outlineVariant = Color(0xFFE6E7EF),
+    onSurface = Color(0xFF202326),
+    surfaceVariant = Color(0xFFEDF1F2),
+    onSurfaceVariant = Color(0xFF5F686D),
+    outline = Color(0xFFC7CED1),
+    outlineVariant = Color(0xFFE0E5E7),
     error = Color(0xFFB42318),
     errorContainer = Color(0xFFFFE9E7),
     onErrorContainer = Color(0xFF7A271A)
 )
 
 private val DarkScheme = darkColorScheme(
-    primary = Color(0xFFC4C1FF),
-    onPrimary = Color(0xFF2B2674),
-    primaryContainer = Color(0xFF39348B),
-    onPrimaryContainer = Color(0xFFE7E5FF),
-    secondary = Color(0xFF7DD3C7),
-    onSecondary = Color(0xFF073D38),
-    secondaryContainer = Color(0xFF155F58),
-    onSecondaryContainer = Color(0xFFD0F7F1),
-    tertiary = Color(0xFF9EC1FF),
-    background = Color(0xFF000000),
-    onBackground = Color(0xFFE7E7F0),
-    surface = Color(0xFF08080C),
-    onSurface = Color(0xFFE8E7F1),
-    surfaceVariant = Color(0xFF14141A),
-    onSurfaceVariant = Color(0xFFC7C7D4),
-    outline = Color(0xFF454653),
-    outlineVariant = Color(0xFF1F2028),
+    primary = Color(0xFF5EEAD4),
+    onPrimary = Color(0xFF083B37),
+    primaryContainer = Color(0xFF134E4A),
+    onPrimaryContainer = Color(0xFFCCFBF1),
+    secondary = Color(0xFF93C5FD),
+    onSecondary = Color(0xFF172554),
+    secondaryContainer = Color(0xFF1E3A5F),
+    onSecondaryContainer = Color(0xFFDBEAFE),
+    tertiary = Color(0xFFFBBF24),
+    background = Color(0xFF111416),
+    onBackground = Color(0xFFE5E9EA),
+    surface = Color(0xFF181C1E),
+    onSurface = Color(0xFFE5E9EA),
+    surfaceVariant = Color(0xFF252A2D),
+    onSurfaceVariant = Color(0xFFB8C0C4),
+    outline = Color(0xFF465055),
+    outlineVariant = Color(0xFF2D3437),
     error = Color(0xFFFFB4AB),
     errorContainer = Color(0xFF5F211B),
     onErrorContainer = Color(0xFFFFDAD5)
 )
 
 private val NexusTypography = Typography(
-    headlineLarge = TextStyle(fontSize = 34.sp, lineHeight = 40.sp, fontWeight = FontWeight.Bold),
-    headlineSmall = TextStyle(fontSize = 24.sp, lineHeight = 30.sp, fontWeight = FontWeight.Bold),
-    titleLarge = TextStyle(fontSize = 20.sp, lineHeight = 26.sp, fontWeight = FontWeight.SemiBold),
-    titleMedium = TextStyle(fontSize = 16.sp, lineHeight = 22.sp, fontWeight = FontWeight.SemiBold),
-    bodyLarge = TextStyle(fontSize = 16.sp, lineHeight = 24.sp),
-    bodyMedium = TextStyle(fontSize = 14.sp, lineHeight = 21.sp),
-    bodySmall = TextStyle(fontSize = 12.sp, lineHeight = 18.sp)
+    headlineLarge = TextStyle(fontSize = 28.sp, lineHeight = 34.sp, fontWeight = FontWeight.Bold, letterSpacing = 0.sp),
+    headlineSmall = TextStyle(fontSize = 22.sp, lineHeight = 28.sp, fontWeight = FontWeight.Bold, letterSpacing = 0.sp),
+    titleLarge = TextStyle(fontSize = 19.sp, lineHeight = 25.sp, fontWeight = FontWeight.SemiBold, letterSpacing = 0.sp),
+    titleMedium = TextStyle(fontSize = 15.sp, lineHeight = 21.sp, fontWeight = FontWeight.SemiBold, letterSpacing = 0.sp),
+    bodyLarge = TextStyle(fontSize = 15.sp, lineHeight = 23.sp, letterSpacing = 0.sp),
+    bodyMedium = TextStyle(fontSize = 14.sp, lineHeight = 21.sp, letterSpacing = 0.sp),
+    bodySmall = TextStyle(fontSize = 12.sp, lineHeight = 18.sp, letterSpacing = 0.sp)
+)
+
+private val NexusShapes = Shapes(
+    extraSmall = RoundedCornerShape(4.dp),
+    small = RoundedCornerShape(6.dp),
+    medium = RoundedCornerShape(8.dp),
+    large = RoundedCornerShape(8.dp),
+    extraLarge = RoundedCornerShape(8.dp),
 )
 
 @Composable private fun appBackground() = MaterialTheme.colorScheme.background
 @Composable private fun primaryInk() = MaterialTheme.colorScheme.primary
-@Composable private fun userBubble() = MaterialTheme.colorScheme.surfaceVariant
 @Composable private fun surfaceLine() = MaterialTheme.colorScheme.outline
 @Composable private fun mutedInk() = MaterialTheme.colorScheme.onSurfaceVariant
-@Composable private fun assistantSurface() = MaterialTheme.colorScheme.surface
 @Composable private fun composerSurface() = MaterialTheme.colorScheme.surface
 @Composable private fun errorSurface() = MaterialTheme.colorScheme.errorContainer
 
@@ -205,6 +223,9 @@ class MainActivity : ComponentActivity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        lifecycleScope.launch {
+            runCatching { LocalAsrModelManager.cleanupRetiredModels(this@MainActivity) }
+        }
         enableEdgeToEdge()
         ViewCompat.setOnApplyWindowInsetsListener(window.decorView) { _, insets ->
             val imeInsets = insets.getInsets(WindowInsetsCompat.Type.ime())
@@ -222,11 +243,6 @@ class MainActivity : ComponentActivity() {
             WindowInsetsCompat.Type.systemBars()
         )
         NotificationHelper.ensureChannels(this)
-        if (android.os.Build.VERSION.SDK_INT >= 33 &&
-            ContextCompat.checkSelfPermission(this, Manifest.permission.POST_NOTIFICATIONS) != PackageManager.PERMISSION_GRANTED
-        ) {
-            registerForActivityResult(ActivityResultContracts.RequestPermission()) { }.launch(Manifest.permission.POST_NOTIFICATIONS)
-        }
         setContent {
             val state by viewModel.uiState.collectAsState()
             val configuration = LocalConfiguration.current
@@ -240,7 +256,8 @@ class MainActivity : ComponentActivity() {
             }
             MaterialTheme(
                 colorScheme = if (darkTheme) DarkScheme else LightScheme,
-                typography = NexusTypography
+                typography = NexusTypography,
+                shapes = NexusShapes,
             ) {
                 NexusApp(state, viewModel, instantWindowInsets)
             }
@@ -258,7 +275,10 @@ class MainActivity : ComponentActivity() {
         val profileId = intent?.getStringExtra(NotificationHelper.EXTRA_PROFILE_ID)
         val sessionId = intent?.getStringExtra(NotificationHelper.EXTRA_SESSION_ID)
         val fileKey = intent?.getStringExtra(NotificationHelper.EXTRA_FILE_KEY)
-        if (sessionId != null) {
+        val voiceCall = intent?.getBooleanExtra(NotificationHelper.EXTRA_VOICE_CALL, false) == true
+        if (voiceCall) {
+            viewModel.openVoiceCall()
+        } else if (sessionId != null) {
             viewModel.openNotificationSession(profileId, sessionId, fileKey)
         } else {
             viewModel.openNotificationProfile(profileId)
@@ -267,11 +287,31 @@ class MainActivity : ComponentActivity() {
         intent?.removeExtra(NotificationHelper.EXTRA_SESSION_ID)
         intent?.removeExtra(NotificationHelper.EXTRA_PROFILE_ID)
         intent?.removeExtra(NotificationHelper.EXTRA_FILE_KEY)
+        intent?.removeExtra(NotificationHelper.EXTRA_VOICE_CALL)
     }
 }
 
 @Composable
 private fun NexusApp(state: MainUiState, viewModel: MainViewModel, windowInsets: InstantWindowInsets) {
+    val context = LocalContext.current
+    val notificationPermissionLauncher = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { }
+    LaunchedEffect(state.connectionStatus) {
+        if (android.os.Build.VERSION.SDK_INT < 33 || state.connectionStatus != ConnectionStatus.CONNECTED) {
+            return@LaunchedEffect
+        }
+        val permissionPreferences = context.getSharedPreferences("nexus_permissions", android.content.Context.MODE_PRIVATE)
+        val alreadyRequested = permissionPreferences.getBoolean("notification_permission_requested", false)
+        val permissionGranted = ContextCompat.checkSelfPermission(
+            context,
+            Manifest.permission.POST_NOTIFICATIONS,
+        ) == PackageManager.PERMISSION_GRANTED
+        if (!alreadyRequested && !permissionGranted) {
+            permissionPreferences.edit().putBoolean("notification_permission_requested", true).apply()
+            notificationPermissionLauncher.launch(Manifest.permission.POST_NOTIFICATIONS)
+        }
+    }
     BackHandler(enabled = state.settingsOpen) { viewModel.closeSettings() }
     BackHandler(enabled = state.drawerOpen && !state.settingsOpen) { viewModel.setDrawerOpen(false) }
     val lifecycleOwner = LocalLifecycleOwner.current
@@ -299,29 +339,34 @@ private fun NexusApp(state: MainUiState, viewModel: MainViewModel, windowInsets:
     }
 
     Surface(modifier = Modifier.fillMaxSize(), color = appBackground()) {
-        when {
-            state.connectionStatus != ConnectionStatus.CONNECTED -> ConnectionScreen(state, viewModel, windowInsets)
-            state.settingsOpen -> SettingsScreen(state, viewModel)
-            else -> Box(Modifier.fillMaxSize()) {
-                ChatScreen(state, viewModel, windowInsets)
-                if (state.drawerOpen) {
-                    Box(
-                        Modifier
-                            .fillMaxSize()
-                            .background(Color.Black.copy(alpha = 0.34f))
-                            .clickable { viewModel.setDrawerOpen(false) }
-                    )
-                    SessionDrawer(
-                        sessions = state.sessions,
-                        activeSessionId = state.activeSessionId,
-                        onSelect = viewModel::selectSession,
-                        onNew = viewModel::createSession,
-                        onRefresh = viewModel::refreshSessions,
-                        onRename = viewModel::requestRename,
-                        onDelete = viewModel::requestDelete,
-                        onClose = { viewModel.setDrawerOpen(false) }
-                    )
+        Box(Modifier.fillMaxSize()) {
+            when {
+                state.connectionStatus != ConnectionStatus.CONNECTED -> ConnectionScreen(state, viewModel, windowInsets)
+                state.settingsOpen -> SettingsScreen(state, viewModel)
+                else -> Box(Modifier.fillMaxSize()) {
+                    ChatScreen(state, viewModel, windowInsets)
+                    if (state.drawerOpen) {
+                        Box(
+                            Modifier
+                                .fillMaxSize()
+                                .background(Color.Black.copy(alpha = 0.34f))
+                                .clickable { viewModel.setDrawerOpen(false) }
+                        )
+                        SessionDrawer(
+                            sessions = state.sessions,
+                            activeSessionId = state.activeSessionId,
+                            onSelect = viewModel::selectSession,
+                            onNew = viewModel::createSession,
+                            onRefresh = viewModel::refreshSessions,
+                            onRename = viewModel::requestRename,
+                            onDelete = viewModel::requestDelete,
+                            onClose = { viewModel.setDrawerOpen(false) }
+                        )
+                    }
                 }
+            }
+            if (state.connectionStatus == ConnectionStatus.CONNECTED && state.voiceCallOpen) {
+                VoiceCallScreen(state, viewModel)
             }
         }
     }
@@ -425,130 +470,105 @@ private fun ConnectionScreen(state: MainUiState, viewModel: MainViewModel, windo
         viewModel.connect()
     }
 
-    val background = Brush.verticalGradient(
-        listOf(
-            MaterialTheme.colorScheme.primaryContainer.copy(alpha = 0.7f),
-            MaterialTheme.colorScheme.background,
-            MaterialTheme.colorScheme.background
-        )
-    )
     Box(
         modifier = Modifier
             .fillMaxSize()
-            .background(background)
+            .background(MaterialTheme.colorScheme.background),
+        contentAlignment = Alignment.TopCenter,
     ) {
         Column(
             modifier = Modifier
-                .fillMaxSize()
+                .widthIn(max = 440.dp)
+                .fillMaxWidth()
                 .verticalScroll(scrollState)
                 .statusBarsPadding()
                 .padding(bottom = bottomInset)
-                .padding(horizontal = 18.dp, vertical = 4.dp),
+                .padding(horizontal = 24.dp, vertical = 24.dp),
             verticalArrangement = Arrangement.Top
         ) {
             Row(verticalAlignment = Alignment.CenterVertically) {
                 Surface(
-                    modifier = Modifier.size(36.dp),
-                    shape = RoundedCornerShape(13.dp),
+                    modifier = Modifier.size(40.dp),
+                    shape = RoundedCornerShape(8.dp),
                     color = MaterialTheme.colorScheme.primary,
-                    shadowElevation = 4.dp
                 ) {
                     Box(contentAlignment = Alignment.Center) {
-                        Text("N", color = MaterialTheme.colorScheme.onPrimary, fontSize = 19.sp, fontWeight = FontWeight.Bold)
+                        Text("N", color = MaterialTheme.colorScheme.onPrimary, fontSize = 20.sp, fontWeight = FontWeight.Bold)
                     }
                 }
-                Spacer(Modifier.width(9.dp))
+                Spacer(Modifier.width(12.dp))
                 Column {
-                    Text("Nexus", style = MaterialTheme.typography.titleLarge)
-                    Text("连接 Hermes，继续你的工作", color = mutedInk(), style = MaterialTheme.typography.bodySmall)
+                    Text("Nexus", style = MaterialTheme.typography.titleLarge, color = MaterialTheme.colorScheme.onSurface)
+                    Text("移动工作台", color = mutedInk(), style = MaterialTheme.typography.bodySmall)
                 }
             }
+            Spacer(Modifier.height(40.dp))
+            Text("连接到工作区", style = MaterialTheme.typography.headlineSmall, color = MaterialTheme.colorScheme.onSurface)
             Spacer(Modifier.height(6.dp))
-
-            Card(
-                shape = RoundedCornerShape(22.dp),
-                colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-                elevation = CardDefaults.cardElevation(defaultElevation = 3.dp)
+            Text("使用 Nexus Gateway 地址和账户登录", color = mutedInk(), style = MaterialTheme.typography.bodyMedium)
+            Spacer(Modifier.height(24.dp))
+            OutlinedTextField(
+                value = serverUrl,
+                onValueChange = { serverUrl = it; clearVisibleError() },
+                modifier = Modifier.fillMaxWidth(),
+                label = { Text("Gateway 地址") },
+                placeholder = { Text("http://服务器地址:端口") },
+                singleLine = true,
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri, imeAction = ImeAction.Next),
+                keyboardActions = KeyboardActions(onNext = { usernameFocusRequester.requestFocus() }),
+                shape = RoundedCornerShape(8.dp),
+            )
+            Spacer(Modifier.height(12.dp))
+            OutlinedTextField(
+                value = username,
+                onValueChange = { username = it; clearVisibleError() },
+                modifier = Modifier.fillMaxWidth().focusRequester(usernameFocusRequester),
+                label = { Text("账号") },
+                singleLine = true,
+                keyboardOptions = KeyboardOptions(imeAction = ImeAction.Next),
+                keyboardActions = KeyboardActions(onNext = { passwordFocusRequester.requestFocus() }),
+                shape = RoundedCornerShape(8.dp),
+            )
+            Spacer(Modifier.height(12.dp))
+            OutlinedTextField(
+                value = password,
+                onValueChange = { password = it; clearVisibleError() },
+                modifier = Modifier.fillMaxWidth().focusRequester(passwordFocusRequester),
+                label = { Text("密码") },
+                singleLine = true,
+                visualTransformation = if (passwordVisible) VisualTransformation.None else PasswordVisualTransformation(),
+                trailingIcon = {
+                    IconButton(onClick = { passwordVisible = !passwordVisible }) {
+                        Icon(
+                            if (passwordVisible) Icons.Filled.VisibilityOff else Icons.Filled.Visibility,
+                            contentDescription = if (passwordVisible) "隐藏密码" else "显示密码",
+                        )
+                    }
+                },
+                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password, imeAction = ImeAction.Done),
+                keyboardActions = KeyboardActions(onDone = { submit() }),
+                shape = RoundedCornerShape(8.dp),
+            )
+            Spacer(Modifier.height(18.dp))
+            Button(
+                onClick = { submit() },
+                enabled = canSubmit,
+                modifier = Modifier.fillMaxWidth().height(48.dp),
+                shape = RoundedCornerShape(8.dp),
             ) {
-                Column(Modifier.padding(horizontal = 16.dp, vertical = 14.dp)) {
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Text("登录信息", style = MaterialTheme.typography.titleMedium, modifier = Modifier.weight(1f))
-                        Text("HTTP / HTTPS", style = MaterialTheme.typography.bodySmall, color = mutedInk())
-                    }
-                    Spacer(Modifier.height(8.dp))
-                    OutlinedTextField(
-                        value = serverUrl,
-                        onValueChange = { serverUrl = it; clearVisibleError() },
-                        modifier = Modifier.fillMaxWidth(),
-                        label = { Text("Nexus 地址") },
-                        placeholder = { Text("http://服务器地址:端口") },
-                        singleLine = true,
-                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Uri, imeAction = ImeAction.Next),
-                        keyboardActions = KeyboardActions(onNext = { usernameFocusRequester.requestFocus() }),
-                        shape = RoundedCornerShape(16.dp)
-                    )
-                    Spacer(Modifier.height(8.dp))
-                    OutlinedTextField(
-                        value = username,
-                        onValueChange = { username = it; clearVisibleError() },
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .focusRequester(usernameFocusRequester),
-                        label = { Text("账号") },
-                        singleLine = true,
-                        keyboardOptions = KeyboardOptions(imeAction = ImeAction.Next),
-                        keyboardActions = KeyboardActions(onNext = { passwordFocusRequester.requestFocus() }),
-                        shape = RoundedCornerShape(16.dp)
-                    )
-                    Spacer(Modifier.height(8.dp))
-                    OutlinedTextField(
-                        value = password,
-                        onValueChange = { password = it; clearVisibleError() },
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .focusRequester(passwordFocusRequester),
-                        label = { Text("密码") },
-                        supportingText = {
-                            Text(if (password.isEmpty()) "请输入密码" else "已输入 ${password.length} 位")
-                        },
-                        singleLine = true,
-                        visualTransformation = if (passwordVisible) VisualTransformation.None else PasswordVisualTransformation(),
-                        trailingIcon = {
-                            IconButton(onClick = { passwordVisible = !passwordVisible }) {
-                                Icon(
-                                    if (passwordVisible) Icons.Filled.VisibilityOff else Icons.Filled.Visibility,
-                                    contentDescription = if (passwordVisible) "隐藏密码" else "显示密码"
-                                )
-                            }
-                        },
-                        keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Password, imeAction = ImeAction.Done),
-                        keyboardActions = KeyboardActions(onDone = { submit() }),
-                        shape = RoundedCornerShape(16.dp)
-                    )
-                    Spacer(Modifier.height(12.dp))
-                    Button(
-                        onClick = { submit() },
-                        enabled = canSubmit,
-                        modifier = Modifier
-                            .fillMaxWidth()
-                            .height(48.dp),
-                        shape = RoundedCornerShape(16.dp)
-                    ) {
-                        if (connecting) {
-                            CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp)
-                            Spacer(Modifier.width(10.dp))
-                        }
-                        Text(if (connecting) "连接中…" else "登录", fontWeight = FontWeight.SemiBold)
-                    }
+                if (connecting) {
+                    CircularProgressIndicator(Modifier.size(18.dp), strokeWidth = 2.dp)
+                    Spacer(Modifier.width(10.dp))
                 }
+                Text(if (connecting) "连接中…" else "登录", fontWeight = FontWeight.SemiBold)
             }
 
             state.error?.let { error ->
-                Spacer(Modifier.height(14.dp))
+                Spacer(Modifier.height(12.dp))
                 Surface(
                     modifier = Modifier.fillMaxWidth(),
                     color = MaterialTheme.colorScheme.errorContainer,
-                    shape = RoundedCornerShape(16.dp)
+                    shape = RoundedCornerShape(8.dp),
                 ) {
                     Text(
                         error,
@@ -558,6 +578,14 @@ private fun ConnectionScreen(state: MainUiState, viewModel: MainViewModel, windo
                     )
                 }
             }
+            Spacer(Modifier.height(28.dp))
+            Text(
+                "Nexus ${BuildConfig.VERSION_NAME}",
+                modifier = Modifier.fillMaxWidth(),
+                color = mutedInk(),
+                fontSize = 12.sp,
+                textAlign = androidx.compose.ui.text.style.TextAlign.Center,
+            )
         }
     }
 }
@@ -566,69 +594,43 @@ private fun ConnectionScreen(state: MainUiState, viewModel: MainViewModel, windo
 private fun ChatScreen(state: MainUiState, viewModel: MainViewModel, windowInsets: InstantWindowInsets) {
     Column(Modifier.fillMaxSize()) {
         Surface(
-            color = MaterialTheme.colorScheme.surface.copy(alpha = 0.98f),
-            tonalElevation = 2.dp,
-            shadowElevation = 1.dp
+            color = MaterialTheme.colorScheme.surface,
+            tonalElevation = 0.dp,
+            shadowElevation = 0.dp
         ) {
-            Row(
-                modifier = Modifier
-                    .fillMaxWidth()
-                    .statusBarsPadding()
-                    .height(68.dp)
-                    .padding(horizontal = 8.dp),
-                verticalAlignment = Alignment.CenterVertically
-            ) {
-                IconButton(onClick = { viewModel.setDrawerOpen(true) }) {
-                    Icon(Icons.Filled.Menu, contentDescription = "打开对话列表")
-                }
-                Column(Modifier.weight(1f)) {
-                    Text(
-                        state.activeSession?.displayTitle ?: "新对话",
-                        color = MaterialTheme.colorScheme.onSurface,
-                        fontWeight = FontWeight.SemiBold,
-                        maxLines = 1,
-                        fontSize = 17.sp
-                    )
-                    Row(verticalAlignment = Alignment.CenterVertically) {
-                        Box(
-                            Modifier
-                                .size(7.dp)
-                                .background(MaterialTheme.colorScheme.secondary, RoundedCornerShape(7.dp))
-                        )
-                        Spacer(Modifier.width(6.dp))
-                        Text(
-                            state.answerStatus.label ?: state.selectedRuntimeSummary,
-                            color = when (state.answerStatus) {
-                                AnswerStatus.COMPLETED -> MaterialTheme.colorScheme.secondary
-                                AnswerStatus.FAILED -> MaterialTheme.colorScheme.error
-                                AnswerStatus.STOPPED -> Color(0xFF9A6B19)
-                                AnswerStatus.IDLE -> mutedInk()
-                                else -> primaryInk()
-                            },
-                            fontSize = 11.sp,
-                            maxLines = 1
-                        )
-                        if (state.answerStatus in setOf(AnswerStatus.THINKING, AnswerStatus.TOOL, AnswerStatus.GENERATING)) {
-                            Spacer(Modifier.width(6.dp))
-                            CircularProgressIndicator(modifier = Modifier.size(11.dp), strokeWidth = 1.5.dp)
-                        }
+            Column(Modifier.fillMaxWidth().statusBarsPadding()) {
+                Row(
+                    modifier = Modifier.fillMaxWidth().height(56.dp).padding(horizontal = 8.dp),
+                    verticalAlignment = Alignment.CenterVertically
+                ) {
+                    IconButton(onClick = { viewModel.setDrawerOpen(true) }) {
+                        Icon(Icons.Filled.Menu, contentDescription = "打开对话列表")
                     }
-                }
-                ChatTopAction(
-                    icon = Icons.Filled.Tune,
-                    label = "模型",
-                    onClick = viewModel::openInferenceModelPicker
-                )
-                ChatTopAction(
-                    icon = Icons.Filled.Psychology,
-                    label = "推理",
-                    onClick = viewModel::openReasoningPicker
-                )
-                IconButton(onClick = viewModel::openSettings) {
-                    Icon(Icons.Filled.Settings, contentDescription = "设置")
+                    Column(Modifier.weight(1f)) {
+                        Text(
+                            state.activeSession?.displayTitle ?: "新对话",
+                            color = MaterialTheme.colorScheme.onSurface,
+                            fontWeight = FontWeight.SemiBold,
+                            maxLines = 1,
+                            fontSize = 16.sp,
+                        )
+                        Text(
+                            state.selectedProfileLabel,
+                            color = mutedInk(),
+                            maxLines = 1,
+                            fontSize = 11.sp,
+                        )
+                    }
+                    IconButton(onClick = viewModel::openVoiceCall) {
+                        Icon(Icons.Filled.Phone, contentDescription = "语音通话", modifier = Modifier.size(20.dp), tint = mutedInk())
+                    }
+                    IconButton(onClick = viewModel::openSettings) {
+                        Icon(Icons.Filled.Settings, contentDescription = "设置", modifier = Modifier.size(20.dp), tint = mutedInk())
+                    }
                 }
             }
         }
+        HorizontalDivider(color = MaterialTheme.colorScheme.outlineVariant)
 
         key(state.activeSessionId) {
             val initialIndex = latestLazyListIndex(state.messages.size)
@@ -701,8 +703,8 @@ private fun ChatScreen(state: MainUiState, viewModel: MainViewModel, windowInset
             Box(modifier = Modifier.weight(1f).fillMaxWidth()) {
             LazyColumn(
                 state = listState,
-                modifier = Modifier.fillMaxSize().padding(horizontal = 14.dp),
-                verticalArrangement = Arrangement.spacedBy(10.dp)
+                modifier = Modifier.fillMaxSize().padding(horizontal = 16.dp),
+                verticalArrangement = Arrangement.spacedBy(16.dp)
             ) {
                 item {
                     Box(Modifier.fillMaxWidth().height(36.dp), contentAlignment = Alignment.Center) {
@@ -711,7 +713,9 @@ private fun ChatScreen(state: MainUiState, viewModel: MainViewModel, windowInset
                         }
                     }
                 }
-                if (state.messages.isEmpty() && !state.loading) item { EmptyConversation() }
+                if (state.messages.isEmpty() && !state.loading) item {
+                    EmptyConversation(onPromptSelected = viewModel::updateInput)
+                }
                 items(visibleMessages, key = { it.id }) { message ->
                     MessageBubble(message, state.serverUrl, state.token, viewModel::selectDownload)
                 }
@@ -753,16 +757,6 @@ private fun ChatScreen(state: MainUiState, viewModel: MainViewModel, windowInset
 }
 
 @Composable
-private fun ChatTopAction(icon: ImageVector, label: String, onClick: () -> Unit) {
-    IconButton(onClick = onClick) {
-        Column(horizontalAlignment = Alignment.CenterHorizontally) {
-            Icon(icon, contentDescription = label, modifier = Modifier.size(19.dp))
-            Text(label, fontSize = 9.sp, lineHeight = 10.sp)
-        }
-    }
-}
-
-@Composable
 private fun ChatComposer(state: MainUiState, viewModel: MainViewModel, windowInsets: InstantWindowInsets) {
     val context = LocalContext.current
     val bottomInset = with(LocalDensity.current) { windowInsets.bottomPx.toDp() }
@@ -777,31 +771,104 @@ private fun ChatComposer(state: MainUiState, viewModel: MainViewModel, windowIns
             onSend = viewModel::send
         )
     }
-    var speechController by remember { mutableStateOf<SpeechInputController?>(null) }
-    DisposableEffect(Unit) {
-        onDispose {
-            speechController?.cancel()
-            speechController?.destroy()
+    val systemSpeechAvailable = remember(context) { isSpeechRecognitionAvailable(context) }
+    val inlineSpeechEngine = remember(state.voiceInputMode) { SpeechEnginePreferences.inline(context) }
+    val localSpeechFiles = remember(state.voiceInputMode) { LocalAsrModelManager.selectedModelFiles(context) }
+    val inlineTranscriptionScope = rememberCoroutineScope()
+    val currentVoiceTranscribing = rememberUpdatedState(state.voiceTranscribing)
+    val currentVoiceListening = rememberUpdatedState(state.voiceListening)
+    val inlineSpeechController = remember(
+        context,
+        viewModel,
+        systemSpeechAvailable,
+        inlineSpeechEngine,
+        localSpeechFiles,
+    ) {
+        when (inlineSpeechEngine) {
+            SpeechRecognitionEngine.SYSTEM -> if (systemSpeechAvailable) SpeechInputController(
+                context = context,
+                onPartial = viewModel::updateVoicePreview,
+                onResult = { text, recording ->
+                    recording?.file?.delete()
+                    viewModel.acceptVoiceResult(text)
+                },
+                onError = { _, message, recording ->
+                    recording?.file?.delete()
+                    viewModel.showVoiceError(message)
+                },
+                onReady = { viewModel.setVoiceListening(true) },
+                onSpeechStart = { viewModel.setVoiceListening(true) },
+                onSpeechEnd = viewModel::setVoiceTranscribing,
+                captureEchoCanceledAudio = false,
+                recognitionService = SystemSpeechRecognitionManager.selectedComponent(context),
+            ) else null
+            SpeechRecognitionEngine.X_ASR -> if (localSpeechFiles != null) LocalStreamingSpeechController(
+                context = context,
+                onPartial = { _, text -> viewModel.updateVoicePreview(text) },
+                onResult = { _, text, recording ->
+                    recording?.file?.delete()
+                    viewModel.acceptVoiceResult(text)
+                },
+                onError = { _, message, recording ->
+                    recording?.file?.delete()
+                    viewModel.showVoiceError(message)
+                },
+                onReady = { viewModel.setVoiceListening(true) },
+                onSpeechStart = { viewModel.setVoiceListening(true) },
+                onSpeechEnd = { viewModel.setVoiceTranscribing() },
+                onSpeechCanceled = { viewModel.showVoiceError("没有识别到语音") },
+                continuous = false,
+            ) else null
+            SpeechRecognitionEngine.ONLINE -> OnlineSpeechInputController(
+                context = context,
+                onResult = { recording ->
+                    viewModel.setVoiceTranscribing()
+                    inlineTranscriptionScope.launch {
+                        runCatching { viewModel.transcribeVoice(recording, deleteRemoteAfterTranscription = true) }
+                            .onSuccess(viewModel::acceptVoiceResult)
+                            .onFailure { viewModel.showVoiceError("在线语音识别失败，请检查 Gateway 的 ASR 配置") }
+                    }
+                },
+                onError = { _, message, recording ->
+                    recording?.file?.delete()
+                    viewModel.showVoiceError(message)
+                },
+                onReady = { viewModel.setVoiceListening(true) },
+                onSpeechStart = { viewModel.setVoiceListening(true) },
+                onSpeechEnd = viewModel::setVoiceTranscribing,
+            )
         }
     }
-    val systemSpeechLauncher = rememberLauncherForActivityResult(ActivityResultContracts.StartActivityForResult()) { result ->
-        val text = result.data
-            ?.getStringArrayListExtra(android.speech.RecognizerIntent.EXTRA_RESULTS)
-            ?.firstOrNull()
-        if (!text.isNullOrBlank()) viewModel.acceptVoiceResult(text)
-        else viewModel.showVoiceError("没有识别到语音")
+    DisposableEffect(inlineSpeechController) {
+        onDispose { inlineSpeechController?.destroy() }
     }
-    fun launchSystemSpeech() {
-        runCatching {
-            systemSpeechLauncher.launch(android.content.Intent(android.speech.RecognizerIntent.ACTION_RECOGNIZE_SPEECH).apply {
-                putExtra(android.speech.RecognizerIntent.EXTRA_LANGUAGE_MODEL, android.speech.RecognizerIntent.LANGUAGE_MODEL_FREE_FORM)
-                putExtra(android.speech.RecognizerIntent.EXTRA_LANGUAGE, "zh-CN")
-                putExtra(android.speech.RecognizerIntent.EXTRA_PROMPT, "请说话")
-            })
-        }.onFailure { viewModel.showVoiceError("当前设备没有可用的系统语音输入") }
+    LaunchedEffect(state.voiceInputMode) {
+        if (!state.voiceInputMode) inlineSpeechController?.cancel()
+    }
+    fun startInlineSpeech(): Boolean {
+        val controller = inlineSpeechController
+        if (controller == null) {
+            viewModel.showVoiceError(
+                if (inlineSpeechEngine == SpeechRecognitionEngine.X_ASR) {
+                    "请先在设置中安装 X-ASR"
+                } else if (inlineSpeechEngine == SpeechRecognitionEngine.ONLINE) {
+                    "请先在 Gateway 管理页配置 OpenAI 兼容在线 ASR"
+                } else {
+                    "当前设备没有可用的系统语音输入"
+                }
+            )
+            return false
+        }
+        return runCatching {
+            viewModel.setVoiceListening(true)
+            controller.start()
+        }.onFailure {
+            viewModel.showVoiceError("无法启动语音识别")
+        }.isSuccess
     }
     val audioPermissionLauncher = rememberLauncherForActivityResult(ActivityResultContracts.RequestPermission()) { granted ->
-        if (granted) launchSystemSpeech() else viewModel.showVoiceError("没有麦克风权限")
+        if (granted) viewModel.updateVoicePreview("请按住说话")
+        else viewModel.showVoiceError("没有麦克风权限")
     }
     val galleryLauncher = rememberLauncherForActivityResult(ActivityResultContracts.GetContent()) { uri ->
         uri?.let(viewModel::prepareImage)
@@ -827,10 +894,9 @@ private fun ChatComposer(state: MainUiState, viewModel: MainViewModel, windowIns
     Column(
         Modifier
             .fillMaxWidth()
-            .background(composerSurface())
-            .clip(RoundedCornerShape(topStart = 28.dp, topEnd = 28.dp))
-            .border(1.dp, MaterialTheme.colorScheme.outlineVariant, RoundedCornerShape(topStart = 28.dp, topEnd = 28.dp))
+            .background(MaterialTheme.colorScheme.surface)
             .padding(bottom = bottomInset)
+            .padding(horizontal = 10.dp, vertical = 8.dp)
     ) {
         if (state.pendingImages.isNotEmpty() || state.preparingImage) {
             PendingImageStrip(
@@ -849,8 +915,15 @@ private fun ChatComposer(state: MainUiState, viewModel: MainViewModel, windowIns
                 onRemove = viewModel::removeFile
             )
         }
+        Surface(
+            modifier = Modifier.fillMaxWidth(),
+            color = composerSurface(),
+            shape = RoundedCornerShape(8.dp),
+            border = androidx.compose.foundation.BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+            shadowElevation = 0.dp
+        ) {
         Row(
-            modifier = Modifier.padding(horizontal = 14.dp, vertical = 10.dp),
+            modifier = Modifier.padding(horizontal = 6.dp, vertical = 6.dp),
             verticalAlignment = Alignment.Bottom
         ) {
             IconButton(onClick = {
@@ -865,44 +938,52 @@ private fun ChatComposer(state: MainUiState, viewModel: MainViewModel, windowIns
                 )
             }
             if (state.voiceInputMode) {
-                val voiceShape = RoundedCornerShape(24.dp)
+                val voiceShape = RoundedCornerShape(6.dp)
                 Box(
                     modifier = Modifier
                         .weight(1f)
                         .height(48.dp)
                         .background(if (state.voiceListening) MaterialTheme.colorScheme.surfaceVariant else MaterialTheme.colorScheme.surface, voiceShape)
                         .border(1.dp, MaterialTheme.colorScheme.outline, voiceShape)
-                        .pointerInput(Unit) {
-                            detectTapGestures(
-                                onPress = {
-                                    if (ContextCompat.checkSelfPermission(context, Manifest.permission.RECORD_AUDIO) != PackageManager.PERMISSION_GRANTED) {
+                        .pointerInput(inlineSpeechController) {
+                            awaitEachGesture {
+                                val down = awaitFirstDown(requireUnconsumed = false)
+                                var started = false
+                                if (!currentVoiceTranscribing.value) {
+                                    down.consume()
+                                    if (
+                                        ContextCompat.checkSelfPermission(
+                                            context,
+                                            Manifest.permission.RECORD_AUDIO,
+                                        ) == PackageManager.PERMISSION_GRANTED
+                                    ) {
+                                        started = startInlineSpeech()
+                                    } else {
                                         audioPermissionLauncher.launch(Manifest.permission.RECORD_AUDIO)
-                                        return@detectTapGestures
                                     }
-                                    if (!isSpeechRecognitionAvailable(context)) {
-                                        viewModel.showVoiceError("当前设备没有可用的语音识别服务")
-                                        return@detectTapGestures
-                                    }
-                                    val controller = speechController ?: SpeechInputController(
-                                        context,
-                                        viewModel::updateVoicePreview,
-                                        viewModel::acceptVoiceResult
-                                    ) { code, message ->
-                                        viewModel.setVoiceListening(false)
-                                        if (shouldFallbackToSystemSpeech(code)) launchSystemSpeech()
-                                        else viewModel.showVoiceError(message)
-                                    }.also { speechController = it }
-                                    viewModel.setVoiceListening(true)
-                                    controller.start()
-                                    tryAwaitRelease()
-                                    controller.stop()
                                 }
-                            )
+                                val released = waitForUpOrCancellation()
+                                if (started) {
+                                    if (released == null) {
+                                        inlineSpeechController?.cancel()
+                                        viewModel.setVoiceListening(false)
+                                        viewModel.updateVoicePreview("")
+                                    } else if (
+                                        shouldFinishInlineSpeechOnRelease(
+                                            started = started,
+                                            stillListening = currentVoiceListening.value,
+                                        )
+                                    ) {
+                                        viewModel.setVoiceTranscribing()
+                                        inlineSpeechController?.stop()
+                                    }
+                                }
+                            }
                         },
                     contentAlignment = Alignment.Center
                 ) {
                     Text(
-                        state.voicePreview.ifBlank { if (state.voiceListening) "松开转成文字" else "按住说话 · 转文字" },
+                        state.voicePreview.ifBlank { if (state.voiceListening) "松开发送" else "按住说话" },
                         color = primaryInk(),
                         fontWeight = FontWeight.Medium
                     )
@@ -913,6 +994,7 @@ private fun ChatComposer(state: MainUiState, viewModel: MainViewModel, windowIns
                     controller = inputController,
                     featurePanelOpen = state.featurePanelOpen,
                     streaming = state.streaming,
+                    thinking = state.thinking,
                     runStoppable = state.runStoppable,
                     hasPendingAttachments = state.pendingImages.isNotEmpty() || state.pendingFiles.isNotEmpty()
                 )
@@ -931,24 +1013,43 @@ private fun ChatComposer(state: MainUiState, viewModel: MainViewModel, windowIns
                 )
             }
         }
+        }
 
         if (state.featurePanelOpen) {
-            Row(
+            LazyRow(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .height(260.dp)
-                    .padding(horizontal = 10.dp, vertical = 24.dp),
-                horizontalArrangement = Arrangement.SpaceEvenly,
-                verticalAlignment = Alignment.Top
+                    .height(100.dp),
+                contentPadding = androidx.compose.foundation.layout.PaddingValues(horizontal = 12.dp, vertical = 12.dp),
+                horizontalArrangement = Arrangement.spacedBy(18.dp),
+                verticalAlignment = Alignment.Top,
             ) {
-                FeatureEntry("文件", Icons.Filled.AttachFile) { fileLauncher.launch(arrayOf("*/*")) }
-                FeatureEntry("拍照", Icons.Filled.CameraAlt) {
-                    CameraCapture.createUri(context).also { uri ->
-                        cameraUri = uri
-                        cameraLauncher.launch(uri)
+                item("model") {
+                    FeatureEntry("模型", Icons.Filled.SmartToy) {
+                        viewModel.closeFeaturePanel()
+                        viewModel.openInferenceModelPicker()
                     }
                 }
-                FeatureEntry("相册", Icons.Filled.Image) { galleryLauncher.launch("image/*") }
+                item("reasoning") {
+                    FeatureEntry("推理", Icons.Filled.Psychology) {
+                        viewModel.closeFeaturePanel()
+                        viewModel.openReasoningPicker()
+                    }
+                }
+                item("file") {
+                    FeatureEntry("文件", Icons.Filled.AttachFile) { fileLauncher.launch(arrayOf("*/*")) }
+                }
+                item("camera") {
+                    FeatureEntry("拍照", Icons.Filled.CameraAlt) {
+                        CameraCapture.createUri(context).also { uri ->
+                            cameraUri = uri
+                            cameraLauncher.launch(uri)
+                        }
+                    }
+                }
+                item("gallery") {
+                    FeatureEntry("相册", Icons.Filled.Image) { galleryLauncher.launch("image/*") }
+                }
             }
         }
     }
@@ -969,14 +1070,27 @@ private fun ChatTextInput(
     controller: ChatInputController,
     featurePanelOpen: Boolean,
     streaming: Boolean,
+    thinking: Boolean,
     runStoppable: Boolean,
     hasPendingAttachments: Boolean
 ) {
     val input by controller.input.collectAsState()
     var focused by remember { mutableStateOf(false) }
-    val shape = RoundedCornerShape(20.dp)
+    var activityDots by remember { mutableIntStateOf(1) }
+    val shape = RoundedCornerShape(6.dp)
     val cursorColor = MaterialTheme.colorScheme.primary
-    val borderColor = if (focused) MaterialTheme.colorScheme.primary else MaterialTheme.colorScheme.outline
+    val fieldColor = if (focused) MaterialTheme.colorScheme.surfaceVariant.copy(alpha = 0.78f) else Color.Transparent
+
+    LaunchedEffect(streaming) {
+        if (!streaming) {
+            activityDots = 1
+            return@LaunchedEffect
+        }
+        while (true) {
+            delay(360L)
+            activityDots = activityDots % 3 + 1
+        }
+    }
 
     BasicTextField(
         value = input,
@@ -994,9 +1108,8 @@ private fun ChatTextInput(
             Row(
                 modifier = Modifier
                     .fillMaxWidth()
-                    .heightIn(min = 50.dp)
-                    .background(MaterialTheme.colorScheme.surface, shape)
-                    .border(1.dp, borderColor, shape)
+                    .heightIn(min = 48.dp)
+                    .background(fieldColor, shape)
                     .padding(start = 14.dp, end = 2.dp),
                 verticalAlignment = Alignment.Bottom
             ) {
@@ -1007,8 +1120,12 @@ private fun ChatTextInput(
                 ) {
                     if (input.isEmpty()) {
                         Text(
-                            "和 Nexus 说点什么……",
-                            color = mutedInk(),
+                            if (streaming) {
+                                "${if (thinking) "思考中" else "回答中"}${".".repeat(activityDots)}"
+                            } else {
+                                "发消息或描述一个任务…"
+                            },
+                            color = if (streaming) MaterialTheme.colorScheme.primary else mutedInk(),
                             style = MaterialTheme.typography.bodyLarge
                         )
                     }
@@ -1019,15 +1136,7 @@ private fun ChatTextInput(
                         Icon(Icons.Filled.StopCircle, contentDescription = "停止生成", tint = primaryInk())
                     }
                 } else if (streaming) {
-                    Box(
-                        modifier = Modifier.size(48.dp),
-                        contentAlignment = Alignment.Center
-                    ) {
-                        CircularProgressIndicator(
-                            modifier = Modifier.size(20.dp),
-                            strokeWidth = 2.dp
-                        )
-                    }
+                    Spacer(Modifier.size(48.dp))
                 } else if (input.isNotBlank() || hasPendingAttachments) {
                     IconButton(onClick = controller.onSend) {
                         Icon(Icons.AutoMirrored.Filled.Send, contentDescription = "发送", tint = primaryInk())
@@ -1052,7 +1161,7 @@ private fun PendingFileStrip(
         items(files, key = ChatFile::id) { file ->
             Surface(
                 modifier = Modifier.widthIn(min = 220.dp, max = 280.dp),
-                shape = RoundedCornerShape(16.dp),
+                shape = RoundedCornerShape(8.dp),
                 color = MaterialTheme.colorScheme.surfaceVariant
             ) {
                 Row(
@@ -1120,7 +1229,7 @@ private fun PendingImageStrip(
                             .build()
                     } else image.previewUri,
                     contentDescription = "待发送图片",
-                    modifier = Modifier.size(72.dp).background(MaterialTheme.colorScheme.surfaceVariant, RoundedCornerShape(12.dp))
+                    modifier = Modifier.size(72.dp).background(MaterialTheme.colorScheme.surfaceVariant, RoundedCornerShape(8.dp))
                 )
                 when (image.uploadState) {
                     is AttachmentUploadState.Uploading -> CircularProgressIndicator(
@@ -1133,20 +1242,22 @@ private fun PendingImageStrip(
                         fontSize = 11.sp,
                         modifier = Modifier
                             .align(Alignment.BottomCenter)
-                            .background(Color(0xFF9D493E), RoundedCornerShape(10.dp))
+                            .background(MaterialTheme.colorScheme.error, RoundedCornerShape(6.dp))
                             .clickable { onRetry(image.id) }
                             .padding(horizontal = 8.dp, vertical = 3.dp)
                     )
                     else -> Unit
                 }
-                Text(
-                    "×",
-                    color = MaterialTheme.colorScheme.surface,
+                Icon(
+                    Icons.Filled.Close,
+                    contentDescription = "移除图片",
+                    tint = Color.White,
                     modifier = Modifier
                         .align(Alignment.TopEnd)
-                        .background(Color.Black.copy(alpha = 0.55f), RoundedCornerShape(12.dp))
+                        .size(23.dp)
+                        .background(Color.Black.copy(alpha = 0.55f), RoundedCornerShape(6.dp))
                         .clickable { onRemove(image.id) }
-                        .padding(horizontal = 6.dp, vertical = 2.dp)
+                        .padding(3.dp)
                 )
             }
         }
@@ -1165,8 +1276,8 @@ private fun FeatureEntry(label: String, icon: ImageVector, onClick: () -> Unit =
     Column(horizontalAlignment = Alignment.CenterHorizontally) {
         Surface(
             onClick = onClick,
-            modifier = Modifier.size(58.dp),
-            shape = RoundedCornerShape(17.dp),
+            modifier = Modifier.size(48.dp),
+            shape = RoundedCornerShape(8.dp),
             color = MaterialTheme.colorScheme.surfaceVariant,
             tonalElevation = 0.dp,
             shadowElevation = 0.dp
@@ -1181,24 +1292,52 @@ private fun FeatureEntry(label: String, icon: ImageVector, onClick: () -> Unit =
 }
 
 @Composable
-private fun EmptyConversation() {
+private fun EmptyConversation(onPromptSelected: (String) -> Unit) {
     Column(
-        modifier = Modifier.fillMaxWidth().padding(top = 72.dp, start = 24.dp, end = 24.dp),
+        modifier = Modifier.fillMaxWidth().padding(top = 48.dp, start = 8.dp, end = 8.dp),
         horizontalAlignment = Alignment.CenterHorizontally
     ) {
-        Image(
-            painter = painterResource(R.drawable.ic_launcher_foreground),
-            contentDescription = "Nexus",
-            modifier = Modifier.size(54.dp)
-        )
-        Spacer(Modifier.height(16.dp))
-        Text("开始一段新的对话", fontSize = 20.sp, color = primaryInk(), fontWeight = FontWeight.SemiBold)
-        Spacer(Modifier.height(7.dp))
+        Text("新对话", fontSize = 20.sp, color = MaterialTheme.colorScheme.onBackground, fontWeight = FontWeight.SemiBold)
+        Spacer(Modifier.height(6.dp))
         Text(
-            "文字、图片和文件都会进入当前对话，并共享Nexus的长期记忆与能力。",
+            "有什么我可以帮你完成的？",
             color = mutedInk(),
-            fontSize = 13.sp
+            fontSize = 15.sp
         )
+        Spacer(Modifier.height(22.dp))
+        Column(verticalArrangement = Arrangement.spacedBy(8.dp)) {
+            PromptSuggestion(Icons.Filled.Lightbulb, "帮我理清思路", "把一个复杂问题拆解成清晰的行动步骤", onPromptSelected)
+            PromptSuggestion(Icons.Filled.EditNote, "帮我写点东西", "帮我起草一份简洁、专业的内容", onPromptSelected)
+            PromptSuggestion(Icons.Filled.Code, "分析代码或文件", "请分析我接下来发送的代码或文件", onPromptSelected)
+        }
+    }
+}
+
+@Composable
+private fun PromptSuggestion(
+    icon: ImageVector,
+    title: String,
+    prompt: String,
+    onSelected: (String) -> Unit
+) {
+    Surface(
+        onClick = { onSelected(prompt) },
+        modifier = Modifier.fillMaxWidth(),
+        shape = RoundedCornerShape(8.dp),
+        color = MaterialTheme.colorScheme.surface,
+        border = androidx.compose.foundation.BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant)
+    ) {
+        Row(
+            modifier = Modifier.padding(horizontal = 14.dp, vertical = 12.dp),
+            verticalAlignment = Alignment.CenterVertically
+        ) {
+            Icon(icon, contentDescription = null, tint = mutedInk(), modifier = Modifier.size(19.dp))
+            Spacer(Modifier.width(12.dp))
+            Column {
+                Text(title, fontWeight = FontWeight.Medium, color = MaterialTheme.colorScheme.onSurface)
+                Text(prompt, fontSize = 11.sp, color = mutedInk(), maxLines = 1)
+            }
+        }
     }
 }
 
@@ -1221,12 +1360,11 @@ private fun MessageBubble(
     }
 
     Row(Modifier.fillMaxWidth(), horizontalArrangement = if (user) Arrangement.End else Arrangement.Start) {
-        Card(
-            modifier = Modifier.fillMaxWidth(if (user) 0.82f else 0.92f),
-            colors = CardDefaults.cardColors(containerColor = if (user) userBubble() else assistantSurface()),
-            border = if (user) null else androidx.compose.foundation.BorderStroke(1.dp, surfaceLine()),
-            elevation = CardDefaults.cardElevation(defaultElevation = 0.dp),
-            shape = if (user) RoundedCornerShape(18.dp, 5.dp, 18.dp, 18.dp) else RoundedCornerShape(5.dp, 18.dp, 18.dp, 18.dp)
+        Surface(
+            modifier = if (user) Modifier.fillMaxWidth(0.82f) else Modifier.weight(1f),
+            color = if (user) MaterialTheme.colorScheme.primaryContainer else MaterialTheme.colorScheme.surface,
+            shape = RoundedCornerShape(8.dp),
+            border = if (user) null else androidx.compose.foundation.BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
         ) {
             Column(Modifier.padding(horizontal = 12.dp, vertical = 10.dp)) {
                 if (message.images.isNotEmpty()) {
@@ -1242,7 +1380,7 @@ private fun MessageBubble(
                                     }
                                     .build(),
                                 contentDescription = "聊天图片",
-                                modifier = Modifier.size(150.dp).background(MaterialTheme.colorScheme.surfaceVariant, RoundedCornerShape(12.dp))
+                                modifier = Modifier.size(150.dp).background(MaterialTheme.colorScheme.surfaceVariant, RoundedCornerShape(8.dp))
                             )
                         }
                     }
@@ -1257,7 +1395,7 @@ private fun MessageBubble(
                         Row(
                             Modifier
                                 .fillMaxWidth()
-                                .background(MaterialTheme.colorScheme.surfaceVariant, RoundedCornerShape(12.dp))
+                                .background(MaterialTheme.colorScheme.surfaceVariant, RoundedCornerShape(8.dp))
                                 .clickable { onFileClick(file) }
                                 .padding(10.dp),
                             verticalAlignment = Alignment.CenterVertically
@@ -1286,7 +1424,7 @@ private fun MessageBubble(
                         Row(
                             Modifier
                                 .fillMaxWidth()
-                                .background(MaterialTheme.colorScheme.surfaceVariant, RoundedCornerShape(12.dp))
+                                .background(MaterialTheme.colorScheme.surfaceVariant, RoundedCornerShape(8.dp))
                                 .clickable { onFileClick(linkedFile) }
                                 .padding(10.dp),
                             verticalAlignment = Alignment.CenterVertically
@@ -1328,7 +1466,7 @@ private fun MarkdownMessage(text: String) {
                     block.items.forEach { item -> SelectionContainer { Text("•  $item", color = MaterialTheme.colorScheme.onSurface) } }
                 }
                 is MarkdownBlock.Code -> Column(
-                    Modifier.fillMaxWidth().background(Color(0xFF203A3D), RoundedCornerShape(12.dp)).padding(10.dp)
+                    Modifier.fillMaxWidth().background(Color(0xFF1D282A), RoundedCornerShape(8.dp)).padding(10.dp)
                 ) {
                     Row(verticalAlignment = Alignment.CenterVertically) {
                         Text(block.language.ifBlank { "代码" }, color = Color(0xFFAFC8C4), fontSize = 11.sp, modifier = Modifier.weight(1f))
@@ -1392,31 +1530,71 @@ private fun SessionDrawer(
     Column(
         Modifier
             .fillMaxHeight()
-            .fillMaxWidth(0.58f)
-            .widthIn(max = 220.dp)
-            .clip(RoundedCornerShape(topEnd = 20.dp, bottomEnd = 20.dp))
+            .fillMaxWidth(0.70f)
+            .widthIn(max = 280.dp)
             .background(MaterialTheme.colorScheme.surface)
             .statusBarsPadding()
             .clickable(enabled = false) {}
-            .padding(horizontal = 6.dp, vertical = 6.dp)
+            .padding(horizontal = 12.dp, vertical = 8.dp)
     ) {
         Row(verticalAlignment = Alignment.CenterVertically) {
-            Text("对话", fontSize = 20.sp, fontWeight = FontWeight.SemiBold, color = primaryInk(), modifier = Modifier.weight(1f))
-            Text("刷新", color = primaryInk(), fontSize = 13.sp, modifier = Modifier.clickable(onClick = onRefresh).padding(6.dp))
-            Text("关闭", color = primaryInk(), fontSize = 13.sp, modifier = Modifier.clickable(onClick = onClose).padding(6.dp))
+            Text("对话", fontSize = 18.sp, fontWeight = FontWeight.SemiBold, color = MaterialTheme.colorScheme.onSurface, modifier = Modifier.weight(1f))
+            IconButton(onClick = onRefresh, modifier = Modifier.size(38.dp)) {
+                Icon(Icons.Filled.Refresh, contentDescription = "刷新对话", modifier = Modifier.size(19.dp), tint = mutedInk())
+            }
+            IconButton(onClick = onClose, modifier = Modifier.size(38.dp)) {
+                Icon(Icons.Filled.Close, contentDescription = "关闭对话列表", modifier = Modifier.size(19.dp), tint = mutedInk())
+            }
         }
+        Spacer(Modifier.height(10.dp))
+        Button(
+            onClick = onNew,
+            modifier = Modifier.fillMaxWidth().height(42.dp),
+            shape = RoundedCornerShape(8.dp)
+        ) {
+            Icon(Icons.Filled.Add, contentDescription = null, modifier = Modifier.size(19.dp))
+            Spacer(Modifier.width(8.dp))
+            Text("新建对话", fontSize = 14.sp)
+        }
+        Spacer(Modifier.height(8.dp))
+        Surface(
+            modifier = Modifier.fillMaxWidth().height(40.dp),
+            shape = RoundedCornerShape(6.dp),
+            color = MaterialTheme.colorScheme.background,
+            border = androidx.compose.foundation.BorderStroke(1.dp, MaterialTheme.colorScheme.outlineVariant),
+        ) {
+            Row(
+                modifier = Modifier.fillMaxSize().padding(horizontal = 10.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                Icon(
+                    Icons.Filled.Search,
+                    contentDescription = null,
+                    modifier = Modifier.size(18.dp),
+                    tint = mutedInk(),
+                )
+                Spacer(Modifier.width(8.dp))
+                BasicTextField(
+                    value = search,
+                    onValueChange = { search = it },
+                    modifier = Modifier.weight(1f),
+                    singleLine = true,
+                    textStyle = MaterialTheme.typography.bodyMedium.copy(color = MaterialTheme.colorScheme.onSurface),
+                    cursorBrush = SolidColor(MaterialTheme.colorScheme.primary),
+                    decorationBox = { innerTextField ->
+                        Box {
+                            if (search.isEmpty()) {
+                                Text("搜索对话", color = mutedInk(), style = MaterialTheme.typography.bodyMedium)
+                            }
+                            innerTextField()
+                        }
+                    },
+                )
+            }
+        }
+        Spacer(Modifier.height(10.dp))
+        Text("最近对话", color = mutedInk(), fontSize = 12.sp, modifier = Modifier.padding(horizontal = 4.dp))
         Spacer(Modifier.height(5.dp))
-        OutlinedTextField(
-            value = search,
-            onValueChange = { search = it },
-            modifier = Modifier.fillMaxWidth(),
-            placeholder = { Text("搜索对话") },
-            singleLine = true,
-            shape = RoundedCornerShape(14.dp)
-        )
-        Spacer(Modifier.height(7.dp))
-        Button(onClick = onNew, modifier = Modifier.fillMaxWidth().height(42.dp)) { Text("＋ 新建对话", fontSize = 14.sp) }
-        Spacer(Modifier.height(3.dp))
 
         LazyColumn(modifier = Modifier.weight(1f), verticalArrangement = Arrangement.spacedBy(3.dp)) {
             groups.forEach { group ->
@@ -1429,9 +1607,14 @@ private fun SessionDrawer(
                             .padding(horizontal = 3.dp, vertical = 7.dp),
                         verticalAlignment = Alignment.CenterVertically
                     ) {
-                        Text(if (expanded) "▾" else "▸", color = primaryInk(), fontSize = 16.sp)
-                        Spacer(Modifier.width(8.dp))
-                        Text(group.channel.label, color = primaryInk(), fontSize = 14.sp, fontWeight = FontWeight.SemiBold, modifier = Modifier.weight(1f))
+                        Icon(
+                            if (expanded) Icons.Filled.KeyboardArrowDown else Icons.Filled.ChevronRight,
+                            contentDescription = null,
+                            tint = mutedInk(),
+                            modifier = Modifier.size(18.dp),
+                        )
+                        Spacer(Modifier.width(6.dp))
+                        Text(group.channel.label, color = mutedInk(), fontSize = 13.sp, fontWeight = FontWeight.Medium, modifier = Modifier.weight(1f))
                         Text("${group.sessions.size}", color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 12.sp)
                     }
                 }
@@ -1445,45 +1628,55 @@ private fun SessionDrawer(
                                     .fillMaxWidth()
                                     .background(
                                         if (active) MaterialTheme.colorScheme.surfaceVariant else Color.Transparent,
-                                        RoundedCornerShape(10.dp)
+                                        RoundedCornerShape(6.dp)
                                     )
                                     .clickable {
                                         menuSessionId = null
                                         onSelect(session.id)
                                     }
-                                    .padding(start = 10.dp, end = 2.dp, top = 6.dp, bottom = 6.dp),
+                                    .padding(start = 12.dp, end = 2.dp, top = 9.dp, bottom = 9.dp),
                                 verticalAlignment = Alignment.CenterVertically
                             ) {
                                 Column(Modifier.weight(1f)) {
                                     Text(
                                         session.displayTitle,
-                                        color = primaryInk(),
+                                        color = MaterialTheme.colorScheme.onSurface,
                                         fontWeight = if (active) FontWeight.SemiBold else FontWeight.Normal,
                                         maxLines = 1,
                                         fontSize = 14.sp
                                     )
                                     Text("${session.messageCount} 条消息", color = MaterialTheme.colorScheme.onSurfaceVariant, fontSize = 11.sp)
                                 }
-                                Text(
-                                    "⋮",
-                                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                                    fontSize = 22.sp,
-                                    modifier = Modifier
-                                        .clickable { menuSessionId = if (menuSessionId == session.id) null else session.id }
-                                        .padding(horizontal = 12.dp, vertical = 4.dp)
-                                )
-                            }
-                            if (menuSessionId == session.id) {
-                                Card(
-                                    modifier = Modifier.align(Alignment.CenterEnd).padding(end = 42.dp),
-                                    colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-                                    elevation = CardDefaults.cardElevation(defaultElevation = 6.dp)
-                                ) {
-                                    Row(Modifier.padding(horizontal = 4.dp)) {
-                                        TextButton(onClick = { menuSessionId = null; onRename(session) }) { Text("重命名") }
-                                        TextButton(onClick = { menuSessionId = null; onDelete(session) }) {
-                                            Text("删除", color = MaterialTheme.colorScheme.error)
-                                        }
+                                Box {
+                                    IconButton(
+                                        onClick = { menuSessionId = session.id },
+                                        modifier = Modifier.size(38.dp)
+                                    ) {
+                                        Icon(
+                                            Icons.Filled.MoreVert,
+                                            contentDescription = "对话操作",
+                                            tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                                            modifier = Modifier.size(19.dp)
+                                        )
+                                    }
+                                    DropdownMenu(
+                                        expanded = menuSessionId == session.id,
+                                        onDismissRequest = { menuSessionId = null }
+                                    ) {
+                                        DropdownMenuItem(
+                                            text = { Text("重命名") },
+                                            onClick = {
+                                                menuSessionId = null
+                                                onRename(session)
+                                            }
+                                        )
+                                        DropdownMenuItem(
+                                            text = { Text("删除", color = MaterialTheme.colorScheme.error) },
+                                            onClick = {
+                                                menuSessionId = null
+                                                onDelete(session)
+                                            }
+                                        )
                                     }
                                 }
                             }
@@ -1492,6 +1685,5 @@ private fun SessionDrawer(
                 }
             }
         }
-        Box(Modifier.fillMaxWidth().height(3.dp).background(MaterialTheme.colorScheme.tertiary, RoundedCornerShape(2.dp)))
     }
 }

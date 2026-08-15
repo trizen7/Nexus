@@ -6,16 +6,21 @@ import com.google.gson.JsonElement
 import com.google.gson.JsonObject
 import com.google.gson.JsonNull
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.suspendCancellableCoroutine
 import kotlinx.coroutines.withContext
+import okhttp3.Call
+import okhttp3.Callback
 import okhttp3.MediaType.Companion.toMediaType
 import okhttp3.MultipartBody
 import okhttp3.OkHttpClient
 import okhttp3.Request
 import okhttp3.RequestBody
 import okhttp3.RequestBody.Companion.toRequestBody
+import okhttp3.Response
 import okio.BufferedSink
 import java.io.IOException
 import java.io.InputStream
+import java.io.InterruptedIOException
 import java.net.ConnectException
 import java.net.NoRouteToHostException
 import java.net.SocketException
@@ -100,11 +105,44 @@ class HermesApiClient(
         }
     }
 
-    suspend fun listModels(): List<HermesModel> = withContext(Dispatchers.IO) {
-        val root = getJson("v1/models")
-        root.array("data").mapNotNull { element ->
-            element.asJsonObjectOrNull()?.toModel()
+    suspend fun listModelDirectory(refresh: Boolean = false): HermesModelDirectory = withContext(Dispatchers.IO) {
+        val root = getJson("api/model/options?explicit_only=true&refresh=${if (refresh) 1 else 0}")
+        val currentModel = root.string("model").ifBlank { null }
+        val currentProvider = root.string("provider").ifBlank { null }
+        val providers = root.array("providers").mapNotNull { it.asJsonObjectOrNull() }
+        val configuredProviders = providers.filter { provider -> provider.string("slug").isNotBlank() }
+        val authenticatedProviders = configuredProviders.filter { provider ->
+            provider.get("authenticated")
+                ?.takeUnless { it.isJsonNull }
+                ?.let { runCatching { it.asBoolean }.getOrNull() }
+                ?: true
         }
+        val models = authenticatedProviders.flatMap { provider ->
+            val providerId = provider.string("slug").trim()
+            val providerName = provider.string("name").trim().ifBlank { providerId }
+            val unavailable = provider.array("unavailable_models")
+                .mapNotNull { item -> runCatching { item.asString }.getOrNull() }
+                .toSet()
+            provider.array("models").mapNotNull { item ->
+                val modelId = runCatching { item.asString.trim() }.getOrNull().orEmpty()
+                if (modelId.isBlank()) null else HermesModel(
+                    id = modelId,
+                    providerId = providerId,
+                    providerName = providerName,
+                    isCurrent = modelId == currentModel &&
+                        currentProvider in setOf(providerId, "custom:$providerId"),
+                    available = modelId !in unavailable
+                )
+            }
+        }.distinctBy { model -> model.providerId to model.id }
+        val selectedProvider = models.firstOrNull(HermesModel::isCurrent)?.providerId ?: currentProvider
+        HermesModelDirectory(
+            models = models,
+            currentModelId = currentModel,
+            currentProviderId = selectedProvider,
+            configuredProviderCount = configuredProviders.size,
+            authenticatedProviderCount = authenticatedProviders.size
+        )
     }
 
     suspend fun listCronJobs(): List<HermesCronJob> = withContext(Dispatchers.IO) {
@@ -114,8 +152,14 @@ class HermesApiClient(
         }
     }
 
-    suspend fun createSession(): HermesSession = withContext(Dispatchers.IO) {
-        val payload = "{}"
+    suspend fun createSession(
+        inferenceProvider: String? = null,
+        inferenceModel: String? = null,
+        reasoningEffort: String? = null
+    ): HermesSession = withContext(Dispatchers.IO) {
+        val body = mutableMapOf<String, Any>()
+        addRuntimeSelection(body, inferenceProvider, inferenceModel, reasoningEffort)
+        val payload = gson.toJson(body)
         val root = requestJson(
             Request.Builder()
                 .url(baseUrl + "api/sessions")
@@ -123,6 +167,29 @@ class HermesApiClient(
         )
         val session = root.objectValue("session")
         session.toSession() ?: error("服务器没有返回有效会话")
+    }
+
+    suspend fun lockSessionModel(
+        sessionId: String,
+        inferenceProvider: String,
+        inferenceModel: String,
+        reasoningEffort: String? = null
+    ) = withContext(Dispatchers.IO) {
+        val body = mutableMapOf<String, Any>()
+        addRuntimeSelection(body, inferenceProvider, inferenceModel, reasoningEffort)
+        val root = requestJson(
+            Request.Builder()
+                .url(baseUrl + "api/sessions/${encodePathSegment(sessionId)}/model")
+                .post(gson.toJson(body).toRequestBody(jsonType))
+        )
+        val runtime = root.objectValue("runtime")
+        val acknowledgedModel = runtime.string("model").trim()
+        val acknowledgedProvider = runtime.string("provider").trim()
+        val providerMatches = acknowledgedProvider == inferenceProvider ||
+            acknowledgedProvider.removePrefix("custom:") == inferenceProvider.removePrefix("custom:")
+        check(acknowledgedModel == inferenceModel && providerMatches) {
+            "Hermes 未确认所选模型，请刷新模型列表后重试"
+        }
     }
 
     suspend fun renameSession(sessionId: String, title: String): HermesSession = withContext(Dispatchers.IO) {
@@ -257,17 +324,32 @@ class HermesApiClient(
         )
     }
 
-    suspend fun stopSessionRun(sessionId: String): Boolean = withContext(Dispatchers.IO) {
+    suspend fun stopSessionRun(sessionId: String): Boolean {
         val request = authorizedRequest(baseUrl + "api/sessions/${encodePathSegment(sessionId)}/run/stop")
             .post(ByteArray(0).toRequestBody(null))
             .build()
-        httpClient.newCall(request).execute().use { response ->
-            val text = response.body?.string().orEmpty()
-            if (!response.isSuccessful) {
-                throw responseHttpException(response.code, text, "停止回答")
-            }
-            val root = gson.fromJson(text, JsonObject::class.java) ?: JsonObject()
-            root.get("stopped")?.takeUnless { it.isJsonNull }?.asBoolean ?: false
+        return suspendCancellableCoroutine { continuation ->
+            val call = httpClient.newCall(request)
+            continuation.invokeOnCancellation { call.cancel() }
+            call.enqueue(object : Callback {
+                override fun onFailure(call: Call, e: IOException) {
+                    if (continuation.isActive) continuation.resumeWith(Result.failure(e))
+                }
+
+                override fun onResponse(call: Call, response: Response) {
+                    val result = runCatching {
+                        response.use {
+                            val text = it.body?.string().orEmpty()
+                            if (!it.isSuccessful) {
+                                throw responseHttpException(it.code, text, "停止回答")
+                            }
+                            val root = gson.fromJson(text, JsonObject::class.java) ?: JsonObject()
+                            root.get("stopped")?.takeUnless { value -> value.isJsonNull }?.asBoolean ?: false
+                        }
+                    }
+                    if (continuation.isActive) continuation.resumeWith(result)
+                }
+            })
         }
     }
 
@@ -331,10 +413,20 @@ class HermesApiClient(
         )
     }
 
-    suspend fun transcribeAudio(name: String, content: ByteArray): TranscribedAudio = withContext(Dispatchers.IO) {
+    suspend fun transcribeAudio(
+        name: String,
+        content: ByteArray,
+        ephemeral: Boolean = false,
+    ): TranscribedAudio = withContext(Dispatchers.IO) {
+        val audioType = when (name.substringAfterLast('.', missingDelimiterValue = "").lowercase()) {
+            "wav" -> "audio/wav"
+            "m4a", "mp4" -> "audio/mp4"
+            else -> "application/octet-stream"
+        }
         val multipart = MultipartBody.Builder()
             .setType(MultipartBody.FORM)
-            .addFormDataPart("file", name, content.toRequestBody("audio/mp4".toMediaType()))
+            .apply { if (ephemeral) addFormDataPart("ephemeral", "true") }
+            .addFormDataPart("file", name, content.toRequestBody(audioType.toMediaType()))
             .build()
         val root = requestJson(
             Request.Builder()
@@ -354,68 +446,128 @@ class HermesApiClient(
         )
     }
 
+    suspend fun synthesizeSpeech(text: String, voice: String): ByteArray {
+        val payload = gson.toJson(mapOf("text" to text, "voice" to voice))
+        val request = authorized(
+            Request.Builder()
+                .url(baseUrl + "api/audio/speech")
+                .post(payload.toRequestBody(jsonType))
+                .header("Accept", "audio/mpeg")
+        ).build()
+        return suspendCancellableCoroutine { continuation ->
+            val call = httpClient.newCall(request)
+            continuation.invokeOnCancellation { call.cancel() }
+            call.enqueue(object : Callback {
+                override fun onFailure(call: Call, e: IOException) {
+                    continuation.resumeWith(Result.failure(e))
+                }
+
+                override fun onResponse(call: Call, response: Response) {
+                    val result = runCatching {
+                        response.use {
+                            if (!it.isSuccessful) {
+                                val errorText = it.body?.string().orEmpty()
+                                throw responseHttpException(it.code, errorText, "语音合成")
+                            }
+                            it.body?.bytes()?.takeIf(ByteArray::isNotEmpty)
+                                ?: error("Gateway 没有返回语音音频")
+                        }
+                    }
+                    result.fold(
+                        onSuccess = { audio ->
+                            continuation.resumeWith(Result.success(audio))
+                        },
+                        onFailure = { error ->
+                            continuation.resumeWith(Result.failure(error))
+                        },
+                    )
+                }
+            })
+        }
+    }
+
     suspend fun uploadStream(
         name: String,
         mimeType: String?,
         size: Long,
         openStream: () -> InputStream,
         onProgress: (Int) -> Unit = {}
-    ): UploadedFile = withContext(Dispatchers.IO) {
-        val fileType = (mimeType ?: "application/octet-stream").toMediaType()
-        val body = object : RequestBody() {
-            override fun contentType() = fileType
-            override fun contentLength() = size
-            override fun writeTo(sink: BufferedSink) {
-                openStream().use { input ->
-                    val buffer = ByteArray(256 * 1024)
-                    var sent = 0L
-                    var lastProgress = -5
-                    while (true) {
-                        if (Thread.currentThread().isInterrupted) throw java.io.InterruptedIOException("上传已取消")
-                        val count = input.read(buffer)
-                        if (count < 0) break
-                        sink.write(buffer, 0, count)
-                        sent += count
-                        val progress = if (size > 0) ((sent * 100) / size).toInt().coerceIn(0, 100) else 0
-                        if (progress >= lastProgress + 5 || progress == 100) {
-                            lastProgress = progress
-                            onProgress(progress)
-                        }
-                    }
-                    if (lastProgress < 100) onProgress(100)
-                }
-            }
-        }
+    ): UploadedFile {
+        require(size <= MAX_UPLOAD_BYTES) { "文件不能超过 50MB" }
+        val body = boundedUploadRequestBody(mimeType, size, openStream, onProgress = onProgress)
         val multipart = MultipartBody.Builder()
             .setType(MultipartBody.FORM)
             .addFormDataPart("file", name, body)
             .build()
-        parseUploadedFile(
-            requestJson(Request.Builder().url(baseUrl + "api/uploads").post(multipart)),
-            name,
-            mimeType
-        )
+        val request = authorized(Request.Builder().url(baseUrl + "api/uploads").post(multipart)).build()
+        return executeUploadRequest(request, name, mimeType)
     }
 
     suspend fun uploadFile(
         name: String,
         mimeType: String?,
         content: ByteArray
-    ): UploadedFile = withContext(Dispatchers.IO) {
+    ): UploadedFile {
+        require(content.size.toLong() <= MAX_UPLOAD_BYTES) { "文件不能超过 50MB" }
         val fileType = (mimeType ?: "application/octet-stream").toMediaType()
         val multipart = MultipartBody.Builder()
             .setType(MultipartBody.FORM)
             .addFormDataPart("file", name, content.toRequestBody(fileType))
             .build()
-        parseUploadedFile(
-            requestJson(
-                Request.Builder()
-                    .url(baseUrl + "api/uploads")
-                    .post(multipart)
-            ),
-            name,
-            mimeType
-        )
+        val request = authorized(Request.Builder().url(baseUrl + "api/uploads").post(multipart)).build()
+        return executeUploadRequest(request, name, mimeType)
+    }
+
+    private suspend fun executeUploadRequest(
+        request: Request,
+        fallbackName: String,
+        fallbackMime: String?,
+    ): UploadedFile = suspendCancellableCoroutine { continuation ->
+        val call = httpClient.newCall(request)
+        continuation.invokeOnCancellation { call.cancel() }
+        call.enqueue(object : Callback {
+            override fun onFailure(call: Call, e: IOException) {
+                continuation.resumeWith(Result.failure(e))
+            }
+
+            override fun onResponse(call: Call, response: Response) {
+                val result = runCatching {
+                    response.use {
+                        val responseText = it.body?.string().orEmpty()
+                        if (!it.isSuccessful) {
+                            throw responseHttpException(it.code, responseText, "文件上传")
+                        }
+                        val root = gson.fromJson(responseText, JsonObject::class.java) ?: JsonObject()
+                        parseUploadedFile(root, fallbackName, fallbackMime)
+                    }
+                }
+                result.fold(
+                    onSuccess = { uploaded ->
+                        continuation.resume(uploaded) { _, orphaned, _ ->
+                            deleteUploadedFileBestEffort(request, orphaned.id)
+                        }
+                    },
+                    onFailure = { error ->
+                        continuation.resumeWith(Result.failure(error))
+                    },
+                )
+            }
+        })
+    }
+
+    private fun deleteUploadedFileBestEffort(uploadRequest: Request, fileId: String) {
+        if (fileId.isBlank()) return
+        val request = uploadRequest.newBuilder()
+            .url(baseUrl + "api/files/${encodePathSegment(fileId)}")
+            .delete()
+            .build()
+        httpClient.newCall(request).enqueue(object : Callback {
+            override fun onFailure(call: Call, e: IOException) = Unit
+
+            override fun onResponse(call: Call, response: Response) {
+                response.close()
+            }
+        })
     }
 
     suspend fun streamChat(
@@ -424,10 +576,13 @@ class HermesApiClient(
         images: List<ChatImage> = emptyList(),
         attachmentIds: List<String> = emptyList(),
         attachmentKinds: Map<String, String> = emptyMap(),
+        inferenceProvider: String? = null,
         inferenceModel: String? = null,
         reasoningEffort: String? = null,
         onEvent: (HermesStreamEvent) -> Unit = {}
     ): List<HermesStreamEvent> = withContext(Dispatchers.IO) {
+        val selectedProvider = inferenceProvider?.trim()?.takeIf { it.isNotEmpty() }
+        val selectedModel = inferenceModel?.trim()?.takeIf { it.isNotEmpty() }
         val userContent: Any = if (images.isEmpty()) {
             message
         } else {
@@ -454,20 +609,88 @@ class HermesApiClient(
         )
         if (attachmentIds.isNotEmpty()) body["attachment_ids"] = attachmentIds
         if (attachmentKinds.isNotEmpty()) body["attachment_kinds"] = attachmentKinds
-        inferenceModel?.trim()?.takeIf { it.isNotEmpty() }?.let { body["inference_model"] = it }
-        reasoningEffort?.trim()?.takeIf { it.isNotEmpty() }?.let { body["reasoning_effort"] = it }
+        addRuntimeSelection(body, inferenceProvider, inferenceModel, reasoningEffort)
+        if (selectedProvider != null && selectedModel != null) {
+            // Older Nexus Gateway releases only understand inference_model. The current
+            // Gateway removes these aliases before calling the original Hermes API.
+            body["inference_provider"] = selectedProvider
+            body["inference_model"] = selectedModel
+        }
+        reasoningEffort?.trim()?.lowercase()?.takeIf { it.isNotEmpty() }?.let { effort ->
+            // Compatibility for Nexus Gateway builds that predate native model_options forwarding.
+            body["reasoning_effort"] = effort
+        }
         val payload = gson.toJson(body)
         val request = authorizedRequest(
             baseUrl + "api/sessions/${encodePathSegment(sessionId)}/chat/stream"
         ).post(payload.toRequestBody(jsonType)).build()
 
-        executeStreamRequest(request, onEvent)
+        executeStreamRequest(request) { event ->
+            val runtime = when (event) {
+                is HermesStreamEvent.AssistantCompleted -> event.runtime
+                is HermesStreamEvent.Completed -> event.runtime
+                else -> null
+            }
+            if (
+                selectedProvider != null &&
+                selectedModel != null &&
+                runtime != null &&
+                !runtime.matches(selectedProvider, selectedModel)
+            ) {
+                throw HermesModelMismatchException(
+                    expectedProvider = selectedProvider,
+                    expectedModel = selectedModel,
+                    actualProvider = runtime.provider,
+                    actualModel = runtime.model,
+                )
+            }
+            onEvent(event)
+        }
     }
 
-    private fun executeStreamRequest(
+    private fun addRuntimeSelection(
+        body: MutableMap<String, Any>,
+        inferenceProvider: String?,
+        inferenceModel: String?,
+        reasoningEffort: String?
+    ) {
+        val selectedProvider = inferenceProvider?.trim()?.takeIf { it.isNotEmpty() }
+        val selectedModel = inferenceModel?.trim()?.takeIf { it.isNotEmpty() }
+        if (selectedProvider != null && selectedModel != null) {
+            body["provider"] = selectedProvider
+            body["model"] = selectedModel
+            body["require_model_lock"] = true
+        }
+        reasoningEffort?.trim()?.lowercase()?.takeIf { it.isNotEmpty() }?.let { effort ->
+            body["model_options"] = mapOf(
+                "reasoning_effort" to effort,
+                "reasoning" to mapOf("enabled" to true, "effort" to effort),
+            )
+        }
+    }
+
+    private suspend fun executeStreamRequest(
         request: Request,
         onEvent: (HermesStreamEvent) -> Unit
-    ): List<HermesStreamEvent> = streamHttpClient.newCall(request).execute().use { response ->
+    ): List<HermesStreamEvent> = suspendCancellableCoroutine { continuation ->
+        val call = streamHttpClient.newCall(request)
+        continuation.invokeOnCancellation { call.cancel() }
+        call.enqueue(object : Callback {
+            override fun onFailure(call: Call, e: IOException) {
+                if (continuation.isActive) continuation.resumeWith(Result.failure(e))
+            }
+
+            override fun onResponse(call: Call, response: Response) {
+                val result = runCatching { parseStreamResponse(response, onEvent) }
+                if (continuation.isActive) continuation.resumeWith(result)
+            }
+        })
+    }
+
+    private fun parseStreamResponse(
+        response: Response,
+        onEvent: (HermesStreamEvent) -> Unit
+    ): List<HermesStreamEvent> = response.use {
         if (!response.isSuccessful) {
             val responseText = response.body?.string().orEmpty()
             throw responseHttpException(response.code, responseText, "对话请求")
@@ -579,6 +802,16 @@ class HermesHttpException(
 class HermesStreamDetachedException(cause: IOException) :
     IOException("消息已提交，实时连接已中断", cause)
 
+class HermesModelMismatchException(
+    expectedProvider: String,
+    expectedModel: String,
+    actualProvider: String,
+    actualModel: String,
+) : IllegalStateException(
+    "模型切换未生效：请求 $expectedProvider / $expectedModel，" +
+        "Hermes 实际使用 ${actualProvider.ifBlank { "未知供应商" }} / ${actualModel.ifBlank { "未知模型" }}"
+)
+
 private fun throwableChain(error: Throwable): Sequence<Throwable> =
     generateSequence(error) { it.cause }
 
@@ -612,8 +845,10 @@ private fun certificateConnectionMessage(serverUrl: String?): String {
 fun friendlyNetworkError(error: Throwable, serverUrl: String? = null): String {
     val causes = throwableChain(error).toList()
     val httpError = causes.filterIsInstance<HermesHttpException>().firstOrNull()
+    val modelMismatch = causes.filterIsInstance<HermesModelMismatchException>().firstOrNull()
     return when {
         error is kotlinx.coroutines.CancellationException -> "操作已取消"
+        modelMismatch != null -> modelMismatch.message ?: "Hermes 实际模型与所选模型不一致"
         httpError?.statusCode == 401 && httpError.operation == "登录" -> "登录失败：账号或密码错误"
         httpError?.statusCode == 401 && httpError.serverCode == "unauthorized" ->
             "登录已失效，请重新输入密码"
@@ -643,6 +878,58 @@ private fun defaultHttpClient(): OkHttpClient =
         .retryOnConnectionFailure(true)
         .pingInterval(30, TimeUnit.SECONDS)
         .build()
+
+private const val MAX_UPLOAD_BYTES = 50L * 1024 * 1024
+
+internal fun boundedUploadRequestBody(
+    mimeType: String?,
+    declaredSize: Long,
+    openStream: () -> InputStream,
+    maxBytes: Long = MAX_UPLOAD_BYTES,
+    onProgress: (Int) -> Unit = {},
+): RequestBody {
+    require(maxBytes >= 0L)
+    require(declaredSize <= maxBytes) { "文件不能超过 50MB" }
+    val fileType = (mimeType ?: "application/octet-stream").toMediaType()
+    return object : RequestBody() {
+        override fun contentType() = fileType
+
+        override fun contentLength() = declaredSize.takeIf { it > 0L } ?: -1L
+
+        override fun writeTo(sink: BufferedSink) {
+            openStream().use { input ->
+                val buffer = ByteArray(256 * 1024)
+                var sent = 0L
+                var lastProgress = -5
+                while (true) {
+                    if (Thread.currentThread().isInterrupted) throw InterruptedIOException("上传已取消")
+                    val allowed = (maxBytes - sent + 1L).coerceAtMost(buffer.size.toLong()).toInt()
+                    val count = input.read(buffer, 0, allowed)
+                    if (count < 0) break
+                    sent += count
+                    if (sent > maxBytes) throw IOException("文件不能超过 50MB")
+                    if (declaredSize > 0L && sent > declaredSize) {
+                        throw IOException("文件大小发生变化，请重新选择")
+                    }
+                    sink.write(buffer, 0, count)
+                    val progress = if (declaredSize > 0L) {
+                        ((sent * 100L) / declaredSize).toInt().coerceIn(0, 100)
+                    } else {
+                        0
+                    }
+                    if (progress >= lastProgress + 5 || progress == 100) {
+                        lastProgress = progress
+                        onProgress(progress)
+                    }
+                }
+                if (declaredSize > 0L && sent != declaredSize) {
+                    throw IOException("文件大小发生变化，请重新选择")
+                }
+                if (lastProgress < 100) onProgress(100)
+            }
+        }
+    }
+}
 
 private fun JsonObject.contentAndImages(): Pair<String, List<ChatImage>> {
     val contentElement = get("content")

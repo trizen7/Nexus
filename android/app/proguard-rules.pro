@@ -9,3 +9,9 @@
 -keep class app.nexus.mobile.CachedImage { *; }
 -keep class app.nexus.mobile.CachedFile { *; }
 -keep class app.nexus.mobile.CachedMessage { *; }
+
+# sherpa-onnx native JNI resolves Kotlin configuration classes and their fields
+# by their original binary names (for example modelConfig and sampleRate). The
+# upstream AAR does not currently ship consumer keep rules, so release R8 must
+# preserve this package or X-ASR fails at runtime with "failed to get field ID".
+-keep class com.k2fsa.sherpa.onnx.** { *; }

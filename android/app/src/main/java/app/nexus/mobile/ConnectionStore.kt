@@ -100,13 +100,7 @@ class ConnectionStore(context: Context) {
     }
 
     fun saveSelectedReasoningEffort(effort: ReasoningEffort) {
-        val editor = preferences.edit()
-        if (effort == ReasoningEffort.DEFAULT) {
-            editor.remove(KEY_SELECTED_REASONING_EFFORT)
-        } else {
-            editor.putString(KEY_SELECTED_REASONING_EFFORT, effort.name)
-        }
-        editor.apply()
+        preferences.edit().putString(KEY_SELECTED_REASONING_EFFORT, effort.name).apply()
     }
 
     fun loadRuntimeConfigs(): PersistedRuntimeConfigBundle {
@@ -206,18 +200,21 @@ data class PersistedRuntimeConfigBundle(
 
 data class PersistedConversationRuntimeConfig(
     val inferenceModelId: String? = null,
-    val reasoningEffort: String? = null
+    val reasoningEffort: String? = null,
+    val inferenceProviderId: String? = null
 ) {
     fun toRuntimeConfig(): ConversationRuntimeConfig = ConversationRuntimeConfig(
         inferenceModelId = inferenceModelId?.takeIf(String::isNotBlank),
-        reasoningEffort = ReasoningEffort.fromStored(reasoningEffort)
+        reasoningEffort = ReasoningEffort.fromStored(reasoningEffort),
+        inferenceProviderId = inferenceProviderId?.takeIf(String::isNotBlank)
     )
 }
 
 fun ConversationRuntimeConfig.toPersistedRuntimeConfig(): PersistedConversationRuntimeConfig =
     PersistedConversationRuntimeConfig(
         inferenceModelId = inferenceModelId?.takeIf(String::isNotBlank),
-        reasoningEffort = reasoningEffort.takeUnless { it == ReasoningEffort.DEFAULT }?.name
+        reasoningEffort = reasoningEffort.takeUnless { it == ReasoningEffort.DEFAULT }?.name,
+        inferenceProviderId = inferenceProviderId?.takeIf(String::isNotBlank)
     )
 
 fun migrateRuntimeConfigBundle(
