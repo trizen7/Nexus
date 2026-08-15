@@ -23,7 +23,13 @@ Nexus Gateway 推荐使用 Docker Compose 部署。容器只包含移动网关�
    └─ media/
 ```
 
-`data/` 是唯一需要长期保留和备份的运行数据目录。由旧版本升级时，历史 `data/tls/` 可以保留，但 0.0.7 Gateway 不再读取它。
+`data/` 是唯一需要长期保留和备份的运行数据目录。Gateway 以
+`NEXUS_DATA_DIR` 定义这条写入边界；`NEXUS_CONFIG_FILE`、
+`NEXUS_CREDENTIALS_FILE`、`NEXUS_BOOTSTRAP_TOKEN_FILE` 和
+`NEXUS_MEDIA_DIR` 如需覆盖，解析后的路径也必须位于该目录内，否则
+Gateway 会拒绝启动。旧部署若曾把这些文件分散到不同目录，应先把它们
+迁入同一个 Nexus 数据目录再升级。由旧版本升级时，历史 `data/tls/`
+可以保留，但 0.0.7 Gateway 不再读取它。
 
 ## 1. 首次初始化
 

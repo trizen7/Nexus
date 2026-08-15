@@ -14,3 +14,7 @@ Hermes 是 Nexus 的**原版、只读外部依赖**。本仓库中的任何开�
 8. **不得泄露敏感信息。** 禁止在输出、日志、提交、成品或文档中暴露密码、Hermes Key、Token、Session Secret、Bootstrap Token、私钥、证书内容或用户日志。
 
 发现任何可能越过上述边界的实现时，必须停止该操作，改为仅通过原版 Hermes API 或 Nexus 自有文件完成。
+
+## Debug 安装包目录
+
+Android Debug 安装包统一输出到 `成品/test/app-debug.apk`。每次生成新的 Debug APK 时直接覆盖该文件，不再为 Debug APK 新建带版本号的验收目录，除非用户另有要求。

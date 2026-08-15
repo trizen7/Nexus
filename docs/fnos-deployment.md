@@ -6,12 +6,12 @@ Nexus Gateway 提供飞牛 fnOS 原生应用包。安装包只部署 Nexus 自�
 
 同一版本提供两个架构专用安装包：
 
-- x86_64 / amd64 NAS：`Nexus-fnOS-0.1.10-amd64.fpk`
-- ARM64 / aarch64 NAS：`Nexus-fnOS-0.1.10-arm64.fpk`
+- x86_64 / amd64 NAS：`Nexus-fnOS-0.1.17-amd64.fpk`
+- ARM64 / aarch64 NAS：`Nexus-fnOS-0.1.17-arm64.fpk`
 - 统一校验文件：`SHA256SUMS.txt`
 - 默认 HTTP 端口：`8787`
 
-当前 fnOS 包版本为 `0.1.10`，与 Gateway `0.1.10` 完全一致。每个 FPK 都内置对应架构的 Gateway 原生可执行运行时和 CA 信任库，不包含 Docker 镜像、Compose 项目或在线下载器。
+当前 fnOS 包版本为 `0.1.17`，与 Gateway `0.1.17` 完全一致。每个 FPK 都内置对应架构的 Gateway 原生可执行运行时和 CA 信任库，不包含 Docker 镜像、Compose 项目或在线下载器。
 
 **fnOS 设备不需要安装 Docker，也不需要授予 Nexus Docker 权限。** 安装、升级和启动均不会访问 GitHub、GHCR、Docker Hub 或其他容器仓库。GHCR/Docker 镜像仅作为普通 Gateway 部署的可选渠道，不是 fnOS FPK 的依赖。
 
@@ -23,6 +23,8 @@ fnOS 的 `8787` 是正式应用默认端口。仓库中成品测试环境使用�
 2. 用户已经独立运行原版 Hermes API Server。
 3. 已取得 Hermes API 地址和 API Server Key。
 4. NAS 的 `8787` 端口未被其他服务占用，并为 FPK、临时解包和 Nexus 数据预留足够空间。
+
+安装完成后，如需在线语音识别，请登录 Nexus 管理页，在“系统 → OpenAI 兼容在线 ASR”填写 API Base URL、API Key 和模型并启用。Base URL 通常以 `/v1` 结尾；Gateway 会调用其 `/audio/transcriptions` 端点。该配置属于 Nexus，不会写入或修改 Hermes。
 
 Hermes 与 Nexus 位于同一台 NAS 时，fnOS 版 Nexus 作为主机原生进程运行，可直接访问 Hermes 默认的回环监听地址：
 
@@ -110,8 +112,8 @@ Windows 示例：
 也可以通过 `-FnpackPath` 显式指定已下载并校验的 `fnpack 1.2.3`。输出为：
 
 ~~~text
-dist/Nexus-fnOS-0.1.10-amd64.fpk
-dist/Nexus-fnOS-0.1.10-arm64.fpk
+dist/Nexus-fnOS-0.1.17-amd64.fpk
+dist/Nexus-fnOS-0.1.17-arm64.fpk
 dist/SHA256SUMS.txt
 ~~~
 
@@ -119,11 +121,11 @@ dist/SHA256SUMS.txt
 
 ~~~powershell
 .local-test\venv\Scripts\python.exe scripts\verify_fnos_package.py `
-  dist\Nexus-fnOS-0.1.10-amd64.fpk `
+  dist\Nexus-fnOS-0.1.17-amd64.fpk `
   --sha256-file dist\SHA256SUMS.txt
 
 .local-test\venv\Scripts\python.exe scripts\verify_fnos_package.py `
-  dist\Nexus-fnOS-0.1.10-arm64.fpk `
+  dist\Nexus-fnOS-0.1.17-arm64.fpk `
   --sha256-file dist\SHA256SUMS.txt
 ~~~
 

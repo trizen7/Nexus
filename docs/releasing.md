@@ -7,7 +7,8 @@
 1. 按语义化版本更新 Android `versionCode/versionName`、Gateway `__version__`、Compose 镜像标签、README 和 Docker 契约测试。
 2. 更新 `fnos/nexus-gateway/manifest` 的 fnOS 修订号，并同步原生运行时构建、测试与文档。
 3. 依赖、权限或数据流发生变化时，同步更新隐私说明和第三方依赖声明。
-4. 使用 Nexus 自有 Python 环境运行：
+4. Gateway 容器和 fnOS FPK 包含 LGPLv3 的 `edge-tts`。发布前必须实际检查容器和两个 FPK，确认保留 `edge_tts` 可修改 Python 源码、完整 LGPL/MIT 文本和显著通知；未检查或任一项缺失均阻断发布，不得仅凭依赖清单声称合规。
+5. 使用 Nexus 自有 Python 环境运行：
 
 ```powershell
 .local-test\venv\Scripts\python.exe scripts\scan_repository_secrets.py
@@ -63,7 +64,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\build-android-rele
 4. `Nexus-fnOS-<version>-arm64.fpk`
 5. `SHA256SUMS.txt`
 
-`SHA256SUMS.txt` 只包含前四个二进制附件的 SHA-256。发布目录和 GitHub Release 不生成或上传 AAB、独立 `.fpk.sha256`、`release-manifest.json`、误拼的 `renease-manifest.json`、独立第三方声明、更新记录、开发计划或 TODO。第三方许可声明只保留在源码仓库与 Gateway ZIP 内。Release 正文保持为空。
+`SHA256SUMS.txt` 只包含前四个二进制附件的 SHA-256。发布目录和 GitHub Release 不生成或上传 AAB、独立 `.fpk.sha256`、`release-manifest.json`、误拼的 `renease-manifest.json`、独立第三方声明、更新记录、开发计划或 TODO。第三方许可声明保留在源码仓库和 Gateway ZIP 中；Android APK assets 与 fnOS 原生运行时还必须携带各自实际分发组件对应的通知、许可或源码。Release 正文保持为空。
 
 如果不提供两个 fnOS 原生运行时目录，脚本只构建 Android APK 与 Gateway ZIP，不能作为完整正式发布结果。
 

@@ -19,7 +19,10 @@ local.properties
 
 # Android
 android/.gradle/
+android/.gradle-native/
+android/.gradle-user-home/
 android/**/build/
+android/app/libs/sherpa-onnx-1.13.5.aar
 *.apk
 *.aab
 !android/gradle/wrapper/gradle-wrapper.jar
@@ -35,6 +38,7 @@ htmlcov/
 
 # Runtime and user data
 .local-test/
+.nexus-test/
 data/
 gateway/data/
 gateway/logs/
