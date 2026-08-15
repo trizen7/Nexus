@@ -361,3 +361,25 @@ platform skips.
   Streaming Transducers used by calls now use modified beam search and longer
   endpoint tolerance. Models remain verified on-demand downloads and are not
   bundled into the APK.
+- 2026-08-16: Repository takeover and cleanup. Full regression gates passed
+  (Gateway 282 passed/12 skipped; Android 253 unit tests, Lint and Debug APK;
+  web contract; release validation at 0.1.17/versionCode 33; secret scan 986
+  blobs with zero findings). The 0.1.17 feature worktree (ASR/TTS/voice calls,
+  Gateway hardening, scripts, docs) was split into four semantic commits and
+  pushed to `origin/main` (`23538f9..f84efa6`). Disposable intermediates
+  (`.research/`, `.tools/`, `.nexus-test/`, `android/app/build`,
+  `android/.gradle/`) were removed; `.local-test/` and `成品/` acceptance
+  environments were kept. Line endings were normalized (`* text=auto eol=lf`
+  default in `.gitattributes`, repo-level `core.autocrlf=false`) and the
+  change pushed as `a99af61`.
+- 2026-08-16: Version history gap resolved by record. Versions 0.1.11 through
+  0.1.16 exist only as local build products under `成品/v0.1.12` to
+  `成品/v0.1.16` (each with its own `SHA256SUMS.txt`). They were built from an
+  uncommitted worktree during the audit iteration, so no git commit or tag can
+  be attached to them; they were never formal public releases. The first
+  fully tracked release is 0.1.17: annotated tag `v0.1.17` was created on the
+  verified release HEAD (`a99af61`) and pushed to `origin`. The release
+  process in `docs/releasing.md` already requires tagging every version before
+  publishing; the 0.1.11-0.1.16 gap is a one-time deviation, not a policy.
+  Stale local branches `codex/pre-sync-0.0.2` and
+  `codex/mobile-model-cron-management` were deleted.
